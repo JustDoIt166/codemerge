@@ -1,5 +1,6 @@
 use std::io::Write;
 
+use futures::stream::{self, StreamExt};
 use iced::Task;
 use tokio_util::sync::CancellationToken;
 
@@ -11,7 +12,7 @@ use crate::app::model::{
 use crate::processor::merger::{MergedFile, merge_content};
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text};
 use crate::processor::stats::ProcessingStats;
-use crate::processor::walker::collect_candidates;
+use crate::processor::walker::{CandidateFile, collect_candidates};
 use crate::utils::i18n::tr;
 
 pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
@@ -213,39 +214,38 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
 
     let mut merged_files = Vec::new();
     let mut details = Vec::new();
+    let concurrency_limit = file_concurrency_limit(walker.candidates.len());
 
-    for file in walker.candidates {
+    let mut processed_stream = stream::iter(
+        walker
+            .candidates
+            .into_iter()
+            .map(|file| process_candidate_file(file, ctx.options.compress)),
+    )
+    .buffered(concurrency_limit);
+
+    while let Some(outcome) = processed_stream.next().await {
         if ctx.cancel_token.is_cancelled() {
             return Err(tr(lang, "cancelled").to_string());
         }
 
-        let raw = match read_text(&file.absolute).await {
-            Ok(v) => v,
-            Err(_) => {
+        match outcome {
+            FileProcessOutcome::Skipped => {
                 stats.skipped_files += 1;
-                continue;
             }
-        };
-
-        let (compressed, _warn) = compress_by_extension(&file.absolute, &raw, ctx.options.compress);
-        let (chars, tokens) = count_chars_tokens(&compressed);
-
-        stats.processed_files += 1;
-        stats.total_chars += chars;
-        stats.total_tokens += tokens;
-
-        details.push(FileDetail {
-            path: file.relative.clone(),
-            chars,
-            tokens,
-        });
-
-        merged_files.push(MergedFile {
-            path: file.relative,
-            chars,
-            tokens,
-            content: compressed,
-        });
+            FileProcessOutcome::Processed {
+                detail,
+                merged,
+                chars,
+                tokens,
+            } => {
+                stats.processed_files += 1;
+                stats.total_chars += chars;
+                stats.total_tokens += tokens;
+                details.push(detail);
+                merged_files.push(merged);
+            }
+        }
     }
 
     let merged = merge_content(ctx.options.output_format, &walker.tree, &merged_files);
@@ -262,4 +262,52 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
         merged_content_path: Some(path),
         file_details: details,
     })
+}
+
+#[derive(Debug)]
+enum FileProcessOutcome {
+    Skipped,
+    Processed {
+        detail: FileDetail,
+        merged: MergedFile,
+        chars: usize,
+        tokens: usize,
+    },
+}
+
+async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProcessOutcome {
+    let raw = match read_text(&file.absolute).await {
+        Ok(v) => v,
+        Err(_) => return FileProcessOutcome::Skipped,
+    };
+
+    let (compressed, _warn) = compress_by_extension(&file.absolute, &raw, compress);
+    let (chars, tokens) = count_chars_tokens(&compressed);
+
+    FileProcessOutcome::Processed {
+        detail: FileDetail {
+            path: file.relative.clone(),
+            chars,
+            tokens,
+        },
+        merged: MergedFile {
+            path: file.relative,
+            chars,
+            tokens,
+            content: compressed,
+        },
+        chars,
+        tokens,
+    }
+}
+
+fn file_concurrency_limit(total_files: usize) -> usize {
+    if total_files <= 1 {
+        return 1;
+    }
+
+    let workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(4);
+    workers.saturating_mul(4).clamp(4, 64).min(total_files)
 }

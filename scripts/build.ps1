@@ -1,2 +1,2 @@
 $ErrorActionPreference = "Stop"
-cargo build --release
+cargo build --release --locked
