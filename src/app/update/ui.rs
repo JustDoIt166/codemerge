@@ -1,13 +1,19 @@
 use std::fs;
+use std::path::PathBuf;
 
 use chrono::Local;
 use iced::Task;
+use tokio::io::AsyncReadExt;
 
-use crate::app::message::{Message, UiMessage};
+use crate::app::message::{Message, PreviewPayload, UiMessage};
 use crate::app::model::{Model, ProcessingState, Toast, ToastStyle};
 use crate::utils::i18n::tr;
 
+const PREVIEW_LIMIT_BYTES: u64 = 1024 * 1024;
+
 pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
+    let mut task = Task::none();
+
     match msg {
         UiMessage::Reset => {
             model.ui.show_reset_confirmation = true;
@@ -89,7 +95,10 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
             }
         }
         UiMessage::LoadPreview => {
-            load_preview(model, false);
+            task = load_preview(model, false);
+        }
+        UiMessage::PreviewLoaded(res) => {
+            apply_preview_result(model, res);
         }
         UiMessage::LoadAllPreview => {
             model.ui.show_load_all_confirm = true;
@@ -97,7 +106,7 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
         }
         UiMessage::ConfirmLoadAllPreview => {
             model.ui.show_load_all_confirm = false;
-            load_preview(model, true);
+            task = load_preview(model, true);
         }
         UiMessage::CancelLoadAllPreview => {
             model.ui.show_load_all_confirm = false;
@@ -117,7 +126,7 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
     }
 
     super::refresh_preflight(model);
-    Task::none()
+    task
 }
 
 pub fn on_tick(model: &mut Model) -> Task<Message> {
@@ -153,27 +162,29 @@ pub fn on_tick(model: &mut Model) -> Task<Message> {
     Task::none()
 }
 
-fn load_preview(model: &mut Model, all: bool) {
+fn load_preview(model: &mut Model, all: bool) -> Task<Message> {
     let Some(result) = &model.result else {
         model.ui.toast = Some(info_toast(tr(model.language, "no_result")));
-        return;
+        return Task::none();
     };
     let Some(path) = &result.merged_content_path else {
         model.ui.toast = Some(info_toast(tr(model.language, "no_result")));
-        return;
+        return Task::none();
     };
-    let lang = model.language;
+    let path = path.clone();
 
-    match fs::read(path) {
-        Ok(bytes) => {
-            let preview = if all || bytes.len() <= 1024 * 1024 {
-                String::from_utf8_lossy(&bytes).to_string()
-            } else {
-                String::from_utf8_lossy(&bytes[..1024 * 1024]).to_string()
-            };
-            model.ui.preview_content = preview;
-            model.ui.preview_loaded_all = all || bytes.len() <= 1024 * 1024;
-            if model.ui.preview_loaded_all {
+    Task::perform(read_preview_payload(path, all), |res| {
+        Message::Ui(UiMessage::PreviewLoaded(res))
+    })
+}
+
+fn apply_preview_result(model: &mut Model, res: Result<PreviewPayload, String>) {
+    let lang = model.language;
+    match res {
+        Ok(payload) => {
+            model.ui.preview_content = payload.content;
+            model.ui.preview_loaded_all = payload.loaded_all;
+            if payload.loaded_all {
                 model.ui.toast = Some(info_toast(tr(lang, "preview_loaded_all")));
             } else {
                 model.ui.toast = Some(info_toast(tr(lang, "preview_loaded")));
@@ -183,6 +194,32 @@ fn load_preview(model: &mut Model, all: bool) {
             model.ui.toast = Some(error_toast(&format!("{}{}", tr(lang, "preview_failed"), e)));
         }
     }
+}
+
+async fn read_preview_payload(path: PathBuf, all: bool) -> Result<PreviewPayload, String> {
+    let metadata = tokio::fs::metadata(&path)
+        .await
+        .map_err(|e| format!("read metadata failed: {e}"))?;
+    let file_len = metadata.len();
+    let limit = if all {
+        file_len
+    } else {
+        file_len.min(PREVIEW_LIMIT_BYTES)
+    };
+
+    let file = tokio::fs::File::open(&path)
+        .await
+        .map_err(|e| format!("open preview file failed: {e}"))?;
+    let mut bytes = Vec::with_capacity(limit as usize);
+    file.take(limit)
+        .read_to_end(&mut bytes)
+        .await
+        .map_err(|e| format!("read preview file failed: {e}"))?;
+
+    Ok(PreviewPayload {
+        content: String::from_utf8_lossy(&bytes).to_string(),
+        loaded_all: all || file_len <= PREVIEW_LIMIT_BYTES,
+    })
 }
 
 fn copy_to_clipboard(model: &mut Model, content: String) {

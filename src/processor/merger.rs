@@ -8,76 +8,86 @@ pub struct MergedFile {
     pub content: String,
 }
 
-pub fn merge_content(format: OutputFormat, tree: &str, files: &[MergedFile]) -> String {
+pub fn render_prefix(format: OutputFormat, tree: &str) -> String {
+    let mut out = String::new();
     match format {
-        OutputFormat::Default => merge_default(tree, files),
-        OutputFormat::Xml => merge_xml(tree, files),
-        OutputFormat::PlainText => merge_plain(tree, files),
-        OutputFormat::Markdown => merge_markdown(tree, files),
+        OutputFormat::Default => {
+            out.push_str("Directory Structure:\n");
+            out.push_str(tree);
+            out.push_str("\n\n");
+        }
+        OutputFormat::Xml => {
+            out.push_str("<codemerge>\n<directory_structure><![CDATA[\n");
+            out.push_str(tree);
+            out.push_str("\n]]></directory_structure>\n<files>\n");
+        }
+        OutputFormat::PlainText => {
+            out.push_str("---------------- Directory Structure ----------------\n");
+            out.push_str(tree);
+            out.push_str("\n\n---------------- Files ----------------\n");
+        }
+        OutputFormat::Markdown => {
+            out.push_str("# Directory Structure\n\n```text\n");
+            out.push_str(tree);
+            out.push_str("\n```\n\n# Files\n\n");
+        }
     }
+    out
 }
 
-fn merge_default(tree: &str, files: &[MergedFile]) -> String {
+pub fn render_file_entry(format: OutputFormat, file: &MergedFile) -> String {
     let mut out = String::new();
-    out.push_str("Directory Structure:\n");
-    out.push_str(tree);
-    out.push_str("\n\n");
-    for f in files {
-        out.push_str("============================================================\n");
-        out.push_str(&format!(
-            "文件路径: {}\n字符数: {} | Token估算: {}\n\n",
-            f.path, f.chars, f.tokens
-        ));
-        out.push_str(&f.content);
-        out.push_str("\n\n");
+    match format {
+        OutputFormat::Default => {
+            out.push_str("============================================================\n");
+            out.push_str(&format!(
+                "文件路径: {}\n字符数: {} | Token估算: {}\n\n",
+                file.path, file.chars, file.tokens
+            ));
+            out.push_str(&file.content);
+            out.push_str("\n\n");
+        }
+        OutputFormat::Xml => {
+            out.push_str(&format!(
+                "  <file path=\"{}\" chars=\"{}\" tokens=\"{}\"><![CDATA[\n{}\n]]></file>\n",
+                xml_escape(&file.path),
+                file.chars,
+                file.tokens,
+                file.content
+            ));
+        }
+        OutputFormat::PlainText => {
+            out.push_str(&format!(
+                "\nFile: {}\nChars: {} Tokens: {}\n",
+                file.path, file.chars, file.tokens
+            ));
+            out.push_str(&file.content);
+            out.push('\n');
+        }
+        OutputFormat::Markdown => {
+            let lang = lang_from_path(&file.path);
+            out.push_str(&format!(
+                "## {}\n\n- chars: {}\n- tokens: {}\n\n```{}\n{}\n```\n\n",
+                file.path, file.chars, file.tokens, lang, file.content
+            ));
+        }
     }
     out
 }
 
-fn merge_xml(tree: &str, files: &[MergedFile]) -> String {
-    let mut out = String::from("<codemerge>\n<directory_structure><![CDATA[\n");
-    out.push_str(tree);
-    out.push_str("\n]]></directory_structure>\n<files>\n");
-    for f in files {
-        out.push_str(&format!(
-            "  <file path=\"{}\" chars=\"{}\" tokens=\"{}\"><![CDATA[\n{}\n]]></file>\n",
-            xml_escape(&f.path),
-            f.chars,
-            f.tokens,
-            f.content
-        ));
+pub fn render_suffix(format: OutputFormat) -> &'static str {
+    match format {
+        OutputFormat::Xml => "</files>\n</codemerge>\n",
+        OutputFormat::Default | OutputFormat::PlainText | OutputFormat::Markdown => "",
     }
-    out.push_str("</files>\n</codemerge>\n");
-    out
 }
 
-fn merge_plain(tree: &str, files: &[MergedFile]) -> String {
-    let mut out = String::new();
-    out.push_str("---------------- Directory Structure ----------------\n");
-    out.push_str(tree);
-    out.push_str("\n\n---------------- Files ----------------\n");
-    for f in files {
-        out.push_str(&format!(
-            "\nFile: {}\nChars: {} Tokens: {}\n",
-            f.path, f.chars, f.tokens
-        ));
-        out.push_str(&f.content);
-        out.push('\n');
+pub fn merge_content(format: OutputFormat, tree: &str, files: &[MergedFile]) -> String {
+    let mut out = render_prefix(format, tree);
+    for file in files {
+        out.push_str(&render_file_entry(format, file));
     }
-    out
-}
-
-fn merge_markdown(tree: &str, files: &[MergedFile]) -> String {
-    let mut out = String::from("# Directory Structure\n\n```text\n");
-    out.push_str(tree);
-    out.push_str("\n```\n\n# Files\n\n");
-    for f in files {
-        let lang = lang_from_path(&f.path);
-        out.push_str(&format!(
-            "## {}\n\n- chars: {}\n- tokens: {}\n\n```{}\n{}\n```\n\n",
-            f.path, f.chars, f.tokens, lang, f.content
-        ));
-    }
+    out.push_str(render_suffix(format));
     out
 }
 

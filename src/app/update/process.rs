@@ -1,7 +1,6 @@
-use std::io::Write;
-
 use futures::stream::{self, StreamExt};
 use iced::Task;
+use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::message::{Message, ProcessContext, ProcessMessage, ProgressUpdate};
@@ -9,7 +8,7 @@ use crate::app::model::{
     FileDetail, Model, ProcessRecord, ProcessResult, ProcessStatus, ProcessingMode,
     ProcessingState, Toast, ToastStyle,
 };
-use crate::processor::merger::{MergedFile, merge_content};
+use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text};
 use crate::processor::stats::ProcessingStats;
 use crate::processor::walker::{CandidateFile, collect_candidates};
@@ -212,9 +211,18 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
         });
     }
 
-    let mut merged_files = Vec::new();
     let mut details = Vec::new();
     let concurrency_limit = file_concurrency_limit(walker.candidates.len());
+    let output_format = ctx.options.output_format;
+    let path = crate::utils::temp_file::make_temp_result_path()?;
+    let mut output = tokio::fs::File::create(&path)
+        .await
+        .map_err(|e| format!("create merged file failed: {e}"))?;
+    let prefix = render_prefix(output_format, &walker.tree);
+    output
+        .write_all(prefix.as_bytes())
+        .await
+        .map_err(|e| format!("write merged prefix failed: {e}"))?;
 
     let mut processed_stream = stream::iter(
         walker
@@ -226,6 +234,7 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
 
     while let Some(outcome) = processed_stream.next().await {
         if ctx.cancel_token.is_cancelled() {
+            let _ = tokio::fs::remove_file(&path).await;
             return Err(tr(lang, "cancelled").to_string());
         }
 
@@ -242,19 +251,26 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
                 stats.processed_files += 1;
                 stats.total_chars += chars;
                 stats.total_tokens += tokens;
+                let chunk = render_file_entry(output_format, &merged);
+                output
+                    .write_all(chunk.as_bytes())
+                    .await
+                    .map_err(|e| format!("write merged content failed: {e}"))?;
                 details.push(detail);
-                merged_files.push(merged);
             }
         }
     }
-
-    let merged = merge_content(ctx.options.output_format, &walker.tree, &merged_files);
-    let path = crate::utils::temp_file::make_temp_result_path()?;
-
-    let mut f =
-        std::fs::File::create(&path).map_err(|e| format!("create merged file failed: {e}"))?;
-    f.write_all(merged.as_bytes())
-        .map_err(|e| format!("write merged file failed: {e}"))?;
+    let suffix = render_suffix(output_format);
+    if !suffix.is_empty() {
+        output
+            .write_all(suffix.as_bytes())
+            .await
+            .map_err(|e| format!("write merged suffix failed: {e}"))?;
+    }
+    output
+        .flush()
+        .await
+        .map_err(|e| format!("flush merged file failed: {e}"))?;
 
     Ok(ProcessResult {
         stats,
@@ -280,24 +296,32 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
         Ok(v) => v,
         Err(_) => return FileProcessOutcome::Skipped,
     };
+    let absolute = file.absolute;
+    let relative = file.relative;
 
-    let (compressed, _warn) = compress_by_extension(&file.absolute, &raw, compress);
-    let (chars, tokens) = count_chars_tokens(&compressed);
-
-    FileProcessOutcome::Processed {
-        detail: FileDetail {
-            path: file.relative.clone(),
+    match tokio::task::spawn_blocking(move || {
+        let (compressed, _warn) = compress_by_extension(&absolute, &raw, compress);
+        let (chars, tokens) = count_chars_tokens(&compressed);
+        FileProcessOutcome::Processed {
+            detail: FileDetail {
+                path: relative.clone(),
+                chars,
+                tokens,
+            },
+            merged: MergedFile {
+                path: relative,
+                chars,
+                tokens,
+                content: compressed,
+            },
             chars,
             tokens,
-        },
-        merged: MergedFile {
-            path: file.relative,
-            chars,
-            tokens,
-            content: compressed,
-        },
-        chars,
-        tokens,
+        }
+    })
+    .await
+    {
+        Ok(outcome) => outcome,
+        Err(_) => FileProcessOutcome::Skipped,
     }
 }
 

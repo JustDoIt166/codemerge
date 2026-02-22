@@ -78,6 +78,7 @@ pub enum UiMessage {
     CopyContent,
     DownloadContent,
     LoadPreview,
+    PreviewLoaded(Result<PreviewPayload, String>),
     LoadAllPreview,
     ConfirmLoadAllPreview,
     CancelLoadAllPreview,
@@ -86,6 +87,12 @@ pub enum UiMessage {
     ToggleBlacklistExpanded,
     DismissToast,
     Resize(f32, f32),
+}
+
+#[derive(Debug, Clone)]
+pub struct PreviewPayload {
+    pub content: String,
+    pub loaded_all: bool,
 }
 
 #[derive(Debug, Clone)]
