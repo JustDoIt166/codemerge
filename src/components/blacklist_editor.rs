@@ -2,6 +2,7 @@ use iced::widget::{
     Space, button, checkbox, column, container, row, scrollable, text, text_input, tooltip,
 };
 use iced::{Element, Length};
+use iced_aw::iced_fonts::bootstrap;
 
 use crate::app::message::{BlacklistMessage, Message};
 use crate::app::model::Model;
@@ -150,7 +151,14 @@ pub fn view(model: &Model) -> Element<'_, Message> {
         ]
         .spacing(theme::SPACE_XS as u32)
         .align_y(iced::Alignment::Center),
-        scrollable(entries).height(Length::Fill),
+        scrollable(entries)
+            .direction(iced::widget::scrollable::Direction::Vertical(
+                iced::widget::scrollable::Scrollbar::new()
+                    .width(3.0)
+                    .scroller_width(3.0)
+                    .margin(1.0),
+            ))
+            .height(Length::Fill),
         row![
             Space::new().width(Length::Fill),
             button(tr(lang, "save_settings"))
@@ -188,9 +196,16 @@ fn tag_chip(item: BlacklistItem) -> iced::widget::Container<'static, Message> {
             text(item.icon).size(12),
             text(item.value).size(12),
             Space::new().width(Length::Fill),
-            button("✕")
+            button(
+                container(bootstrap::x().size(12))
+                    .width(Length::Fill)
+                    .height(Length::Fill)
+                    .center_x(Length::Fill)
+                    .center_y(Length::Fill),
+            )
                 .width(Length::Fixed(20.0))
                 .height(Length::Fixed(20.0))
+                .padding(0)
                 .style(theme::button_icon)
                 .on_press(on_remove),
         ]
@@ -210,7 +225,11 @@ fn icon_toolbar_btn<'a>(icon: &'a str, tip: &'a str, on_press: Message) -> Eleme
 
     tooltip(
         btn,
-        container(text(tip).size(12))
+        container(
+            text(tip)
+                .size(12)
+                .color(iced::Color::from_rgb(0.96, 0.98, 1.0)),
+        )
             .padding([4, 8])
             .style(theme::tooltip_bubble),
         tooltip::Position::Bottom,

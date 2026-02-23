@@ -2,6 +2,9 @@
 name = "codemerge"
 version = "0.1.0"
 edition = "2024"
+description = "Desktop file merge tool for Linux and Windows."
+license = "MIT"
+repository = "https://github.com/hellotime/codemerge"
 
 [dependencies]
 anyhow = "1.0.102"
@@ -33,3 +36,14 @@ codegen-units = 1
 panic = "abort"
 strip = "symbols"
 debug = 0
+
+[package.metadata.deb]
+maintainer = "CodeMerge Maintainers"
+copyright = "2026, CodeMerge"
+depends = "$auto"
+section = "utils"
+priority = "optional"
+assets = [
+  ["target/release/codemerge", "usr/bin/codemerge", "755"],
+  ["README.md", "usr/share/doc/codemerge/README.md", "644"],
+]
