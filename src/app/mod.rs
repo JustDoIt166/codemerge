@@ -4,9 +4,9 @@ pub mod theme;
 pub mod update;
 pub mod view;
 
-use iced::{Element, Subscription, Task, Theme};
+use iced::{Element, Event, Subscription, Task, Theme, window};
 
-use crate::app::message::Message;
+use crate::app::message::{Message, UiMessage};
 use crate::app::model::Model;
 
 pub struct App;
@@ -40,6 +40,14 @@ impl App {
     }
 
     pub fn subscription(_: &Model) -> Subscription<Message> {
-        iced::time::every(std::time::Duration::from_millis(120)).map(|_| Message::Tick)
+        let tick = iced::time::every(std::time::Duration::from_millis(120)).map(|_| Message::Tick);
+        let resize = iced::event::listen().filter_map(|event| match event {
+            Event::Window(window::Event::Resized(size)) => {
+                Some(Message::Ui(UiMessage::Resize(size.width, size.height)))
+            }
+            _ => None,
+        });
+
+        Subscription::batch([tick, resize])
     }
 }

@@ -3,13 +3,11 @@ use std::path::PathBuf;
 
 use chrono::Local;
 use iced::Task;
-use tokio::io::AsyncReadExt;
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
-use crate::app::message::{Message, PreflightUpdate, PreviewPayload, UiMessage};
-use crate::app::model::{Model, ProcessingState, Toast, ToastStyle};
+use crate::app::message::{Message, PreflightUpdate, PreviewPagePayload, UiMessage};
+use crate::app::model::{Model, OutputTab, ProcessingState, Toast, ToastStyle};
 use crate::utils::i18n::tr;
-
-const PREVIEW_LIMIT_BYTES: u64 = 1024 * 1024;
 
 pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
     let mut task = Task::none();
@@ -96,25 +94,58 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
                 }
             }
         }
-        UiMessage::LoadPreview => {
-            task = load_preview(model, false);
+        UiMessage::PreviewFilterChanged(v) => {
+            model.ui.preview_filter_input = v;
         }
-        UiMessage::PreviewLoaded(res) => {
-            apply_preview_result(model, res);
+        UiMessage::SelectPreviewFile(file_id) => {
+            model.ui.selected_preview_file_id = Some(file_id);
+            model.ui.preview_content.clear();
+            model.ui.preview_offset = 0;
+            model.ui.preview_total_bytes = 0;
+            model.ui.preview_loaded_bytes = 0;
+            model.ui.preview_error = None;
+            task = load_preview_page(model, file_id, 0);
         }
-        UiMessage::LoadAllPreview => {
-            model.ui.show_load_all_confirm = true;
-            model.ui.toast = Some(info_toast(tr(model.language, "load_all_prompt")));
+        UiMessage::LoadPreviewPage { file_id, offset } => {
+            task = load_preview_page(model, file_id, offset);
         }
-        UiMessage::ConfirmLoadAllPreview => {
-            model.ui.show_load_all_confirm = false;
-            task = load_preview(model, true);
+        UiMessage::PreviewPageLoaded(res) => {
+            apply_preview_page_result(model, res);
         }
-        UiMessage::CancelLoadAllPreview => {
-            model.ui.show_load_all_confirm = false;
-            model.ui.toast = Some(info_toast(tr(model.language, "load_all_cancelled")));
+        UiMessage::PreviewNextPage => {
+            if let Some(file_id) = model.ui.selected_preview_file_id {
+                let next_offset = model
+                    .ui
+                    .preview_offset
+                    .saturating_add(model.ui.preview_loaded_bytes);
+                if next_offset < model.ui.preview_total_bytes {
+                    task = load_preview_page(model, file_id, next_offset);
+                }
+            }
         }
-        UiMessage::SwitchOutputTab(tab) => model.ui.active_output_tab = tab,
+        UiMessage::PreviewPrevPage => {
+            if let Some(file_id) = model.ui.selected_preview_file_id {
+                let prev_offset = model.ui.preview_offset.saturating_sub(model.ui.preview_page_bytes);
+                if prev_offset != model.ui.preview_offset {
+                    task = load_preview_page(model, file_id, prev_offset);
+                } else if model.ui.preview_offset > 0 {
+                    task = load_preview_page(model, file_id, 0);
+                }
+            }
+        }
+        UiMessage::SwitchOutputTab(tab) => {
+            model.ui.active_output_tab = tab;
+            if tab == OutputTab::MergedContent
+                && model.ui.selected_preview_file_id.is_none()
+                && let Some(result) = &model.result
+                && let Some(first) = result.preview_files.first()
+            {
+                let first_id = first.id;
+                task = Task::perform(async {}, move |_| {
+                    Message::Ui(UiMessage::SelectPreviewFile(first_id))
+                });
+            }
+        }
         UiMessage::ToggleConfigExpanded => model.ui.config_expanded = !model.ui.config_expanded,
         UiMessage::ToggleBlacklistExpanded => {
             model.ui.blacklist_expanded = !model.ui.blacklist_expanded
@@ -170,35 +201,42 @@ pub fn on_tick(model: &mut Model) -> Task<Message> {
     Task::none()
 }
 
-fn load_preview(model: &mut Model, all: bool) -> Task<Message> {
+fn load_preview_page(model: &mut Model, file_id: u32, offset: u64) -> Task<Message> {
     let Some(result) = &model.result else {
         model.ui.toast = Some(info_toast(tr(model.language, "no_result")));
         return Task::none();
     };
-    let Some(path) = &result.merged_content_path else {
+    let Some(entry) = result.preview_files.iter().find(|f| f.id == file_id) else {
         model.ui.toast = Some(info_toast(tr(model.language, "no_result")));
         return Task::none();
     };
-    let path = path.clone();
 
-    Task::perform(read_preview_payload(path, all), |res| {
-        Message::Ui(UiMessage::PreviewLoaded(res))
+    let path = entry.preview_blob_path.clone();
+    let page_bytes = model.ui.preview_page_bytes.clamp(16 * 1024, 256 * 1024);
+    let offset = offset.min(entry.byte_len);
+    model.ui.preview_loading = true;
+    model.ui.preview_error = None;
+
+    Task::perform(read_preview_page(path, file_id, offset, page_bytes), |res| {
+        Message::Ui(UiMessage::PreviewPageLoaded(res))
     })
 }
 
-fn apply_preview_result(model: &mut Model, res: Result<PreviewPayload, String>) {
+fn apply_preview_page_result(model: &mut Model, res: Result<PreviewPagePayload, String>) {
     let lang = model.language;
+    model.ui.preview_loading = false;
+
     match res {
         Ok(payload) => {
+            model.ui.selected_preview_file_id = Some(payload.file_id);
             model.ui.preview_content = payload.content;
-            model.ui.preview_loaded_all = payload.loaded_all;
-            if payload.loaded_all {
-                model.ui.toast = Some(info_toast(tr(lang, "preview_loaded_all")));
-            } else {
-                model.ui.toast = Some(info_toast(tr(lang, "preview_loaded")));
-            }
+            model.ui.preview_offset = payload.offset;
+            model.ui.preview_loaded_bytes = payload.loaded_bytes;
+            model.ui.preview_total_bytes = payload.total_bytes;
+            model.ui.preview_error = None;
         }
         Err(e) => {
+            model.ui.preview_error = Some(e.clone());
             model.ui.toast = Some(error_toast(&format!("{}{}", tr(lang, "preview_failed"), e)));
         }
     }
@@ -244,29 +282,38 @@ fn apply_preflight_update(model: &mut Model, update: PreflightUpdate) {
     }
 }
 
-async fn read_preview_payload(path: PathBuf, all: bool) -> Result<PreviewPayload, String> {
+async fn read_preview_page(
+    path: PathBuf,
+    file_id: u32,
+    offset: u64,
+    page_bytes: u64,
+) -> Result<PreviewPagePayload, String> {
     let metadata = tokio::fs::metadata(&path)
         .await
         .map_err(|e| format!("read metadata failed: {e}"))?;
-    let file_len = metadata.len();
-    let limit = if all {
-        file_len
-    } else {
-        file_len.min(PREVIEW_LIMIT_BYTES)
-    };
+    let total_bytes = metadata.len();
+    let safe_offset = offset.min(total_bytes);
+    let limit = page_bytes.min(total_bytes.saturating_sub(safe_offset));
 
-    let file = tokio::fs::File::open(&path)
+    let mut file = tokio::fs::File::open(&path)
         .await
         .map_err(|e| format!("open preview file failed: {e}"))?;
+    file.seek(std::io::SeekFrom::Start(safe_offset))
+        .await
+        .map_err(|e| format!("seek preview file failed: {e}"))?;
+
     let mut bytes = Vec::with_capacity(limit as usize);
     file.take(limit)
         .read_to_end(&mut bytes)
         .await
         .map_err(|e| format!("read preview file failed: {e}"))?;
 
-    Ok(PreviewPayload {
+    Ok(PreviewPagePayload {
+        file_id,
+        offset: safe_offset,
+        loaded_bytes: bytes.len() as u64,
+        total_bytes,
         content: String::from_utf8_lossy(&bytes).to_string(),
-        loaded_all: all || file_len <= PREVIEW_LIMIT_BYTES,
     })
 }
 
@@ -347,4 +394,69 @@ fn info_toast(msg: &str) -> Toast {
 #[allow(dead_code)]
 fn _is_idle(state: &ProcessingState) -> bool {
     matches!(state, ProcessingState::Idle)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{apply_preview_page_result, read_preview_page};
+    use crate::app::message::PreviewPagePayload;
+    use crate::app::model::{Model, ProcessResult};
+    use crate::processor::stats::ProcessingStats;
+
+    #[test]
+    fn apply_preview_selects_file_and_updates_page_state() {
+        let mut model = Model::default();
+        model.result = Some(ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: None,
+            merged_content_path: None,
+            file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
+        });
+
+        apply_preview_page_result(
+            &mut model,
+            Ok(PreviewPagePayload {
+                file_id: 7,
+                offset: 64,
+                loaded_bytes: 10,
+                total_bytes: 100,
+                content: "0123456789".to_string(),
+            }),
+        );
+
+        assert_eq!(model.ui.selected_preview_file_id, Some(7));
+        assert_eq!(model.ui.preview_offset, 64);
+        assert_eq!(model.ui.preview_loaded_bytes, 10);
+        assert_eq!(model.ui.preview_total_bytes, 100);
+        assert_eq!(model.ui.preview_content, "0123456789");
+    }
+
+    #[test]
+    fn read_preview_page_handles_boundaries() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        rt.block_on(async {
+            let dir = tempfile::tempdir().expect("tempdir");
+            let path = dir.path().join("preview.bin");
+            tokio::fs::write(&path, b"abcdef").await.expect("write");
+
+            let first = read_preview_page(path.clone(), 1, 0, 4).await.expect("first");
+            assert_eq!(first.content, "abcd");
+            assert_eq!(first.loaded_bytes, 4);
+            assert_eq!(first.total_bytes, 6);
+
+            let tail = read_preview_page(path.clone(), 1, 4, 4).await.expect("tail");
+            assert_eq!(tail.content, "ef");
+            assert_eq!(tail.loaded_bytes, 2);
+
+            let overflow = read_preview_page(path, 1, 99, 4).await.expect("overflow");
+            assert_eq!(overflow.offset, 6);
+            assert_eq!(overflow.loaded_bytes, 0);
+            assert!(overflow.content.is_empty());
+        });
+    }
 }

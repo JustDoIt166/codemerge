@@ -42,17 +42,29 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     } else {
         tr(lang, "start")
     };
-    let mut start_btn = button(start_label)
+    let start_btn_content = container(text(start_label).size(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+    let mut start_btn = button(start_btn_content)
         .width(Length::FillPortion(2))
-        .padding([12, 16])
+        .height(Length::Fixed(44.0))
+        .padding([0, 16])
         .style(theme::button_primary);
     if !is_processing {
         start_btn = start_btn.on_press(Message::Process(ProcessMessage::Start));
     }
 
-    let mut cancel_btn = button(tr(lang, "cancel"))
+    let cancel_btn_content = container(text(tr(lang, "cancel")).size(16))
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+    let mut cancel_btn = button(cancel_btn_content)
         .width(Length::FillPortion(1))
-        .padding([12, 16])
+        .height(Length::Fixed(44.0))
+        .padding([0, 16])
         .style(theme::button_secondary);
     if is_processing {
         cancel_btn = cancel_btn.on_press(Message::Ui(UiMessage::RequestCancel));
@@ -175,7 +187,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
         icon_tool_button(
             bootstrap::clipboard().size(14).into(),
             if in_content_tab {
-                tr(lang, "copy")
+                tr(lang, "copy_current_page")
             } else {
                 tr(lang, "copy_tree")
             },
@@ -190,24 +202,6 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             tr(lang, "download"),
             if in_content_tab {
                 Some(Message::Ui(UiMessage::DownloadContent))
-            } else {
-                None
-            },
-        ),
-        icon_tool_button(
-            bootstrap::hourglass_split().size(14).into(),
-            tr(lang, "load_1mb"),
-            if in_content_tab {
-                Some(Message::Ui(UiMessage::LoadPreview))
-            } else {
-                None
-            },
-        ),
-        icon_tool_button(
-            bootstrap::infinity().size(14).into(),
-            tr(lang, "load_all"),
-            if in_content_tab {
-                Some(Message::Ui(UiMessage::LoadAllPreview))
             } else {
                 None
             },
@@ -275,6 +269,8 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             container(right).width(Length::Fill).height(Length::Fill),
         ]
         .spacing(theme::SPACE_MD as u32)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
     } else if model.window_size.0 >= 900.0 {
         let left_middle = column![
@@ -307,6 +303,8 @@ pub fn view(model: &Model) -> Element<'_, Message> {
                 .height(Length::Fill),
         ]
         .spacing(theme::SPACE_MD as u32)
+        .width(Length::Fill)
+        .height(Length::Fill)
         .into()
     } else if model.window_size.0 >= 600.0 {
         column![
@@ -324,11 +322,13 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             .spacing(theme::SPACE_MD as u32),
         ]
         .spacing(theme::SPACE_MD as u32)
+        .width(Length::Fill)
         .height(Length::Fill)
         .into()
     } else {
         column![right, middle, left_top, blacklist_panel]
             .spacing(theme::SPACE_MD as u32)
+            .width(Length::Fill)
             .into()
     };
 
@@ -336,9 +336,11 @@ pub fn view(model: &Model) -> Element<'_, Message> {
         container(body)
             .padding(theme::CARD_PADDING)
             .style(theme::panel_background)
+            .width(Length::Fill)
             .height(Length::Fill)
     ]
     .spacing(theme::SPACE_SM as u32)
+    .width(Length::Fill)
     .height(Length::Fill);
 
     if model.ui.show_reset_confirmation {
@@ -351,22 +353,6 @@ pub fn view(model: &Model) -> Element<'_, Message> {
                 button(tr(lang, "no"))
                     .style(theme::button_secondary)
                     .on_press(Message::Ui(UiMessage::CancelReset)),
-            ]
-            .spacing(8)
-            .into(),
-        ));
-    }
-
-    if model.ui.show_load_all_confirm {
-        root = root.push(card(
-            row![
-                text(tr(lang, "confirm_load_all")),
-                button(tr(lang, "yes"))
-                    .style(theme::button_primary)
-                    .on_press(Message::Ui(UiMessage::ConfirmLoadAllPreview)),
-                button(tr(lang, "no"))
-                    .style(theme::button_secondary)
-                    .on_press(Message::Ui(UiMessage::CancelLoadAllPreview)),
             ]
             .spacing(8)
             .into(),

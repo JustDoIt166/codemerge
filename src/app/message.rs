@@ -78,11 +78,12 @@ pub enum UiMessage {
     CopyTree,
     CopyContent,
     DownloadContent,
-    LoadPreview,
-    PreviewLoaded(Result<PreviewPayload, String>),
-    LoadAllPreview,
-    ConfirmLoadAllPreview,
-    CancelLoadAllPreview,
+    PreviewFilterChanged(String),
+    SelectPreviewFile(u32),
+    LoadPreviewPage { file_id: u32, offset: u64 },
+    PreviewPageLoaded(Result<PreviewPagePayload, String>),
+    PreviewNextPage,
+    PreviewPrevPage,
     SwitchOutputTab(OutputTab),
     ToggleConfigExpanded,
     ToggleBlacklistExpanded,
@@ -92,9 +93,12 @@ pub enum UiMessage {
 }
 
 #[derive(Debug, Clone)]
-pub struct PreviewPayload {
+pub struct PreviewPagePayload {
+    pub file_id: u32,
+    pub offset: u64,
+    pub loaded_bytes: u64,
+    pub total_bytes: u64,
     pub content: String,
-    pub loaded_all: bool,
 }
 
 #[derive(Debug, Clone)]

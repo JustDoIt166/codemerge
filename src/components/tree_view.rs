@@ -9,8 +9,8 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     let tree = model
         .result
         .as_ref()
-        .and_then(|r| r.tree_string.clone())
-        .unwrap_or_default();
+        .and_then(|r| r.tree_string.as_deref())
+        .unwrap_or("");
 
     container(
         scrollable(

@@ -88,11 +88,23 @@ pub struct FileDetail {
 }
 
 #[derive(Debug, Clone)]
+pub struct PreviewFileEntry {
+    pub id: u32,
+    pub display_path: String,
+    pub chars: usize,
+    pub tokens: usize,
+    pub preview_blob_path: PathBuf,
+    pub byte_len: u64,
+}
+
+#[derive(Debug, Clone)]
 pub struct ProcessResult {
     pub stats: ProcessingStats,
     pub tree_string: Option<String>,
     pub merged_content_path: Option<PathBuf>,
     pub file_details: Vec<FileDetail>,
+    pub preview_files: Vec<PreviewFileEntry>,
+    pub preview_blob_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -152,9 +164,15 @@ pub struct UIState {
     pub toast_elapsed_ms: u64,
     pub processing_elapsed_ms: u64,
     pub toast_last_key: String,
+    pub preview_filter_input: String,
     pub preview_content: String,
-    pub preview_loaded_all: bool,
-    pub show_load_all_confirm: bool,
+    pub selected_preview_file_id: Option<u32>,
+    pub preview_total_bytes: u64,
+    pub preview_loaded_bytes: u64,
+    pub preview_offset: u64,
+    pub preview_page_bytes: u64,
+    pub preview_loading: bool,
+    pub preview_error: Option<String>,
     pub pulse_phase: f32,
     pub active_output_tab: OutputTab,
     pub config_expanded: bool,
@@ -177,9 +195,15 @@ impl Default for UIState {
             toast_elapsed_ms: 0,
             processing_elapsed_ms: 0,
             toast_last_key: String::new(),
+            preview_filter_input: String::new(),
             preview_content: String::new(),
-            preview_loaded_all: false,
-            show_load_all_confirm: false,
+            selected_preview_file_id: None,
+            preview_total_bytes: 0,
+            preview_loaded_bytes: 0,
+            preview_offset: 0,
+            preview_page_bytes: 64 * 1024,
+            preview_loading: false,
+            preview_error: None,
             pulse_phase: 0.0,
             active_output_tab: OutputTab::Tree,
             config_expanded: true,
@@ -236,6 +260,18 @@ impl Default for Model {
             cancel_token: None,
             preflight: PreflightStats::default(),
             preflight_revision: 0,
+        }
+    }
+}
+
+impl Drop for Model {
+    fn drop(&mut self) {
+        if let Some(dir) = self
+            .result
+            .as_ref()
+            .and_then(|r| r.preview_blob_dir.as_ref())
+        {
+            let _ = crate::utils::temp_file::cleanup_preview_dir(dir);
         }
     }
 }

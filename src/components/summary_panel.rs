@@ -31,16 +31,6 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     let stats_row = if let Some(result) = &model.result {
         row![
             stat_tile(
-                tr(lang, "files"),
-                format_num(result.stats.processed_files),
-                tr(lang, "summary_after"),
-            ),
-            stat_tile(
-                tr(lang, "skipped"),
-                format_num(result.stats.skipped_files),
-                tr(lang, "summary_after"),
-            ),
-            stat_tile(
                 tr(lang, "chars"),
                 format_num(result.stats.total_chars),
                 tr(lang, "summary_after"),

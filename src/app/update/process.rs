@@ -6,7 +6,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::app::message::{Message, ProcessContext, ProcessMessage, ProgressUpdate};
 use crate::app::model::{
-    FileDetail, Model, ProcessRecord, ProcessResult, ProcessStatus, ProcessingMode,
+    FileDetail, Model, PreviewFileEntry, ProcessRecord, ProcessResult, ProcessStatus, ProcessingMode,
     ProcessingState, Toast, ToastStyle,
 };
 use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
@@ -33,8 +33,22 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
             let token = CancellationToken::new();
             let ctx = ProcessContext::new(model, token.clone());
             model.cancel_token = Some(token);
+            if let Some(prev_dir) = model
+                .result
+                .as_ref()
+                .and_then(|r| r.preview_blob_dir.as_ref())
+            {
+                let _ = crate::utils::temp_file::cleanup_preview_dir(prev_dir);
+            }
             model.result = None;
             model.ui.preview_content.clear();
+            model.ui.preview_filter_input.clear();
+            model.ui.selected_preview_file_id = None;
+            model.ui.preview_total_bytes = 0;
+            model.ui.preview_loaded_bytes = 0;
+            model.ui.preview_offset = 0;
+            model.ui.preview_loading = false;
+            model.ui.preview_error = None;
             model.ui.show_guide = false;
             model.ui.show_cancel_confirmation = false;
             model.ui.processing_elapsed_ms = 0;
@@ -73,7 +87,6 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
             model.ui.show_cancel_confirmation = false;
             match res {
                 Ok(result) => {
-                    let should_load_preview = result.merged_content_path.is_some();
                     let processed = result.stats.processed_files;
                     let skipped = result.stats.skipped_files;
                     model.processing_state = ProcessingState::Completed { processed, skipped };
@@ -90,13 +103,7 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
                         style: ToastStyle::Success,
                         duration: std::time::Duration::from_secs(3),
                     });
-                    if should_load_preview {
-                        Task::perform(async {}, |_| {
-                            Message::Ui(crate::app::message::UiMessage::LoadPreview)
-                        })
-                    } else {
-                        Task::none()
-                    }
+                    Task::none()
                 }
                 Err(e) => {
                     if e == tr(lang, "cancelled")
@@ -249,13 +256,17 @@ async fn run_process_with_walker(
             tree_string: Some(walker.tree),
             merged_content_path: None,
             file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
         });
     }
 
     let mut details = Vec::new();
+    let mut preview_files = Vec::new();
     let concurrency_limit = file_concurrency_limit(walker.candidates.len());
     let output_format = ctx.options.output_format;
     let path = crate::utils::temp_file::make_temp_result_path()?;
+    let preview_dir = crate::utils::temp_file::make_temp_preview_dir()?;
     let mut output = tokio::fs::File::create(&path)
         .await
         .map_err(|e| format!("create merged file failed: {e}"))?;
@@ -276,6 +287,7 @@ async fn run_process_with_walker(
     while let Some(outcome) = processed_stream.next().await {
         if ctx.cancel_token.is_cancelled() {
             let _ = tokio::fs::remove_file(&path).await;
+            let _ = crate::utils::temp_file::cleanup_preview_dir(&preview_dir);
             return Err(tr(lang, "cancelled").to_string());
         }
 
@@ -308,6 +320,20 @@ async fn run_process_with_walker(
                     .write_all(chunk.as_bytes())
                     .await
                     .map_err(|e| format!("write merged content failed: {e}"))?;
+                let next_id = preview_files.len() as u32;
+                let blob_path = preview_dir.join(format!("preview_{next_id}.txt"));
+                let byte_len = merged.content.len() as u64;
+                tokio::fs::write(&blob_path, merged.content.as_bytes())
+                    .await
+                    .map_err(|e| format!("write preview blob failed: {e}"))?;
+                preview_files.push(PreviewFileEntry {
+                    id: next_id,
+                    display_path: detail.path.clone(),
+                    chars,
+                    tokens,
+                    preview_blob_path: blob_path,
+                    byte_len,
+                });
                 let _ = tx.send(ProcessMessage::Record(ProgressUpdate::Success {
                     file: detail.path.clone(),
                     chars,
@@ -335,6 +361,8 @@ async fn run_process_with_walker(
         tree_string: Some(walker.tree),
         merged_content_path: Some(path),
         file_details: details,
+        preview_files,
+        preview_blob_dir: Some(preview_dir),
     })
 }
 
