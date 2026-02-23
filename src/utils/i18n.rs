@@ -3,8 +3,8 @@ use crate::app::model::Language;
 pub fn tr(lang: Language, key: &str) -> &'static str {
     match (lang, key) {
         // 标题
-        (Language::Zh, "title") => "CodeMerge 文件合并工具",
-        (Language::En, "title") => "CodeMerge File Merge Tool",
+        (Language::Zh, "title") => "文件合并工具",
+        (Language::En, "title") => "File Merge Tool",
 
         // 通用按钮
         (Language::Zh, "start") => "开始处理",
@@ -47,8 +47,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "save_settings") => "Save Settings",
 
         // 文件选择面板
-        (Language::Zh, "section_files") => "1) 文件",
-        (Language::En, "section_files") => "1) Files",
+        (Language::Zh, "section_files") => "文件",
+        (Language::En, "section_files") => "Files",
         (Language::Zh, "folder") => "文件夹",
         (Language::En, "folder") => "Folder",
         (Language::Zh, "files") => "文件",
@@ -63,8 +63,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "none") => "<none>",
 
         // 配置面板
-        (Language::Zh, "section_options") => "2) 选项",
-        (Language::En, "section_options") => "2) Options",
+        (Language::Zh, "section_options") => "选项",
+        (Language::En, "section_options") => "Options",
         (Language::Zh, "compress") => "压缩",
         (Language::En, "compress") => "Compress",
         (Language::Zh, "use_gitignore") => "使用 .gitignore",
@@ -95,8 +95,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "mode_tree_only_desc") => "Mode: TreeOnly (tree only)",
 
         // 黑名单编辑
-        (Language::Zh, "section_blacklist") => "3) 黑名单",
-        (Language::En, "section_blacklist") => "3) Blacklist",
+        (Language::Zh, "section_blacklist") => "黑名单",
+        (Language::En, "section_blacklist") => "Blacklist",
         (Language::Zh, "folder_name") => "文件夹名",
         (Language::En, "folder_name") => "folder name",
         (Language::Zh, "blacklist_filter") => "过滤黑名单条目",
@@ -147,10 +147,16 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "skip") => "Skip",
         (Language::Zh, "process") => "处理",
         (Language::En, "process") => "Process",
+        (Language::Zh, "preflight_scanning") => "预检扫描中，已扫描",
+        (Language::En, "preflight_scanning") => "Preflight scanning, scanned",
+        (Language::Zh, "preflight_ready") => "预检已完成",
+        (Language::En, "preflight_ready") => "Preflight ready",
 
         // 进度区域
         (Language::Zh, "status_ready") => "状态: 就绪",
         (Language::En, "status_ready") => "Status: Ready",
+        (Language::Zh, "scanning_files") => "扫描文件中",
+        (Language::En, "scanning_files") => "Scanning files",
         (Language::Zh, "processing") => "处理中: ",
         (Language::En, "processing") => "processing: ",
         (Language::Zh, "processed") => "已处理=",

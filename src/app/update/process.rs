@@ -1,6 +1,7 @@
 use futures::stream::{self, StreamExt};
 use iced::Task;
 use tokio::io::AsyncWriteExt;
+use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
 use crate::app::message::{Message, ProcessContext, ProcessMessage, ProgressUpdate};
@@ -11,30 +12,16 @@ use crate::app::model::{
 use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text};
 use crate::processor::stats::ProcessingStats;
-use crate::processor::walker::{CandidateFile, collect_candidates};
+use crate::processor::walker::{CandidateFile, WalkerOutput, collect_candidates_with_progress};
 use crate::utils::i18n::tr;
 
 pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
     match msg {
         ProcessMessage::Start => {
-            let token = CancellationToken::new();
-            let ctx = ProcessContext::new(model, token.clone());
-            let pre = collect_candidates(
-                ctx.selected_folder.as_ref(),
-                &ctx.selected_files,
-                &ctx.folder_blacklist,
-                &ctx.ext_blacklist,
-            );
-            let lang = ctx.language;
-
-            if pre.candidates.is_empty() {
-                let reason = if ctx.selected_folder.is_none() && ctx.selected_files.is_empty() {
-                    tr(lang, "no_input_selected").to_string()
-                } else {
-                    format!("{}, skipped={}", tr(lang, "no_valid_files"), pre.skipped)
-                };
+            let lang = model.language;
+            if model.selected_folder.is_none() && model.selected_files.is_empty() {
                 model.ui.toast = Some(Toast {
-                    message: reason,
+                    message: tr(lang, "no_input_selected").to_string(),
                     style: ToastStyle::Error,
                     duration: std::time::Duration::from_secs(4),
                 });
@@ -43,14 +30,8 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
                 return Task::none();
             }
 
-            if matches!(ctx.options.mode, ProcessingMode::TreeOnly) {
-                model.ui.toast = Some(Toast {
-                    message: format!("{}{}", tr(lang, "tree_mode_hint"), pre.candidates.len()),
-                    style: ToastStyle::Info,
-                    duration: std::time::Duration::from_secs(4),
-                });
-            }
-
+            let token = CancellationToken::new();
+            let ctx = ProcessContext::new(model, token.clone());
             model.cancel_token = Some(token);
             model.result = None;
             model.ui.preview_content.clear();
@@ -58,10 +39,10 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
             model.ui.show_cancel_confirmation = false;
             model.ui.processing_elapsed_ms = 0;
             model.processing_state = ProcessingState::InProgress {
-                total: pre.candidates.len(),
+                total: 1,
                 processed: 0,
-                skipped: pre.skipped,
-                current_file: String::new(),
+                skipped: 0,
+                current_file: tr(lang, "scanning_files").to_string(),
                 records: Vec::new(),
             };
             model.ui.toast = Some(Toast {
@@ -70,9 +51,7 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
                 duration: std::time::Duration::from_secs(2),
             });
 
-            Task::perform(run_process(ctx), |res| {
-                Message::Process(ProcessMessage::Completed(res))
-            })
+            Task::run(spawn_process_stream(ctx), |update| Message::Process(update))
         }
         ProcessMessage::Cancel => {
             if let Some(token) = model.cancel_token.take() {
@@ -89,11 +68,12 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
             Task::none()
         }
         ProcessMessage::Completed(res) => {
+            let lang = model.language;
             model.cancel_token = None;
             model.ui.show_cancel_confirmation = false;
-            let lang = model.language;
             match res {
                 Ok(result) => {
+                    let should_load_preview = result.merged_content_path.is_some();
                     let processed = result.stats.processed_files;
                     let skipped = result.stats.skipped_files;
                     model.processing_state = ProcessingState::Completed { processed, skipped };
@@ -110,11 +90,20 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
                         style: ToastStyle::Success,
                         duration: std::time::Duration::from_secs(3),
                     });
-                    Task::perform(async {}, |_| {
-                        Message::Ui(crate::app::message::UiMessage::LoadPreview)
-                    })
+                    if should_load_preview {
+                        Task::perform(async {}, |_| {
+                            Message::Ui(crate::app::message::UiMessage::LoadPreview)
+                        })
+                    } else {
+                        Task::none()
+                    }
                 }
                 Err(e) => {
+                    if e == tr(lang, "cancelled")
+                        && matches!(model.processing_state, ProcessingState::Idle)
+                    {
+                        return Task::none();
+                    }
                     model.processing_state = ProcessingState::Failed(e.clone());
                     model.ui.toast = Some(Toast {
                         message: e,
@@ -127,7 +116,7 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
         }
         ProcessMessage::Record(update) => {
             if let ProcessingState::InProgress {
-                total: _,
+                total,
                 processed,
                 skipped,
                 current_file,
@@ -135,6 +124,16 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
             } = &mut model.processing_state
             {
                 match update {
+                    ProgressUpdate::Scanning {
+                        scanned,
+                        candidates,
+                        skipped: scan_skipped,
+                    } => {
+                        *total = (candidates + scan_skipped).max(1);
+                        *skipped = scan_skipped;
+                        *current_file =
+                            format!("{} {}", tr(model.language, "scanning_files"), scanned);
+                    }
                     ProgressUpdate::Success {
                         file,
                         chars,
@@ -180,18 +179,60 @@ pub fn update_process(model: &mut Model, msg: ProcessMessage) -> Task<Message> {
     }
 }
 
-async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
-    let lang = ctx.language;
-    let walker = collect_candidates(
-        ctx.selected_folder.as_ref(),
-        &ctx.selected_files,
-        &ctx.folder_blacklist,
-        &ctx.ext_blacklist,
-    );
+fn spawn_process_stream(ctx: ProcessContext) -> impl futures::Stream<Item = ProcessMessage> {
+    let (tx, rx) = mpsc::unbounded_channel::<ProcessMessage>();
 
-    if walker.candidates.is_empty() {
-        return Err(tr(lang, "no_valid_files_short").to_string());
-    }
+    tokio::spawn(async move {
+        let lang = ctx.language;
+        let scan_tx = tx.clone();
+        let scan_ctx = ctx.clone();
+        let scan_join = tokio::task::spawn_blocking(move || {
+            collect_candidates_with_progress(
+                scan_ctx.selected_folder.as_ref(),
+                &scan_ctx.selected_files,
+                &scan_ctx.folder_blacklist,
+                &scan_ctx.ext_blacklist,
+                move |scanned, candidates, skipped| {
+                    let _ = scan_tx.send(ProcessMessage::Record(ProgressUpdate::Scanning {
+                        scanned,
+                        candidates,
+                        skipped,
+                    }));
+                },
+            )
+        });
+
+        let walker = match scan_join.await {
+            Ok(output) => output,
+            Err(e) => {
+                let _ = tx.send(ProcessMessage::Completed(Err(format!(
+                    "scan task failed: {e}"
+                ))));
+                return;
+            }
+        };
+
+        if walker.candidates.is_empty() {
+            let reason = format!("{}, skipped={}", tr(lang, "no_valid_files"), walker.skipped);
+            let _ = tx.send(ProcessMessage::Completed(Err(reason)));
+            return;
+        }
+
+        let result = run_process_with_walker(ctx, walker, tx.clone()).await;
+        let _ = tx.send(ProcessMessage::Completed(result));
+    });
+
+    stream::unfold(rx, |mut rx| async move {
+        rx.recv().await.map(|item| (item, rx))
+    })
+}
+
+async fn run_process_with_walker(
+    ctx: ProcessContext,
+    walker: WalkerOutput,
+    tx: mpsc::UnboundedSender<ProcessMessage>,
+) -> Result<ProcessResult, String> {
+    let lang = ctx.language;
 
     if ctx.cancel_token.is_cancelled() {
         return Err(tr(lang, "cancelled").to_string());
@@ -239,8 +280,19 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
         }
 
         match outcome {
-            FileProcessOutcome::Skipped => {
+            FileProcessOutcome::Skipped { file, reason } => {
                 stats.skipped_files += 1;
+                let _ = tx.send(ProcessMessage::Record(ProgressUpdate::Skipped {
+                    file,
+                    reason,
+                }));
+            }
+            FileProcessOutcome::Failed { file, error } => {
+                stats.skipped_files += 1;
+                let _ = tx.send(ProcessMessage::Record(ProgressUpdate::Failed {
+                    file,
+                    error,
+                }));
             }
             FileProcessOutcome::Processed {
                 detail,
@@ -256,10 +308,16 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
                     .write_all(chunk.as_bytes())
                     .await
                     .map_err(|e| format!("write merged content failed: {e}"))?;
+                let _ = tx.send(ProcessMessage::Record(ProgressUpdate::Success {
+                    file: detail.path.clone(),
+                    chars,
+                    tokens,
+                }));
                 details.push(detail);
             }
         }
     }
+
     let suffix = render_suffix(output_format);
     if !suffix.is_empty() {
         output
@@ -282,7 +340,14 @@ async fn run_process(ctx: ProcessContext) -> Result<ProcessResult, String> {
 
 #[derive(Debug)]
 enum FileProcessOutcome {
-    Skipped,
+    Skipped {
+        file: String,
+        reason: String,
+    },
+    Failed {
+        file: String,
+        error: String,
+    },
     Processed {
         detail: FileDetail,
         merged: MergedFile,
@@ -292,13 +357,19 @@ enum FileProcessOutcome {
 }
 
 async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProcessOutcome {
-    let raw = match read_text(&file.absolute).await {
-        Ok(v) => v,
-        Err(_) => return FileProcessOutcome::Skipped,
-    };
     let absolute = file.absolute;
     let relative = file.relative;
+    let raw = match read_text(&absolute).await {
+        Ok(v) => v,
+        Err(e) => {
+            return FileProcessOutcome::Skipped {
+                file: relative,
+                reason: format!("read failed: {e}"),
+            };
+        }
+    };
 
+    let rel_for_error = relative.clone();
     match tokio::task::spawn_blocking(move || {
         let (compressed, _warn) = compress_by_extension(&absolute, &raw, compress);
         let (chars, tokens) = count_chars_tokens(&compressed);
@@ -321,7 +392,10 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
     .await
     {
         Ok(outcome) => outcome,
-        Err(_) => FileProcessOutcome::Skipped,
+        Err(e) => FileProcessOutcome::Failed {
+            file: rel_for_error,
+            error: format!("process failed: {e}"),
+        },
     }
 }
 

@@ -12,6 +12,7 @@ use crate::utils::i18n::tr;
 
 pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Message> {
     let lang = model.language;
+    let mut needs_preflight_refresh = false;
     match msg {
         BlacklistMessage::SharedInputChanged(v) => {
             model.ui.folder_blacklist_input = v.clone();
@@ -28,6 +29,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                     added += 1;
                 }
             }
+            needs_preflight_refresh = added > 0;
             model.ui.toast = Some(if added > 0 {
                 info_toast(tr(lang, "blacklist_added"))
             } else {
@@ -38,7 +40,9 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             sync_blacklist_selection(model);
         }
         BlacklistMessage::RemoveFolder(v) => {
+            let before = model.folder_blacklist.len();
             model.folder_blacklist.retain(|x| x != &v);
+            needs_preflight_refresh = model.folder_blacklist.len() != before;
             model.ui.blacklist_selected.remove(&folder_key(&v));
             update_select_all_flag(model);
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_removed")));
@@ -52,6 +56,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                     added += 1;
                 }
             }
+            needs_preflight_refresh = added > 0;
             model.ui.toast = Some(if added > 0 {
                 info_toast(tr(lang, "blacklist_added"))
             } else {
@@ -62,7 +67,9 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             sync_blacklist_selection(model);
         }
         BlacklistMessage::RemoveExt(v) => {
+            let before = model.ext_blacklist.len();
             model.ext_blacklist.retain(|x| x != &v);
+            needs_preflight_refresh = model.ext_blacklist.len() != before;
             model.ui.blacklist_selected.remove(&ext_key(&v));
             update_select_all_flag(model);
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_removed")));
@@ -119,6 +126,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                 sync_blacklist_selection(model);
                 let after = model.folder_blacklist.len() + model.ext_blacklist.len();
                 let removed = before.saturating_sub(after);
+                needs_preflight_refresh = removed > 0;
                 model.ui.toast = Some(info_toast(&format!(
                     "{} {removed}",
                     tr(lang, "blacklist_deleted_selected")
@@ -128,11 +136,14 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
         BlacklistMessage::ResetToDefault => {
             model.folder_blacklist = default_folder_blacklist();
             model.ext_blacklist = default_ext_blacklist();
+            needs_preflight_refresh = true;
             model.ui.blacklist_selected.clear();
             model.ui.blacklist_selected_all = false;
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_reset_default")));
         }
         BlacklistMessage::ClearAll => {
+            needs_preflight_refresh =
+                !model.folder_blacklist.is_empty() || !model.ext_blacklist.is_empty();
             model.folder_blacklist.clear();
             model.ext_blacklist.clear();
             model.ui.blacklist_selected.clear();
@@ -164,10 +175,10 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             }
         }
         BlacklistMessage::ImportAppend => {
-            import_blacklist(model, false);
+            needs_preflight_refresh = import_blacklist(model, false);
         }
         BlacklistMessage::ImportReplace => {
-            import_blacklist(model, true);
+            needs_preflight_refresh = import_blacklist(model, true);
         }
         BlacklistMessage::SaveSettings => {
             let cfg = crate::utils::config_store::AppConfigV1 {
@@ -195,8 +206,11 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
         }
     }
 
-    super::refresh_preflight(model);
-    Task::none()
+    if needs_preflight_refresh {
+        super::refresh_preflight(model)
+    } else {
+        Task::none()
+    }
 }
 
 fn split_entries(raw: &str) -> Vec<String> {
@@ -207,14 +221,15 @@ fn split_entries(raw: &str) -> Vec<String> {
         .collect()
 }
 
-fn import_blacklist(model: &mut Model, replace: bool) {
+fn import_blacklist(model: &mut Model, replace: bool) -> bool {
     let lang = model.language;
     let Some(path) = rfd::FileDialog::new().pick_file() else {
-        return;
+        return false;
     };
 
     match fs::read_to_string(path) {
         Ok(content) => {
+            let before = model.folder_blacklist.len() + model.ext_blacklist.len();
             let (folders, exts) = parse_blacklist_import(&content);
             if replace {
                 model.folder_blacklist.clear();
@@ -241,6 +256,8 @@ fn import_blacklist(model: &mut Model, replace: bool) {
                 "{} {added}",
                 tr(lang, "blacklist_imported")
             )));
+            let after = model.folder_blacklist.len() + model.ext_blacklist.len();
+            after != before
         }
         Err(e) => {
             model.ui.toast = Some(Toast {
@@ -248,6 +265,7 @@ fn import_blacklist(model: &mut Model, replace: bool) {
                 style: ToastStyle::Error,
                 duration: std::time::Duration::from_secs(3),
             });
+            false
         }
     }
 }

@@ -1,7 +1,8 @@
 use std::path::PathBuf;
 
 use crate::app::model::{
-    Language, OutputFormat, OutputTab, ProcessResult, ProcessingMode, StatsDetailType,
+    Language, OutputFormat, OutputTab, PreflightStats, ProcessResult, ProcessingMode,
+    StatsDetailType,
 };
 
 #[derive(Debug, Clone)]
@@ -86,6 +87,7 @@ pub enum UiMessage {
     ToggleConfigExpanded,
     ToggleBlacklistExpanded,
     DismissToast,
+    PreflightUpdate(PreflightUpdate),
     Resize(f32, f32),
 }
 
@@ -103,6 +105,11 @@ pub enum I18nMessage {
 
 #[derive(Debug, Clone)]
 pub enum ProgressUpdate {
+    Scanning {
+        scanned: usize,
+        candidates: usize,
+        skipped: usize,
+    },
     Success {
         file: String,
         chars: usize,
@@ -118,6 +125,27 @@ pub enum ProgressUpdate {
     },
     Finished(ProcessResult),
     Cancelled,
+}
+
+#[derive(Debug, Clone)]
+pub enum PreflightUpdate {
+    Started {
+        revision: u64,
+    },
+    Progress {
+        revision: u64,
+        scanned: usize,
+        candidates: usize,
+        skipped: usize,
+    },
+    Completed {
+        revision: u64,
+        stats: PreflightStats,
+    },
+    Failed {
+        revision: u64,
+        error: String,
+    },
 }
 
 #[derive(Debug, Clone)]

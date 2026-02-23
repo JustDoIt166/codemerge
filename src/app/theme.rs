@@ -10,10 +10,13 @@ pub const SPACE_SM: u16 = 8;
 pub const SPACE_MD: u16 = 12;
 pub const SPACE_LG: u16 = 16;
 pub const CARD_PADDING: u16 = 12;
-pub const CARD_RADIUS: f32 = 14.0;
-pub const STRIP_RADIUS: f32 = 10.0;
+pub const APP_RADIUS: f32 = 18.0;
+pub const PANEL_RADIUS: f32 = 16.0;
+pub const CARD_RADIUS: f32 = PANEL_RADIUS - SPACE_SM as f32;
+pub const STRIP_RADIUS: f32 = CARD_RADIUS - 2.0;
 pub const TOAST_RADIUS: f32 = 12.0;
-pub const BUTTON_RADIUS: f32 = 10.0;
+pub const BUTTON_RADIUS: f32 = STRIP_RADIUS;
+pub const BUTTON_COMPACT_RADIUS: f32 = BUTTON_RADIUS - 2.0;
 
 const BG_APP: Color = Color::from_rgb(0.94, 0.95, 0.97);
 const BG_PANEL: Color = Color::from_rgb(0.90, 0.92, 0.95);
@@ -29,6 +32,9 @@ const SECONDARY: Color = Color::from_rgb(0.82, 0.86, 0.93);
 const SECONDARY_HOVER: Color = Color::from_rgb(0.76, 0.81, 0.90);
 const DANGER: Color = Color::from_rgb(0.78, 0.24, 0.25);
 const DANGER_HOVER: Color = Color::from_rgb(0.70, 0.21, 0.22);
+const LANG_TOGGLE: Color = Color::from_rgb(0.24, 0.45, 0.86);
+const LANG_TOGGLE_HOVER: Color = Color::from_rgb(0.20, 0.40, 0.78);
+const LANG_TOGGLE_PRESSED: Color = Color::from_rgb(0.16, 0.34, 0.69);
 
 const SUCCESS_BG: Color = Color::from_rgb(0.86, 0.95, 0.89);
 const INFO_BG: Color = Color::from_rgb(0.86, 0.93, 1.0);
@@ -42,7 +48,7 @@ const STRIP_NEUTRAL: Color = Color::from_rgb(0.91, 0.95, 0.99);
 pub fn app_background(_: &Theme) -> container::Style {
     container::Style::default().background(BG_APP).border(
         Border::default()
-            .rounded(18.0)
+            .rounded(APP_RADIUS)
             .width(1.0)
             .color(BORDER_SOFT),
     )
@@ -51,7 +57,7 @@ pub fn app_background(_: &Theme) -> container::Style {
 pub fn panel_background(_: &Theme) -> container::Style {
     container::Style::default().background(BG_PANEL).border(
         Border::default()
-            .rounded(16.0)
+            .rounded(PANEL_RADIUS)
             .width(1.0)
             .color(BORDER_SOFT),
     )
@@ -78,7 +84,7 @@ pub fn accent_tile(_: &Theme) -> container::Style {
         .background(BG_ACCENT_SOFT)
         .border(
             Border::default()
-                .rounded(CARD_RADIUS)
+                .rounded(STRIP_RADIUS)
                 .width(1.0)
                 .color(BORDER_SOFT),
         )
@@ -89,7 +95,7 @@ pub fn code_surface(_: &Theme) -> container::Style {
         .background(BG_CODE_SURFACE)
         .border(
             Border::default()
-                .rounded(CARD_RADIUS)
+                .rounded(STRIP_RADIUS)
                 .width(1.0)
                 .color(BORDER_SOFT),
         )
@@ -271,6 +277,64 @@ pub fn button_icon(_: &Theme, status: button::Status) -> button::Style {
         text_color: fg,
         border: Border::default()
             .rounded(BUTTON_RADIUS)
+            .width(1.0)
+            .color(border),
+        shadow: Shadow {
+            color: SHADOW_SOFT,
+            offset: Vector::new(0.0, shadow_offset),
+            blur_radius: shadow_blur,
+        },
+        ..button::Style::default()
+    }
+}
+
+pub fn button_compact(_: &Theme, status: button::Status) -> button::Style {
+    let bg = match status {
+        button::Status::Hovered => SECONDARY_HOVER,
+        button::Status::Pressed => SECONDARY_HOVER,
+        button::Status::Disabled => Color::from_rgb(0.86, 0.89, 0.94),
+        button::Status::Active => SECONDARY,
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::from_rgb(0.13, 0.17, 0.24),
+        border: Border::default()
+            .rounded(BUTTON_COMPACT_RADIUS)
+            .width(1.0)
+            .color(BORDER_SOFT),
+        shadow: Shadow {
+            color: SHADOW_SOFT,
+            offset: Vector::new(0.0, 1.0),
+            blur_radius: 3.0,
+        },
+        ..button::Style::default()
+    }
+}
+
+pub fn button_language(_: &Theme, status: button::Status) -> button::Style {
+    let (bg, border, shadow_offset, shadow_blur) = match status {
+        button::Status::Active => (LANG_TOGGLE, Color::from_rgb(0.12, 0.29, 0.60), 1.0, 5.0),
+        button::Status::Hovered => (
+            LANG_TOGGLE_HOVER,
+            Color::from_rgb(0.10, 0.25, 0.54),
+            2.0,
+            8.0,
+        ),
+        button::Status::Pressed => (
+            LANG_TOGGLE_PRESSED,
+            Color::from_rgb(0.08, 0.21, 0.47),
+            0.0,
+            2.0,
+        ),
+        button::Status::Disabled => (Color::from_rgb(0.65, 0.71, 0.82), BORDER_SOFT, 0.0, 0.0),
+    };
+
+    button::Style {
+        background: Some(Background::Color(bg)),
+        text_color: Color::WHITE,
+        border: Border::default()
+            .rounded(BUTTON_COMPACT_RADIUS)
             .width(1.0)
             .color(border),
         shadow: Shadow {

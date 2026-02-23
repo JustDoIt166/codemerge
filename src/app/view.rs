@@ -1,5 +1,6 @@
 use iced::widget::{Space, button, column, container, row, scrollable, text, tooltip};
 use iced::{Element, Length};
+use iced_aw::iced_fonts::bootstrap;
 
 use crate::app::message::{I18nMessage, Message, ProcessMessage, UiMessage};
 use crate::app::model::{Model, OutputTab, ProcessingState};
@@ -14,13 +15,24 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     let header = card(
         row![
             text(tr(lang, "title")).size(28),
-            button(match model.language {
-                crate::app::model::Language::Zh => "EN",
-                crate::app::model::Language::En => "中文",
-            })
-            .style(theme::button_secondary)
+            Space::new().width(Length::Fill),
+            button(
+                row![
+                    text("🌐").size(14),
+                    text(match model.language {
+                        crate::app::model::Language::Zh => "EN",
+                        crate::app::model::Language::En => "中文",
+                    })
+                    .size(14),
+                ]
+                .spacing(6)
+                .align_y(iced::Alignment::Center)
+            )
+            .padding([6, 12])
+            .style(theme::button_language)
             .on_press(Message::I18n(I18nMessage::ToggleLanguage)),
         ]
+        .align_y(iced::Alignment::Center)
         .spacing(theme::SPACE_SM as u32)
         .into(),
     );
@@ -161,7 +173,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
     let in_content_tab = model.ui.active_output_tab == OutputTab::MergedContent;
     let output_tools: Element<'_, Message> = row![
         icon_tool_button(
-            "⎘",
+            bootstrap::clipboard().size(14).into(),
             if in_content_tab {
                 tr(lang, "copy")
             } else {
@@ -174,7 +186,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             })),
         ),
         icon_tool_button(
-            "⇩",
+            bootstrap::download().size(14).into(),
             tr(lang, "download"),
             if in_content_tab {
                 Some(Message::Ui(UiMessage::DownloadContent))
@@ -183,7 +195,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             },
         ),
         icon_tool_button(
-            "◔",
+            bootstrap::hourglass_split().size(14).into(),
             tr(lang, "load_1mb"),
             if in_content_tab {
                 Some(Message::Ui(UiMessage::LoadPreview))
@@ -192,7 +204,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             },
         ),
         icon_tool_button(
-            "∞",
+            bootstrap::infinity().size(14).into(),
             tr(lang, "load_all"),
             if in_content_tab {
                 Some(Message::Ui(UiMessage::LoadAllPreview))
@@ -413,11 +425,17 @@ where
 }
 
 fn icon_tool_button<'a>(
-    icon: &'a str,
+    icon: Element<'a, Message>,
     tip: &'a str,
     on_press: Option<Message>,
 ) -> Element<'a, Message> {
-    let mut btn = button(text(icon).size(14))
+    let icon = container(icon)
+        .width(Length::Fill)
+        .height(Length::Fill)
+        .center_x(Length::Fill)
+        .center_y(Length::Fill);
+
+    let mut btn = button(icon)
         .width(Length::Fixed(40.0))
         .height(Length::Fixed(34.0))
         .padding([4, 4])

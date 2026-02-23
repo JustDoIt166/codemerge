@@ -5,7 +5,7 @@ use chrono::Local;
 use iced::Task;
 use tokio::io::AsyncReadExt;
 
-use crate::app::message::{Message, PreviewPayload, UiMessage};
+use crate::app::message::{Message, PreflightUpdate, PreviewPayload, UiMessage};
 use crate::app::model::{Model, ProcessingState, Toast, ToastStyle};
 use crate::utils::i18n::tr;
 
@@ -13,6 +13,7 @@ const PREVIEW_LIMIT_BYTES: u64 = 1024 * 1024;
 
 pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
     let mut task = Task::none();
+    let mut needs_preflight_refresh = false;
 
     match msg {
         UiMessage::Reset => {
@@ -33,6 +34,7 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
             model.ui.show_reset_confirmation = false;
             model.ui.show_cancel_confirmation = false;
             model.ui.toast = Some(success_toast(tr(model.language, "reset_done")));
+            needs_preflight_refresh = true;
         }
         UiMessage::CancelReset => {
             model.ui.show_reset_confirmation = false;
@@ -122,11 +124,17 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
             model.ui.toast_elapsed_ms = 0;
             model.ui.toast_last_key.clear();
         }
+        UiMessage::PreflightUpdate(update) => {
+            apply_preflight_update(model, update);
+        }
         UiMessage::Resize(w, h) => model.window_size = (w, h),
     }
 
-    super::refresh_preflight(model);
-    task
+    if needs_preflight_refresh {
+        Task::batch([task, super::refresh_preflight(model)])
+    } else {
+        task
+    }
 }
 
 pub fn on_tick(model: &mut Model) -> Task<Message> {
@@ -196,6 +204,46 @@ fn apply_preview_result(model: &mut Model, res: Result<PreviewPayload, String>) 
     }
 }
 
+fn apply_preflight_update(model: &mut Model, update: PreflightUpdate) {
+    match update {
+        PreflightUpdate::Started { revision } => {
+            if revision != model.preflight_revision {
+                return;
+            }
+            model.preflight.is_scanning = true;
+            model.preflight.scanned_entries = 0;
+        }
+        PreflightUpdate::Progress {
+            revision,
+            scanned,
+            candidates,
+            skipped,
+        } => {
+            if revision != model.preflight_revision {
+                return;
+            }
+            model.preflight.is_scanning = true;
+            model.preflight.scanned_entries = scanned;
+            model.preflight.to_process_files = candidates;
+            model.preflight.skipped_files = skipped;
+            model.preflight.total_files = candidates + skipped;
+        }
+        PreflightUpdate::Completed { revision, stats } => {
+            if revision != model.preflight_revision {
+                return;
+            }
+            model.preflight = stats;
+        }
+        PreflightUpdate::Failed { revision, error } => {
+            if revision != model.preflight_revision {
+                return;
+            }
+            model.preflight.is_scanning = false;
+            model.ui.toast = Some(error_toast(&error));
+        }
+    }
+}
+
 async fn read_preview_payload(path: PathBuf, all: bool) -> Result<PreviewPayload, String> {
     let metadata = tokio::fs::metadata(&path)
         .await
@@ -242,12 +290,29 @@ fn default_save_path(model: &Model, merged: &std::path::Path) -> Option<std::pat
         crate::app::model::Language::En => "content_summary",
     };
 
-    let name = format!(
-        "{}_{}.{}",
-        prefix,
-        Local::now().format("%Y-%m-%dT%H-%M-%S"),
-        ext
-    );
+    let folder_name = model
+        .selected_folder
+        .as_ref()
+        .and_then(|path| path.file_name())
+        .map(|name| name.to_string_lossy().to_string())
+        .filter(|name| !name.trim().is_empty());
+
+    let name = if let Some(folder_name) = folder_name {
+        format!(
+            "{}_{}_{}.{}",
+            folder_name,
+            prefix,
+            Local::now().format("%Y-%m-%dT%H-%M-%S"),
+            ext
+        )
+    } else {
+        format!(
+            "{}_{}.{}",
+            prefix,
+            Local::now().format("%Y-%m-%dT%H-%M-%S"),
+            ext
+        )
+    };
 
     rfd::FileDialog::new()
         .set_file_name(&name)

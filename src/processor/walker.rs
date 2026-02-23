@@ -1,7 +1,9 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
-use walkdir::WalkDir;
+use ignore::{DirEntry, WalkBuilder, WalkState};
 
 #[derive(Debug, Clone)]
 pub struct CandidateFile {
@@ -22,42 +24,103 @@ pub fn collect_candidates(
     folder_blacklist: &[String],
     ext_blacklist: &[String],
 ) -> WalkerOutput {
+    collect_candidates_with_progress(
+        selected_folder,
+        selected_files,
+        folder_blacklist,
+        ext_blacklist,
+        |_scanned, _candidates, _skipped| {},
+    )
+}
+
+pub fn collect_candidates_with_progress<F>(
+    selected_folder: Option<&PathBuf>,
+    selected_files: &[PathBuf],
+    folder_blacklist: &[String],
+    ext_blacklist: &[String],
+    on_progress: F,
+) -> WalkerOutput
+where
+    F: Fn(usize, usize, usize) + Send + Sync + 'static,
+{
     let folder_blacklist_set: HashSet<String> =
         folder_blacklist.iter().map(|v| v.to_lowercase()).collect();
     let ext_blacklist_set: HashSet<String> =
         ext_blacklist.iter().map(|v| v.to_lowercase()).collect();
 
+    let on_progress: Arc<dyn Fn(usize, usize, usize) + Send + Sync> = Arc::new(on_progress);
     let mut candidates = Vec::new();
     let mut skipped = 0usize;
+    let mut scanned_total = 0usize;
 
     if let Some(root) = selected_folder {
-        for entry in WalkDir::new(root).into_iter().filter_map(Result::ok) {
-            if !entry.file_type().is_file() {
-                continue;
-            }
+        let candidates_acc = Arc::new(Mutex::new(Vec::new()));
+        let skipped_acc = Arc::new(AtomicUsize::new(0));
+        let scanned_acc = Arc::new(AtomicUsize::new(0));
+        let folder_blacklist_set = Arc::new(folder_blacklist_set.clone());
+        let ext_blacklist_set = Arc::new(ext_blacklist_set.clone());
+        let on_progress = Arc::clone(&on_progress);
+        let root = root.clone();
 
-            let path = entry.path().to_path_buf();
-            let rel = path
-                .strip_prefix(root)
-                .unwrap_or(path.as_path())
-                .to_string_lossy()
-                .replace('\\', "/");
-
-            if should_skip(&rel, &folder_blacklist_set, &ext_blacklist_set) {
-                skipped += 1;
-                continue;
-            }
-
-            candidates.push(CandidateFile {
-                absolute: path,
-                relative: rel,
-            });
+        let mut builder = WalkBuilder::new(&root);
+        builder
+            .hidden(false)
+            .ignore(true)
+            .git_ignore(true)
+            .git_global(true)
+            .git_exclude(true)
+            .require_git(false)
+            .parents(true);
+        if let Ok(parallelism) = std::thread::available_parallelism() {
+            builder.threads(parallelism.get());
         }
+
+        builder.build_parallel().run(|| {
+            let candidates_acc = Arc::clone(&candidates_acc);
+            let skipped_acc = Arc::clone(&skipped_acc);
+            let scanned_acc = Arc::clone(&scanned_acc);
+            let folder_blacklist_set = Arc::clone(&folder_blacklist_set);
+            let ext_blacklist_set = Arc::clone(&ext_blacklist_set);
+            let on_progress = Arc::clone(&on_progress);
+            let root = root.clone();
+
+            Box::new(move |entry| match entry {
+                Ok(entry) => {
+                    process_entry(
+                        &entry,
+                        &root,
+                        &folder_blacklist_set,
+                        &ext_blacklist_set,
+                        &candidates_acc,
+                        &skipped_acc,
+                    );
+                    let scanned = scanned_acc.fetch_add(1, Ordering::Relaxed) + 1;
+                    if scanned % 200 == 0 {
+                        let current_skipped = skipped_acc.load(Ordering::Relaxed);
+                        let current_candidates =
+                            candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
+                        on_progress(scanned, current_candidates, current_skipped);
+                    }
+                    WalkState::Continue
+                }
+                Err(_) => WalkState::Continue,
+            })
+        });
+
+        scanned_total += scanned_acc.load(Ordering::Relaxed);
+        skipped += skipped_acc.load(Ordering::Relaxed);
+        candidates = match Arc::try_unwrap(candidates_acc) {
+            Ok(mutex) => mutex.into_inner().unwrap_or_default(),
+            Err(arc) => arc.lock().map(|v| v.clone()).unwrap_or_default(),
+        };
+        on_progress(scanned_total, candidates.len(), skipped);
     }
 
     for path in selected_files {
+        scanned_total += 1;
         if !path.is_file() {
             skipped += 1;
+            on_progress(scanned_total, candidates.len(), skipped);
             continue;
         }
 
@@ -67,6 +130,7 @@ pub fn collect_candidates(
             .unwrap_or_else(|| path.to_string_lossy().to_string());
         if should_skip(&rel, &folder_blacklist_set, &ext_blacklist_set) {
             skipped += 1;
+            on_progress(scanned_total, candidates.len(), skipped);
             continue;
         }
 
@@ -74,7 +138,9 @@ pub fn collect_candidates(
             absolute: path.clone(),
             relative: rel,
         });
+        on_progress(scanned_total, candidates.len(), skipped);
     }
+    candidates.sort_by(|a, b| a.relative.cmp(&b.relative));
 
     let tree = build_tree(selected_folder, &candidates);
 
@@ -82,6 +148,38 @@ pub fn collect_candidates(
         candidates,
         skipped,
         tree,
+    }
+}
+
+fn process_entry(
+    entry: &DirEntry,
+    root: &Path,
+    folder_blacklist: &HashSet<String>,
+    ext_blacklist: &HashSet<String>,
+    candidates: &Arc<Mutex<Vec<CandidateFile>>>,
+    skipped: &Arc<AtomicUsize>,
+) {
+    if !entry.file_type().is_some_and(|ft| ft.is_file()) {
+        return;
+    }
+
+    let path = entry.path().to_path_buf();
+    let rel = path
+        .strip_prefix(root)
+        .unwrap_or(path.as_path())
+        .to_string_lossy()
+        .replace('\\', "/");
+
+    if should_skip(&rel, folder_blacklist, ext_blacklist) {
+        skipped.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+
+    if let Ok(mut locked) = candidates.lock() {
+        locked.push(CandidateFile {
+            absolute: path,
+            relative: rel,
+        });
     }
 }
 

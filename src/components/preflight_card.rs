@@ -12,6 +12,15 @@ pub fn view(model: &Model) -> Element<'_, Message> {
         ProcessingMode::Full => tr(lang, "mode_full_desc"),
         ProcessingMode::TreeOnly => tr(lang, "mode_tree_only_desc"),
     };
+    let scan_hint = if model.preflight.is_scanning {
+        format!(
+            "{} {}",
+            tr(lang, "preflight_scanning"),
+            model.preflight.scanned_entries
+        )
+    } else {
+        tr(lang, "preflight_ready").to_string()
+    };
 
     container(
         column![
@@ -26,6 +35,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             .width(Length::Fill)
             .spacing(theme::SPACE_MD as u32),
             text(mode_hint).size(13),
+            text(scan_hint).size(12),
         ]
         .spacing(theme::SPACE_SM as u32),
     )

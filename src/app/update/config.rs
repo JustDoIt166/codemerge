@@ -5,6 +5,7 @@ use crate::app::model::{Model, Toast, ToastStyle};
 use crate::utils::i18n::tr;
 
 pub fn update_config(model: &mut Model, msg: ConfigMessage) -> Task<Message> {
+    let mut needs_preflight_refresh = false;
     match msg {
         ConfigMessage::ToggleCompress(v) => model.options.compress = v,
         ConfigMessage::ToggleUseGitignore(v) => model.options.use_gitignore = v,
@@ -13,9 +14,12 @@ pub fn update_config(model: &mut Model, msg: ConfigMessage) -> Task<Message> {
             if v {
                 if !model.folder_blacklist.contains(&".git".to_string()) {
                     model.folder_blacklist.push(".git".to_string());
+                    needs_preflight_refresh = true;
                 }
             } else {
+                let before = model.folder_blacklist.len();
                 model.folder_blacklist.retain(|x| x != ".git");
+                needs_preflight_refresh = model.folder_blacklist.len() != before;
             }
         }
         ConfigMessage::SetOutputFormat(v) => model.options.output_format = v,
@@ -44,6 +48,9 @@ pub fn update_config(model: &mut Model, msg: ConfigMessage) -> Task<Message> {
         });
     }
 
-    super::refresh_preflight(model);
-    Task::none()
+    if needs_preflight_refresh {
+        super::refresh_preflight(model)
+    } else {
+        Task::none()
+    }
 }

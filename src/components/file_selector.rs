@@ -15,6 +15,7 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             row![
                 text(format!("{icon} {} ({})", f.name, human_size(f.size))).size(14),
                 button(tr(lang, "remove_tag"))
+                    .style(theme::button_compact)
                     .on_press(Message::File(FileMessage::RemoveFile(idx)))
             ]
             .spacing(8),
@@ -26,11 +27,21 @@ pub fn view(model: &Model) -> Element<'_, Message> {
             .padding([theme::SPACE_XS, 10])
             .style(theme::strip_neutral),
         row![
-            button(tr(lang, "folder")).on_press(Message::File(FileMessage::SelectFolder)),
-            button(tr(lang, "files")).on_press(Message::File(FileMessage::SelectFiles)),
-            button(tr(lang, "gitignore")).on_press(Message::File(FileMessage::SelectGitignore)),
-            button(tr(lang, "apply")).on_press(Message::File(FileMessage::ApplyGitignore)),
-            button(tr(lang, "clear")).on_press(Message::File(FileMessage::ClearAllFiles)),
+            button(tr(lang, "folder"))
+                .style(theme::button_compact)
+                .on_press(Message::File(FileMessage::SelectFolder)),
+            button(tr(lang, "files"))
+                .style(theme::button_compact)
+                .on_press(Message::File(FileMessage::SelectFiles)),
+            button(tr(lang, "gitignore"))
+                .style(theme::button_compact)
+                .on_press(Message::File(FileMessage::SelectGitignore)),
+            button(tr(lang, "apply"))
+                .style(theme::button_compact)
+                .on_press(Message::File(FileMessage::ApplyGitignore)),
+            button(tr(lang, "clear"))
+                .style(theme::button_compact)
+                .on_press(Message::File(FileMessage::ClearAllFiles)),
         ]
         .spacing(8),
         text(match &model.selected_folder {

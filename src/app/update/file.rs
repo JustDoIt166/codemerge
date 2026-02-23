@@ -11,11 +11,13 @@ use crate::utils::path::filename;
 
 pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
     let lang = model.language;
+    let mut needs_preflight_refresh = false;
     let task = match msg {
         FileMessage::SelectFolder => {
             let folder = rfd::FileDialog::new().pick_folder();
             if let Some(path) = folder {
                 model.selected_folder = Some(path.clone());
+                needs_preflight_refresh = true;
                 model.ui.toast = Some(info_toast(tr(lang, "folder_selected")));
 
                 if model.options.use_gitignore {
@@ -29,6 +31,7 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
                                     changed += 1;
                                 }
                             }
+                            needs_preflight_refresh = needs_preflight_refresh || changed > 0;
                             model.ui.toast = Some(Toast {
                                 message: format!(
                                     "{}{}{}",
@@ -49,6 +52,7 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
         }
         FileMessage::SelectFiles => {
             let files = rfd::FileDialog::new().pick_files();
+            let mut added = 0usize;
             if let Some(picked) = files {
                 let mut existing: HashSet<String> = model
                     .selected_files
@@ -71,6 +75,7 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
                         name: filename(&abs),
                         size,
                     });
+                    added += 1;
                 }
 
                 if dup > 0 {
@@ -98,6 +103,7 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
                     .selected_files
                     .retain(|f| unique.iter().any(|u| u == &f.path));
             }
+            needs_preflight_refresh = added > 0;
 
             Task::none()
         }
@@ -123,6 +129,7 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
                                 added += 1;
                             }
                         }
+                        needs_preflight_refresh = added > 0;
                         model.ui.toast = Some(Toast {
                             message: format!(
                                 "{}{}{}",
@@ -150,11 +157,15 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
         FileMessage::RemoveFile(index) => {
             if index < model.selected_files.len() {
                 model.selected_files.remove(index);
+                needs_preflight_refresh = true;
                 model.ui.toast = Some(info_toast(tr(lang, "file_removed")));
             }
             Task::none()
         }
         FileMessage::ClearAllFiles => {
+            needs_preflight_refresh = model.selected_folder.is_some()
+                || !model.selected_files.is_empty()
+                || model.gitignore_file.is_some();
             model.selected_files.clear();
             model.selected_folder = None;
             model.gitignore_file = None;
@@ -162,8 +173,11 @@ pub fn update_file(model: &mut Model, msg: FileMessage) -> Task<Message> {
             Task::none()
         }
     };
-    super::refresh_preflight(model);
-    task
+    if needs_preflight_refresh {
+        Task::batch([task, super::refresh_preflight(model)])
+    } else {
+        task
+    }
 }
 
 fn info_toast(msg: &str) -> Toast {

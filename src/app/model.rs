@@ -195,6 +195,8 @@ pub struct PreflightStats {
     pub total_files: usize,
     pub skipped_files: usize,
     pub to_process_files: usize,
+    pub scanned_entries: usize,
+    pub is_scanning: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +215,7 @@ pub struct Model {
     pub dedupe_exact_path: bool,
     pub cancel_token: Option<CancellationToken>,
     pub preflight: PreflightStats,
+    pub preflight_revision: u64,
 }
 
 impl Default for Model {
@@ -232,6 +235,7 @@ impl Default for Model {
             dedupe_exact_path: true,
             cancel_token: None,
             preflight: PreflightStats::default(),
+            preflight_revision: 0,
         }
     }
 }

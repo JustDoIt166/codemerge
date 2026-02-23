@@ -1,5 +1,7 @@
 use codemerge::app::model::OutputFormat;
 use codemerge::processor::{merger, reader, walker};
+use std::fs;
+use tempfile::tempdir;
 
 #[test]
 fn parse_gitignore_ignores_comments_empty_and_negation() {
@@ -39,4 +41,27 @@ fn merge_formats_non_empty() {
     assert!(x.contains("<codemerge>"));
     assert!(p.contains("File: src/main.rs"));
     assert!(m.contains("# Directory Structure"));
+}
+
+#[test]
+fn collect_candidates_honors_gitignore_and_ext_blacklist() {
+    let dir = tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "ignored_dir/\n*.log\n").expect("write gitignore");
+    fs::create_dir_all(root.join("src")).expect("create src dir");
+    fs::create_dir_all(root.join("ignored_dir")).expect("create ignored dir");
+    fs::write(root.join("src").join("main.rs"), "fn main() {}").expect("write rs file");
+    fs::write(root.join("src").join("skip.tmp"), "tmp").expect("write tmp file");
+    fs::write(root.join("ignored_dir").join("inside.rs"), "ignored").expect("write ignored file");
+    fs::write(root.join("debug.log"), "ignored by gitignore").expect("write log file");
+
+    let out =
+        walker::collect_candidates(Some(&root.to_path_buf()), &[], &[], &[String::from(".tmp")]);
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert_eq!(
+        rels,
+        vec![".gitignore".to_string(), "src/main.rs".to_string()]
+    );
+    assert_eq!(out.skipped, 1);
 }

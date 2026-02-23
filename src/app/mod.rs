@@ -19,8 +19,8 @@ impl App {
         model.options = cfg.options;
         model.folder_blacklist = cfg.folder_blacklist;
         model.ext_blacklist = cfg.ext_blacklist;
-        update::refresh_preflight(&mut model);
-        (model, Task::none())
+        let task = update::refresh_preflight(&mut model);
+        (model, task)
     }
 
     pub fn update(model: &mut Model, message: Message) -> Task<Message> {
