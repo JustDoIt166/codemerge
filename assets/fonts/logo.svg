@@ -1,0 +1,63 @@
+<svg width="256" height="256" viewBox="0 0 256 256" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="fileGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#3B82F6"/>
+      <stop offset="100%" stop-color="#1D4ED8"/>
+    </linearGradient>
+    
+    <linearGradient id="foldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#93C5FD"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+
+    <filter id="shadow" x="-10%" y="-10%" width="120%" height="120%">
+      <feDropShadow dx="0" dy="8" stdDeviation="12" flood-color="#0F172A" flood-opacity="0.12"/>
+    </filter>
+  </defs>
+
+  <path d="M 64 32
+           H 160
+           L 208 80
+           V 208
+           A 16 16 0 0 1 192 224
+           H 64
+           A 16 16 0 0 1 48 208
+           V 48
+           A 16 16 0 0 1 64 32 Z"
+        fill="url(#fileGrad)" 
+        filter="url(#shadow)"/>
+
+  <path d="M 160 32
+           V 64
+           A 16 16 0 0 0 176 80
+           H 208
+           Z"
+        fill="url(#foldGrad)"/>
+
+  <rect x="76" y="68" width="56" height="6" rx="3" fill="white" fill-opacity="0.75"/>
+  <rect x="76" y="84" width="36" height="6" rx="3" fill="white" fill-opacity="0.5"/>
+
+  <path d="M 100 120
+           C 100 148, 128 144, 128 172
+           M 156 120
+           C 156 148, 128 144, 128 172"
+        stroke="white" 
+        stroke-width="6" 
+        stroke-linecap="round" 
+        stroke-linejoin="round" 
+        fill="none"/>
+
+  <path d="M 128 172 L 128 188" 
+        stroke="white" 
+        stroke-width="6" 
+        stroke-linecap="round"/>
+
+  <circle cx="100" cy="120" r="10" fill="white"/>
+  <circle cx="156" cy="120" r="10" fill="white"/>
+  <circle cx="128" cy="172" r="10" fill="white"/>
+  
+  <circle cx="100" cy="120" r="4" fill="#2563EB"/>
+  <circle cx="156" cy="120" r="4" fill="#2563EB"/>
+  <circle cx="128" cy="172" r="4" fill="#1D4ED8"/>
+
+</svg>

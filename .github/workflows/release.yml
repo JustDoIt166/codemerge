@@ -73,6 +73,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Install ImageMagick
+        run: choco install imagemagick -y --no-progress
+
       - name: Build binary
         run: cargo build --release --locked
 
@@ -86,10 +89,13 @@ jobs:
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
           New-Item -ItemType Directory -Force -Path dist | Out-Null
 
+          magick assets/fonts/logo.svg -background none -define icon:auto-resize=16,24,32,48,64,128,256 dist/codemerge.ico
+
           Compress-Archive -Path target/release/codemerge.exe -DestinationPath "dist/codemerge-$version-windows-amd64.zip" -Force
 
           $env:APP_VERSION = $version
           $env:BINARY_PATH = (Resolve-Path "target/release/codemerge.exe").Path
+          $env:ICON_PATH = (Resolve-Path "dist/codemerge.ico").Path
           $env:OUTPUT_DIR = (Resolve-Path "dist").Path
           $env:INSTALLER_BASENAME = "codemerge-$version-windows-amd64-setup"
 

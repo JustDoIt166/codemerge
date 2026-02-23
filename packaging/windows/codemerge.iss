@@ -20,17 +20,19 @@ SolidCompression=yes
 ArchitecturesInstallIn64BitMode=x64
 WizardStyle=modern
 PrivilegesRequired=admin
-UninstallDisplayIcon={app}\{#AppExeName}
+SetupIconFile={#GetEnv("ICON_PATH")}
+UninstallDisplayIcon={app}\codemerge.ico
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Files]
 Source: "{#GetEnv("BINARY_PATH")}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#GetEnv("ICON_PATH")}"; DestDir: "{app}"; DestName: "codemerge.ico"; Flags: ignoreversion
 
 [Icons]
-Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"
-Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"
+Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\codemerge.ico"
+Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExeName}"; IconFilename: "{app}\codemerge.ico"
 
 [Run]
 Filename: "{app}\{#AppExeName}"; Description: "Launch {#AppName}"; Flags: nowait postinstall skipifsilent
