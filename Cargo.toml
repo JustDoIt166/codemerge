@@ -12,7 +12,6 @@ arboard = "3.6.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 futures = "0.3.31"
 globset = "0.4.18"
-iced = { version = "0.14.0", features = ["tokio"] }
 iced_aw = { version = "0.13.0", default-features = false }
 iced_fonts = { version = "0.3.0", features = ["bootstrap", "fontawesome"] }
 ignore = "0.4.25"
@@ -28,6 +27,12 @@ tempfile = "3.25.0"
 thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-util = "0.7.17"
+
+[target.'cfg(windows)'.dependencies]
+iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tokio"] }
+
+[target.'cfg(not(windows))'.dependencies]
+iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"

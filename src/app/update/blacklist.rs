@@ -13,6 +13,7 @@ use crate::utils::i18n::tr;
 pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Message> {
     let lang = model.language;
     let mut needs_preflight_refresh = false;
+    let mut needs_config_save = false;
     match msg {
         BlacklistMessage::SharedInputChanged(v) => {
             model.ui.folder_blacklist_input = v.clone();
@@ -30,6 +31,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                 }
             }
             needs_preflight_refresh = added > 0;
+            needs_config_save = added > 0;
             model.ui.toast = Some(if added > 0 {
                 info_toast(tr(lang, "blacklist_added"))
             } else {
@@ -43,6 +45,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             let before = model.folder_blacklist.len();
             model.folder_blacklist.retain(|x| x != &v);
             needs_preflight_refresh = model.folder_blacklist.len() != before;
+            needs_config_save = model.folder_blacklist.len() != before;
             model.ui.blacklist_selected.remove(&folder_key(&v));
             update_select_all_flag(model);
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_removed")));
@@ -57,6 +60,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                 }
             }
             needs_preflight_refresh = added > 0;
+            needs_config_save = added > 0;
             model.ui.toast = Some(if added > 0 {
                 info_toast(tr(lang, "blacklist_added"))
             } else {
@@ -70,6 +74,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             let before = model.ext_blacklist.len();
             model.ext_blacklist.retain(|x| x != &v);
             needs_preflight_refresh = model.ext_blacklist.len() != before;
+            needs_config_save = model.ext_blacklist.len() != before;
             model.ui.blacklist_selected.remove(&ext_key(&v));
             update_select_all_flag(model);
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_removed")));
@@ -127,6 +132,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
                 let after = model.folder_blacklist.len() + model.ext_blacklist.len();
                 let removed = before.saturating_sub(after);
                 needs_preflight_refresh = removed > 0;
+                needs_config_save = removed > 0;
                 model.ui.toast = Some(info_toast(&format!(
                     "{} {removed}",
                     tr(lang, "blacklist_deleted_selected")
@@ -137,6 +143,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
             model.folder_blacklist = default_folder_blacklist();
             model.ext_blacklist = default_ext_blacklist();
             needs_preflight_refresh = true;
+            needs_config_save = true;
             model.ui.blacklist_selected.clear();
             model.ui.blacklist_selected_all = false;
             model.ui.toast = Some(info_toast(tr(lang, "blacklist_reset_default")));
@@ -144,6 +151,7 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
         BlacklistMessage::ClearAll => {
             needs_preflight_refresh =
                 !model.folder_blacklist.is_empty() || !model.ext_blacklist.is_empty();
+            needs_config_save = needs_preflight_refresh;
             model.folder_blacklist.clear();
             model.ext_blacklist.clear();
             model.ui.blacklist_selected.clear();
@@ -176,34 +184,27 @@ pub fn update_blacklist(model: &mut Model, msg: BlacklistMessage) -> Task<Messag
         }
         BlacklistMessage::ImportAppend => {
             needs_preflight_refresh = import_blacklist(model, false);
+            needs_config_save = needs_preflight_refresh;
         }
         BlacklistMessage::ImportReplace => {
             needs_preflight_refresh = import_blacklist(model, true);
+            needs_config_save = needs_preflight_refresh;
         }
         BlacklistMessage::SaveSettings => {
-            let cfg = crate::utils::config_store::AppConfigV1 {
-                language: model.language,
-                options: model.options.clone(),
-                folder_blacklist: model.folder_blacklist.clone(),
-                ext_blacklist: model.ext_blacklist.clone(),
-            };
-            match crate::utils::config_store::save_config(&cfg) {
-                Ok(_) => {
-                    model.ui.toast = Some(Toast {
-                        message: "blacklist_saved".to_string(),
-                        style: ToastStyle::Success,
-                        duration: std::time::Duration::from_secs(3),
-                    });
-                }
-                Err(e) => {
-                    model.ui.toast = Some(Toast {
-                        message: format!("save failed: {e}"),
-                        style: ToastStyle::Error,
-                        duration: std::time::Duration::from_secs(3),
-                    });
-                }
-            }
+            super::queue_config_save(
+                model,
+                super::CONFIG_SAVE_DEBOUNCE_MS,
+                Some(Toast {
+                    message: tr(lang, "blacklist_saved").to_string(),
+                    style: ToastStyle::Success,
+                    duration: std::time::Duration::from_secs(3),
+                }),
+            );
         }
+    }
+
+    if needs_config_save {
+        super::queue_config_save(model, super::CONFIG_SAVE_DEBOUNCE_MS, None);
     }
 
     if needs_preflight_refresh {

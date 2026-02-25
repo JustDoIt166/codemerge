@@ -13,6 +13,7 @@ pub enum Message {
     Process(ProcessMessage),
     Ui(UiMessage),
     I18n(I18nMessage),
+    ConfigSaved(Result<(), String>),
     Tick,
 }
 

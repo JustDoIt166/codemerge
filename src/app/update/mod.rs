@@ -10,8 +10,13 @@ use iced::Task;
 use tokio::sync::mpsc;
 
 use crate::app::message::{Message, PreflightUpdate, UiMessage};
-use crate::app::model::Model;
+use crate::app::model::{Model, Toast, ToastStyle};
 use crate::processor::walker::collect_candidates_with_progress;
+use crate::utils::i18n::tr;
+
+pub const TICK_MS: u64 = 120;
+pub const CONFIG_SAVE_DEBOUNCE_MS: u64 = 320;
+const CONFIG_SAVE_RETRY_MS: u64 = 240;
 
 pub fn update(model: &mut Model, message: Message) -> Task<Message> {
     match message {
@@ -21,8 +26,80 @@ pub fn update(model: &mut Model, message: Message) -> Task<Message> {
         Message::Process(m) => process::update_process(model, m),
         Message::Ui(m) => ui::update_ui(model, m),
         Message::I18n(m) => i18n::update_i18n(model, m),
+        Message::ConfigSaved(res) => on_config_saved(model, res),
         Message::Tick => ui::on_tick(model),
     }
+}
+
+pub fn queue_config_save(model: &mut Model, debounce_ms: u64, success_toast: Option<Toast>) {
+    model.ui.config_save_dirty = true;
+    model.ui.config_save_due_ms = Some(debounce_ms.max(TICK_MS));
+    if let Some(toast) = success_toast {
+        model.ui.config_save_success_toast = Some(toast);
+    }
+}
+
+pub fn take_due_config_save_task(model: &mut Model) -> Task<Message> {
+    if model.ui.config_save_in_flight {
+        return Task::none();
+    }
+
+    let Some(remaining) = model.ui.config_save_due_ms else {
+        return Task::none();
+    };
+
+    if remaining > TICK_MS {
+        model.ui.config_save_due_ms = Some(remaining - TICK_MS);
+        return Task::none();
+    }
+
+    model.ui.config_save_due_ms = None;
+    if !model.ui.config_save_dirty {
+        return Task::none();
+    }
+    model.ui.config_save_dirty = false;
+    model.ui.config_save_in_flight = true;
+
+    let cfg = crate::utils::config_store::AppConfigV1 {
+        language: model.language,
+        options: model.options.clone(),
+        folder_blacklist: model.folder_blacklist.clone(),
+        ext_blacklist: model.ext_blacklist.clone(),
+    };
+
+    Task::perform(
+        async move {
+            tokio::task::spawn_blocking(move || crate::utils::config_store::save_config(&cfg))
+                .await
+                .map_err(|e| format!("save config task failed: {e}"))?
+        },
+        Message::ConfigSaved,
+    )
+}
+
+fn on_config_saved(model: &mut Model, result: Result<(), String>) -> Task<Message> {
+    model.ui.config_save_in_flight = false;
+
+    match result {
+        Ok(_) => {
+            if let Some(toast) = model.ui.config_save_success_toast.take() {
+                model.ui.toast = Some(toast);
+            }
+        }
+        Err(err) => {
+            model.ui.toast = Some(Toast {
+                message: format!("{}{}", tr(model.language, "save_config_failed"), err),
+                style: ToastStyle::Error,
+                duration: std::time::Duration::from_secs(3),
+            });
+        }
+    }
+
+    if model.ui.config_save_dirty && model.ui.config_save_due_ms.is_none() {
+        model.ui.config_save_due_ms = Some(CONFIG_SAVE_RETRY_MS);
+    }
+
+    Task::none()
 }
 
 pub fn refresh_preflight(model: &mut Model) -> Task<Message> {
@@ -40,6 +117,10 @@ pub fn refresh_preflight(model: &mut Model) -> Task<Message> {
         .iter()
         .map(|f| f.path.clone())
         .collect::<Vec<_>>();
+    if selected_folder.is_none() && selected_files.is_empty() {
+        model.preflight.is_scanning = false;
+        return Task::none();
+    }
     let folder_blacklist = model.folder_blacklist.clone();
     let ext_blacklist = model.ext_blacklist.clone();
 

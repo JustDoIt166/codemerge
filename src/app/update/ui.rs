@@ -169,14 +169,17 @@ pub fn update_ui(model: &mut Model, msg: UiMessage) -> Task<Message> {
 }
 
 pub fn on_tick(model: &mut Model) -> Task<Message> {
-    model.ui.pulse_phase += 0.08;
-    if model.ui.pulse_phase > 1.0 {
-        model.ui.pulse_phase -= 1.0;
-    }
-
     if matches!(model.processing_state, ProcessingState::InProgress { .. }) {
-        model.ui.processing_elapsed_ms = model.ui.processing_elapsed_ms.saturating_add(120);
+        model.ui.pulse_phase += 0.08;
+        if model.ui.pulse_phase > 1.0 {
+            model.ui.pulse_phase -= 1.0;
+        }
+        model.ui.processing_elapsed_ms = model
+            .ui
+            .processing_elapsed_ms
+            .saturating_add(super::TICK_MS);
     }
+    let save_task = super::take_due_config_save_task(model);
 
     if let Some(toast) = &model.ui.toast {
         let key = format!("{:?}:{}", toast.style, toast.message);
@@ -184,7 +187,7 @@ pub fn on_tick(model: &mut Model) -> Task<Message> {
             model.ui.toast_last_key = key;
             model.ui.toast_elapsed_ms = 0;
         } else {
-            model.ui.toast_elapsed_ms = model.ui.toast_elapsed_ms.saturating_add(120);
+            model.ui.toast_elapsed_ms = model.ui.toast_elapsed_ms.saturating_add(super::TICK_MS);
         }
 
         let ttl = toast.duration.as_millis() as u64;
@@ -198,7 +201,7 @@ pub fn on_tick(model: &mut Model) -> Task<Message> {
         model.ui.toast_last_key.clear();
     }
 
-    Task::none()
+    save_task
 }
 
 fn load_preview_page(model: &mut Model, file_id: u32, offset: u64) -> Task<Message> {

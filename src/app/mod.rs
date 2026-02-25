@@ -7,7 +7,7 @@ pub mod view;
 use iced::{Element, Event, Subscription, Task, Theme, window};
 
 use crate::app::message::{Message, UiMessage};
-use crate::app::model::Model;
+use crate::app::model::{Model, ProcessingState};
 
 pub struct App;
 
@@ -39,8 +39,10 @@ impl App {
         "CodeMerge".to_string()
     }
 
-    pub fn subscription(_: &Model) -> Subscription<Message> {
-        let tick = iced::time::every(std::time::Duration::from_millis(120)).map(|_| Message::Tick);
+    pub fn subscription(model: &Model) -> Subscription<Message> {
+        let needs_tick = matches!(model.processing_state, ProcessingState::InProgress { .. })
+            || model.ui.toast.is_some()
+            || model.ui.config_save_due_ms.is_some();
         let resize = iced::event::listen().filter_map(|event| match event {
             Event::Window(window::Event::Resized(size)) => {
                 Some(Message::Ui(UiMessage::Resize(size.width, size.height)))
@@ -48,6 +50,12 @@ impl App {
             _ => None,
         });
 
-        Subscription::batch([tick, resize])
+        if needs_tick {
+            let tick = iced::time::every(std::time::Duration::from_millis(update::TICK_MS))
+                .map(|_| Message::Tick);
+            Subscription::batch([tick, resize])
+        } else {
+            resize
+        }
     }
 }
