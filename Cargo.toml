@@ -7,7 +7,6 @@ license = "MIT"
 repository = "https://github.com/hellotime/codemerge"
 
 [dependencies]
-anyhow = "1.0.102"
 arboard = "3.6.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 futures = "0.3.31"
@@ -28,7 +27,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-util = "0.7.17"
 
-iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tokio"] }
+iced = { version = "0.14.0", default-features = false, features = ["tokio", "wgpu"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
