@@ -1,6 +1,6 @@
 [package]
 name = "codemerge"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2024"
 description = "Desktop file merge tool for Linux and Windows."
 license = "MIT"
@@ -28,11 +28,7 @@ thiserror = "2.0.18"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "sync", "time"] }
 tokio-util = "0.7.17"
 
-[target.'cfg(windows)'.dependencies]
 iced = { version = "0.14.0", default-features = false, features = ["wgpu", "tokio"] }
-
-[target.'cfg(not(windows))'.dependencies]
-iced = { version = "0.14.0", default-features = false, features = ["tiny-skia", "tokio"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
