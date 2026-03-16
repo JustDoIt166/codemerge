@@ -125,8 +125,7 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: ${{ github.ref_name }}
-          body: |
-            自动构建发布：包含 Linux/Windows amd64 的安装包与单文件运行版本。
+          body_path: RELEASE_NOTES.md
           files: |
             release-assets/linux-amd64/*
             release-assets/windows-amd64/*
