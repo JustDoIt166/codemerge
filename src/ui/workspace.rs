@@ -26,11 +26,9 @@ use gpui_component::{
     v_flex, v_virtual_list,
 };
 
-use crate::domain::{
-    Language, PreviewRowViewModel, ProcessStatus, ProgressRowViewModel, ResultTab, TreeNode,
-};
+use crate::domain::{FileEntry, Language, PreviewRowViewModel, ProcessStatus, ResultTab, TreeNode};
 use crate::services::settings;
-use crate::ui::state::AppState;
+use crate::ui::state::{AppState, ProcessUiStatus};
 use crate::utils::i18n::tr;
 
 fn preview_line_height() -> Pixels {
@@ -41,21 +39,64 @@ fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<Pixels>>> {
     Rc::new((0..len).map(|_| size(px(100.), height)).collect::<Vec<_>>())
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BlacklistItemKind {
+    Folder,
+    Ext,
+}
+
+#[derive(Clone)]
+struct BlacklistItemViewModel {
+    kind: BlacklistItemKind,
+    value: String,
+    display_label: SharedString,
+    deletable: bool,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SidePanelTab {
+    Results,
+    Rules,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum NarrowContentTab {
+    Status,
+    Results,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PendingConfirmation {
+    ClearInputs,
+    ResetBlacklist,
+    ClearBlacklist,
+}
+
 struct PreviewTableDelegate {
     columns: Vec<Column>,
     rows: Vec<PreviewRowViewModel>,
 }
 
 impl PreviewTableDelegate {
-    fn new() -> Self {
+    fn new(language: Language) -> Self {
         Self {
             columns: vec![
-                Column::new("path", "Path").width(420.),
-                Column::new("chars", "Chars").width(100.).text_right(),
-                Column::new("tokens", "Tokens").width(100.).text_right(),
+                Column::new("path", tr(language, "table_path")).width(420.),
+                Column::new("chars", tr(language, "table_chars"))
+                    .width(100.)
+                    .text_right(),
+                Column::new("tokens", tr(language, "table_tokens"))
+                    .width(100.)
+                    .text_right(),
             ],
             rows: Vec::new(),
         }
+    }
+
+    fn set_language(&mut self, language: Language) {
+        self.columns[0].name = tr(language, "table_path").into();
+        self.columns[1].name = tr(language, "table_chars").into();
+        self.columns[2].name = tr(language, "table_tokens").into();
     }
 }
 
@@ -107,6 +148,9 @@ pub struct Workspace {
     preview_filter_input: Entity<InputState>,
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
+    side_panel_tab: SidePanelTab,
+    narrow_content_tab: NarrowContentTab,
+    pending_confirmation: Option<PendingConfirmation>,
     _poll_task: Task<()>,
     _subscriptions: Vec<Subscription>,
 }
@@ -129,7 +173,8 @@ impl Workspace {
             InputState::new(window, cx).placeholder(tr(cfg.language, "blacklist_unified_hint"))
         });
         let tree_state = cx.new(|cx| TreeState::new(cx));
-        let preview_table = cx.new(|cx| TableState::new(PreviewTableDelegate::new(), window, cx));
+        let preview_table =
+            cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
         let subscriptions = vec![
             cx.subscribe_in(&tree_filter_input, window, Self::on_tree_filter_event),
             cx.subscribe_in(&preview_filter_input, window, Self::on_preview_filter_event),
@@ -156,6 +201,9 @@ impl Workspace {
             preview_filter_input,
             blacklist_filter_input,
             blacklist_add_input,
+            side_panel_tab: SidePanelTab::Results,
+            narrow_content_tab: NarrowContentTab::Status,
+            pending_confirmation: None,
             _poll_task: poll_task,
             _subscriptions: subscriptions,
         };
@@ -163,24 +211,91 @@ impl Workspace {
         this
     }
 
+    fn has_inputs(&self) -> bool {
+        self.state.selection.selected_folder.is_some() || !self.state.selection.selected_files.is_empty()
+    }
+
+    fn is_processing(&self) -> bool {
+        self.state.process.process_handle.is_some()
+    }
+
+    fn clear_pending_confirmation(&mut self) {
+        self.pending_confirmation = None;
+    }
+
+    fn sync_localized_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let language = self.state.settings.language;
+        self.tree_filter_input
+            .update(cx, |state, cx| state.set_placeholder(tr(language, "tree_filter"), window, cx));
+        self.preview_filter_input.update(cx, |state, cx| {
+            state.set_placeholder(tr(language, "file_filter"), window, cx)
+        });
+        self.blacklist_filter_input.update(cx, |state, cx| {
+            state.set_placeholder(tr(language, "blacklist_filter"), window, cx)
+        });
+        self.blacklist_add_input.update(cx, |state, cx| {
+            state.set_placeholder(tr(language, "blacklist_unified_hint"), window, cx)
+        });
+        self.preview_table.update(cx, |table, cx| {
+            table.delegate_mut().set_language(language);
+            cx.notify();
+        });
+        if !self.is_processing() && self.state.process.ui_status == ProcessUiStatus::Idle {
+            self.state.process.processing_current_file = tr(language, "status_ready").to_string();
+        }
+    }
+
+    fn build_blacklist_rows(&self, cx: &Context<Self>) -> Rc<Vec<BlacklistItemViewModel>> {
+        let filter = self
+            .blacklist_filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_lowercase();
+        Rc::new(
+            self.state
+                .settings
+                .folder_blacklist
+                .iter()
+                .map(|item| BlacklistItemViewModel {
+                    kind: BlacklistItemKind::Folder,
+                    value: item.clone(),
+                    display_label: SharedString::from(format!("folder: {item}")),
+                    deletable: true,
+                })
+                .chain(self.state.settings.ext_blacklist.iter().map(|item| BlacklistItemViewModel {
+                    kind: BlacklistItemKind::Ext,
+                    value: item.clone(),
+                    display_label: SharedString::from(format!("ext: {item}")),
+                    deletable: true,
+                }))
+                .filter(|item| {
+                    filter.is_empty() || item.display_label.to_ascii_lowercase().contains(filter.as_str())
+                })
+                .collect::<Vec<_>>(),
+        )
+    }
+
     fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
         h_flex()
             .justify_between()
-            .items_center()
+            .items_end()
             .child(
                 v_flex()
                     .gap_1()
                     .child(div().text_xl().font_semibold().child("CodeMerge"))
                     .child(
                         div()
+                            .text_sm()
                             .text_color(cx.theme().muted_foreground)
-                            .child("GPUI Component Workspace"),
+                            .child(tr(language, "app_subtitle")),
                     ),
             )
             .child(
                 Button::new("toggle-language")
                     .outline()
-                    .label(match self.state.settings.language {
+                    .label(match language {
                         Language::Zh => "EN",
                         Language::En => "中文",
                     })
@@ -188,465 +303,588 @@ impl Workspace {
             )
     }
 
-    fn render_left_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let blacklist_filter = self
-            .blacklist_filter_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_ascii_lowercase();
-        let blacklist_items = self
+    fn render_input_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let has_inputs = self.has_inputs();
+        let is_processing = self.is_processing();
+        let selected_files = Rc::new(self.state.selection.selected_files.clone());
+        let folder_label = self
             .state
-            .settings
-            .folder_blacklist
-            .iter()
-            .map(|item| format!("folder: {item}"))
-            .chain(
-                self.state
-                    .settings
-                    .ext_blacklist
-                    .iter()
-                    .map(|item| format!("ext: {item}")),
-            )
-            .filter(|item| {
-                blacklist_filter.is_empty() || item.to_ascii_lowercase().contains(&blacklist_filter)
-            })
-            .collect::<Vec<_>>();
-        let blacklist_rows = Rc::new(
-            blacklist_items
-                .iter()
-                .cloned()
-                .map(SharedString::from)
-                .collect::<Vec<_>>(),
-        );
+            .selection
+            .selected_folder
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| tr(language, "input_folder_empty").to_string());
+        let gitignore_label = self
+            .state
+            .selection
+            .gitignore_file
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| tr(language, "gitignore_auto_hint").to_string());
 
         card(cx).size_full().child(
             v_flex()
                 .gap_4()
-                .child(section_title(
-                    tr(self.state.settings.language, "section_files"),
-                    cx,
-                ))
+                .size_full()
+                .child(section_title(tr(language, "panel_inputs"), cx))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
                             Button::new("select-folder")
                                 .primary()
-                                .label(tr(self.state.settings.language, "select_folder"))
+                                .label(tr(language, "select_folder"))
                                 .on_click(cx.listener(Self::select_folder)),
                         )
                         .child(
                             Button::new("select-files")
                                 .outline()
-                                .label(tr(self.state.settings.language, "select_files"))
+                                .label(tr(language, "select_files"))
                                 .on_click(cx.listener(Self::select_files)),
                         ),
                 )
+                .child(render_info_block(
+                    tr(language, "folder"),
+                    folder_label,
+                    has_inputs,
+                    cx,
+                ))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .child(section_caption(tr(language, "selected_files_title"), cx))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(self.state.selection.selected_files.len().to_string()),
+                                ),
+                        )
+                        .child(if selected_files.is_empty() {
+                            empty_box(
+                                tr(language, "selected_files_empty"),
+                                tr(language, "selected_files_hint"),
+                                IconName::File,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            let rows = selected_files.clone();
+                            div()
+                                .h(px(180.))
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded(px(12.))
+                                .bg(cx.theme().secondary.opacity(0.22))
+                                .child(
+                                    v_virtual_list(
+                                        cx.entity().clone(),
+                                        "selected-files",
+                                        fixed_list_sizes(rows.len(), px(52.)),
+                                        move |_, visible_range, _, cx| {
+                                            visible_range
+                                                .filter_map(|ix| rows.get(ix))
+                                                .map(|entry| selected_file_row(entry, cx))
+                                                .collect::<Vec<_>>()
+                                        },
+                                    )
+                                    .p_1(),
+                                )
+                                .into_any_element()
+                        }),
+                )
+                .child(section_title(tr(language, "panel_gitignore"), cx))
+                .child(render_info_block(
+                    tr(language, "gitignore"),
+                    gitignore_label,
+                    self.state.selection.gitignore_file.is_some(),
+                    cx,
+                ))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
                             Button::new("select-gitignore")
                                 .outline()
-                                .label(tr(self.state.settings.language, "select_gitignore"))
+                                .label(tr(language, "select_gitignore"))
                                 .on_click(cx.listener(Self::select_gitignore)),
                         )
                         .child(
                             Button::new("apply-gitignore")
                                 .outline()
-                                .label(tr(self.state.settings.language, "apply_gitignore"))
+                                .label(tr(language, "apply_gitignore"))
+                                .disabled(self.state.selection.gitignore_file.is_none())
                                 .on_click(cx.listener(Self::apply_gitignore)),
                         ),
                 )
-                .child(render_kv(
-                    tr(self.state.settings.language, "folder"),
-                    self.state
-                        .selection
-                        .selected_folder
-                        .as_ref()
-                        .map(|path| path.display().to_string())
-                        .unwrap_or_else(|| tr(self.state.settings.language, "none").to_string()),
-                    cx,
-                ))
-                .child(render_kv(
-                    tr(self.state.settings.language, "files"),
-                    self.state.selection.selected_files.len().to_string(),
-                    cx,
-                ))
                 .child(
-                    v_flex().gap_1().children(
-                        self.state
-                            .selection
-                            .selected_files
-                            .iter()
-                            .take(6)
-                            .map(|entry| {
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(format!(
-                                        "{} ({:.1} KB)",
-                                        entry.name,
-                                        entry.size as f64 / 1024.0
-                                    ))
-                                    .into_any_element()
-                            }),
-                    ),
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(tr(language, "gitignore_apply_hint")),
                 )
-                .child(
-                    Button::new("clear-inputs")
-                        .danger()
-                        .label(tr(self.state.settings.language, "clear"))
-                        .on_click(cx.listener(Self::clear_inputs)),
-                )
-                .child(section_title(
-                    tr(self.state.settings.language, "section_options"),
-                    cx,
-                ))
+                .child(section_title(tr(language, "section_options"), cx))
                 .child(
                     Checkbox::new("compress")
                         .checked(self.state.settings.options.compress)
-                        .label(tr(self.state.settings.language, "compress"))
+                        .label(tr(language, "compress"))
                         .on_click(cx.listener(Self::toggle_compress)),
                 )
                 .child(
                     Checkbox::new("use-gitignore")
                         .checked(self.state.settings.options.use_gitignore)
-                        .label(tr(self.state.settings.language, "use_gitignore"))
+                        .label(tr(language, "use_gitignore"))
                         .on_click(cx.listener(Self::toggle_use_gitignore)),
                 )
                 .child(
                     Checkbox::new("ignore-git")
                         .checked(self.state.settings.options.ignore_git)
-                        .label(tr(self.state.settings.language, "ignore_git"))
+                        .label(tr(language, "ignore_git"))
                         .on_click(cx.listener(Self::toggle_ignore_git)),
                 )
                 .child(
                     Checkbox::new("dedupe")
                         .checked(self.state.selection.dedupe_exact_path)
-                        .label(tr(self.state.settings.language, "dedupe_exact_path"))
+                        .label(tr(language, "dedupe_exact_path"))
                         .on_click(cx.listener(Self::toggle_dedupe)),
                 )
-                .child(section_title(
-                    tr(self.state.settings.language, "section_blacklist"),
-                    cx,
-                ))
-                .child(Input::new(&self.blacklist_filter_input).cleanable(true))
-                .child(Input::new(&self.blacklist_add_input))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("add-folder-blacklist")
-                                .outline()
-                                .label(tr(self.state.settings.language, "add_folder"))
-                                .on_click(cx.listener(Self::add_folder_blacklist)),
-                        )
-                        .child(
-                            Button::new("add-ext-blacklist")
-                                .outline()
-                                .label(tr(self.state.settings.language, "add_ext"))
-                                .on_click(cx.listener(Self::add_ext_blacklist)),
-                        ),
-                )
-                .child(if blacklist_rows.is_empty() {
-                    div()
-                        .max_h(px(220.))
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(self.state.settings.language, "none"))
-                        .into_any_element()
-                } else {
-                    let rows = blacklist_rows.clone();
-                    div()
-                        .h(px(220.))
-                        .child(
-                            v_virtual_list(
-                                cx.entity().clone(),
-                                "blacklist-items",
-                                fixed_list_sizes(rows.len(), px(34.)),
-                                move |_, visible_range, _, cx| {
-                                    visible_range
-                                        .filter_map(|ix| rows.get(ix).cloned())
-                                        .map(|item| {
-                                            div()
-                                                .text_sm()
-                                                .p_2()
-                                                .h(px(34.))
-                                                .rounded(cx.theme().radius)
-                                                .bg(cx.theme().secondary)
-                                                .child(item)
-                                                .into_any_element()
-                                        })
-                                        .collect::<Vec<_>>()
-                                },
-                            )
-                            .p_1(),
-                        )
-                        .into_any_element()
-                })
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("import-blacklist")
-                                .outline()
-                                .label(tr(self.state.settings.language, "blacklist_import_append"))
-                                .on_click(cx.listener(Self::import_blacklist)),
-                        )
-                        .child(
-                            Button::new("export-blacklist")
-                                .outline()
-                                .label(tr(self.state.settings.language, "blacklist_export"))
-                                .on_click(cx.listener(Self::export_blacklist)),
-                        ),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("reset-blacklist")
-                                .outline()
-                                .label(tr(self.state.settings.language, "blacklist_reset_default"))
-                                .on_click(cx.listener(Self::reset_blacklist)),
-                        )
-                        .child(
-                            Button::new("clear-blacklist")
-                                .danger()
-                                .label(tr(self.state.settings.language, "blacklist_clear_all"))
-                                .on_click(cx.listener(Self::clear_blacklist)),
-                        ),
-                )
-                .child(
-                    Button::new("save-settings")
-                        .primary()
-                        .label(tr(self.state.settings.language, "save_settings"))
-                        .on_click(cx.listener(Self::save_blacklists)),
-                ),
-        )
-    }
-
-    fn render_center_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let progress_rows = Rc::new(
-            self.state
-                .process
-                .processing_records
-                .iter()
-                .rev()
-                .take(2000)
-                .map(|record| ProgressRowViewModel {
-                    file_name: record.file_name.clone(),
-                    status_label: match record.status {
-                        ProcessStatus::Success => "[OK]".to_string(),
-                        ProcessStatus::Skipped => "[SKIP]".to_string(),
-                        ProcessStatus::Failed => "[ERR]".to_string(),
-                    },
-                })
-                .collect::<Vec<_>>(),
-        );
-        let processed = self
-            .state
-            .process
-            .processing_records
-            .iter()
-            .filter(|record| matches!(record.status, ProcessStatus::Success))
-            .count();
-        let elapsed = self
-            .state
-            .process
-            .processing_started_at
-            .map(|start| format_duration(start.elapsed()))
-            .unwrap_or_else(|| "--:--".to_string());
-        card(cx).size_full().child(
-            v_flex()
-                .gap_4()
-                .child(section_title(
-                    tr(self.state.settings.language, "section_summary"),
-                    cx,
-                ))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(stat_tile(
-                            tr(self.state.settings.language, "total"),
-                            self.state.process.preflight.total_files.to_string(),
-                            cx,
-                        ))
-                        .child(stat_tile(
-                            tr(self.state.settings.language, "skip"),
-                            self.state.process.preflight.skipped_files.to_string(),
-                            cx,
-                        ))
-                        .child(stat_tile(
-                            tr(self.state.settings.language, "process"),
-                            self.state.process.preflight.to_process_files.to_string(),
-                            cx,
-                        )),
-                )
-                .child(if let Some(result) = &self.state.result.result {
-                    h_flex()
-                        .gap_2()
-                        .child(stat_tile(
-                            tr(self.state.settings.language, "chars"),
-                            result.stats.total_chars.to_string(),
-                            cx,
-                        ))
-                        .child(stat_tile(
-                            tr(self.state.settings.language, "tokens"),
-                            result.stats.total_tokens.to_string(),
-                            cx,
-                        ))
-                        .into_any_element()
-                } else {
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(self.state.settings.language, "no_stats"))
-                        .into_any_element()
-                })
-                .child(section_title(
-                    tr(self.state.settings.language, "section_progress"),
-                    cx,
-                ))
-                .child(render_kv(
-                    tr(self.state.settings.language, "progress_count"),
-                    format!(
-                        "{processed}/{}",
-                        self.state.process.processing_candidates.max(1)
-                    ),
-                    cx,
-                ))
-                .child(render_kv(
-                    tr(self.state.settings.language, "elapsed"),
-                    elapsed,
-                    cx,
-                ))
-                .child(render_kv(
-                    tr(self.state.settings.language, "processing"),
-                    self.state.process.processing_current_file.clone(),
-                    cx,
-                ))
                 .child(
                     h_flex()
                         .gap_2()
                         .child(
                             Button::new("start-process")
                                 .primary()
-                                .label(tr(self.state.settings.language, "start"))
+                                .label(tr(language, "start"))
+                                .disabled(!has_inputs || is_processing)
                                 .on_click(cx.listener(Self::start_process)),
                         )
                         .child(
                             Button::new("cancel-process")
-                                .danger()
-                                .label(tr(self.state.settings.language, "cancel"))
+                                .outline()
+                                .label(tr(language, "cancel"))
+                                .disabled(!is_processing)
                                 .on_click(cx.listener(Self::cancel_process)),
                         ),
                 )
-                .child(if progress_rows.is_empty() {
+                .child(
                     div()
-                        .max_h(px(460.))
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(self.state.settings.language, "status_ready"))
-                        .into_any_element()
-                } else {
-                    let rows = progress_rows.clone();
-                    div()
-                        .h(px(460.))
+                        .pt_2()
+                        .border_t_1()
+                        .border_color(cx.theme().border)
                         .child(
-                            v_virtual_list(
-                                cx.entity().clone(),
-                                "progress-rows",
-                                fixed_list_sizes(rows.len(), px(26.)),
-                                move |_, visible_range, _, cx| {
-                                    visible_range
-                                        .filter_map(|ix| rows.get(ix))
-                                        .map(|row| {
-                                            div()
-                                                .text_sm()
-                                                .h(px(26.))
-                                                .font_family(cx.theme().mono_font_family.clone())
-                                                .child(format!(
-                                                    "{} {}",
-                                                    row.status_label, row.file_name
-                                                ))
-                                                .into_any_element()
+                            v_flex()
+                                .gap_2()
+                                .child(section_caption(tr(language, "danger_zone"), cx))
+                                .child(
+                                    div()
+                                        .text_xs()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(tr(language, "danger_zone_hint")),
+                                )
+                                .child(
+                                    Button::new("clear-inputs")
+                                        .danger()
+                                        .label(if self.pending_confirmation
+                                            == Some(PendingConfirmation::ClearInputs)
+                                        {
+                                            tr(language, "confirm_clear_inputs")
+                                        } else {
+                                            tr(language, "clear")
                                         })
-                                        .collect::<Vec<_>>()
-                                },
-                            )
-                            .p_1(),
+                                        .on_click(cx.listener(Self::clear_inputs)),
+                                ),
+                        ),
+                ),
+        )
+    }
+
+    fn render_status_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let result_stats = self.state.result.result.as_ref().map(|result| &result.stats);
+        let processed_count = self.state.process.processing_records.len();
+        let failed_count = self
+            .state
+            .process
+            .processing_records
+            .iter()
+            .filter(|record| matches!(record.status, ProcessStatus::Failed))
+            .count();
+        let activity_rows = Rc::new(
+            self.state
+                .process
+                .processing_records
+                .iter()
+                .rev()
+                .take(16)
+                .cloned()
+                .collect::<Vec<_>>(),
+        );
+        let progress_total = self
+            .state
+            .process
+            .processing_candidates
+            .max(self.state.process.preflight.to_process_files)
+            .max(1);
+        let progress_value = processed_count.min(progress_total);
+        let progress_ratio = progress_value as f32 / progress_total as f32;
+        let bar_fill = px((progress_ratio * 240.0).round());
+        let elapsed = self
+            .state
+            .process
+            .processing_started_at
+            .map(|start| format_duration(start.elapsed()))
+            .unwrap_or_else(|| "--:--".to_string());
+
+        card(cx).size_full().child(
+            v_flex()
+                .gap_4()
+                .size_full()
+                .child(section_title(tr(language, "panel_status"), cx))
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(stat_tile(tr(language, "total"), self.state.process.preflight.total_files.to_string(), cx))
+                        .child(stat_tile(tr(language, "process"), self.state.process.preflight.to_process_files.to_string(), cx))
+                        .child(stat_tile(tr(language, "skip"), self.state.process.preflight.skipped_files.to_string(), cx)),
+                )
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(stat_tile(tr(language, "chars"), result_stats.map(|stats| stats.total_chars.to_string()).unwrap_or_else(|| "--".to_string()), cx))
+                        .child(stat_tile(tr(language, "tokens"), result_stats.map(|stats| stats.total_tokens.to_string()).unwrap_or_else(|| "--".to_string()), cx))
+                        .child(stat_tile(tr(language, "failed_count"), failed_count.to_string(), cx)),
+                )
+                .child(status_banner(
+                    process_status_title(self.state.process.ui_status, language),
+                    process_status_message(self, language),
+                    self.state.process.ui_status,
+                    cx,
+                ))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .justify_between()
+                                .items_center()
+                                .child(section_caption(tr(language, "progress_overview"), cx))
+                                .child(
+                                    div()
+                                        .text_sm()
+                                        .text_color(cx.theme().muted_foreground)
+                                        .child(format!("{progress_value}/{progress_total}")),
+                                ),
                         )
-                        .into_any_element()
-                }),
+                        .child(
+                            div()
+                                .w(px(240.))
+                                .h(px(10.))
+                                .rounded(px(999.))
+                                .bg(cx.theme().secondary)
+                                .child(
+                                    div()
+                                        .h_full()
+                                        .w(bar_fill)
+                                        .rounded(px(999.))
+                                        .bg(cx.theme().primary),
+                                ),
+                        )
+                        .child(render_kv(tr(language, "elapsed"), elapsed, cx))
+                        .child(render_kv(tr(language, "processing"), self.state.process.processing_current_file.clone(), cx)),
+                )
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .flex_1()
+                        .child(section_caption(tr(language, "recent_activity"), cx))
+                        .child(if activity_rows.is_empty() {
+                            empty_box(
+                                tr(language, "activity_empty"),
+                                tr(language, "activity_empty_hint"),
+                                IconName::File,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            let rows = activity_rows.clone();
+                            div()
+                                .flex_1()
+                                .border_1()
+                                .border_color(cx.theme().border)
+                                .rounded(px(12.))
+                                .bg(cx.theme().secondary.opacity(0.22))
+                                .child(
+                                    v_virtual_list(
+                                        cx.entity().clone(),
+                                        "activity-rows",
+                                        fixed_list_sizes(rows.len(), px(38.)),
+                                        move |_, visible_range, _, cx| {
+                                            visible_range
+                                                .filter_map(|ix| rows.get(ix))
+                                                .map(|record| activity_row(record, cx))
+                                                .collect::<Vec<_>>()
+                                        },
+                                    )
+                                    .p_1(),
+                                )
+                                .into_any_element()
+                        }),
+                ),
         )
     }
 
     fn render_right_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let selected_tab = if self.state.result.active_tab == ResultTab::Tree {
+        let language = self.state.settings.language;
+        let selected_index = if self.side_panel_tab == SidePanelTab::Results {
             0
         } else {
             1
         };
+
         card(cx).size_full().child(
             v_flex()
                 .gap_3()
                 .size_full()
                 .child(
-                    h_flex()
-                        .justify_between()
-                        .items_center()
-                        .child(
-                            TabBar::new("result-tabs")
-                                .selected_index(selected_tab)
-                                .on_click(cx.listener(Self::set_tab))
-                                .child(
-                                    Tab::new().label(tr(
-                                        self.state.settings.language,
-                                        "tab_tree_preview",
-                                    )),
-                                )
-                                .child(
-                                    Tab::new().label(tr(
-                                        self.state.settings.language,
-                                        "tab_merged_content",
-                                    )),
-                                ),
-                        )
-                        .child(
-                            h_flex()
-                                .gap_2()
-                                .child(
-                                    Button::new("copy-active")
-                                        .outline()
-                                        .label(if self.state.result.active_tab == ResultTab::Tree {
-                                            tr(self.state.settings.language, "copy_tree")
-                                        } else {
-                                            tr(self.state.settings.language, "copy_current_page")
-                                        })
-                                        .on_click(cx.listener(
-                                            if self.state.result.active_tab == ResultTab::Tree {
-                                                Self::copy_tree
-                                            } else {
-                                                Self::copy_preview
-                                            },
-                                        )),
-                                )
-                                .child(
-                                    Button::new("download-result")
-                                        .outline()
-                                        .label(tr(self.state.settings.language, "download"))
-                                        .disabled(self.state.result.active_tab == ResultTab::Tree)
-                                        .on_click(cx.listener(Self::download_result)),
-                                ),
-                        ),
+                    TabBar::new("side-panel-tabs")
+                        .selected_index(selected_index)
+                        .on_click(cx.listener(Self::set_side_panel_tab))
+                        .child(Tab::new().label(tr(language, "panel_results")))
+                        .child(Tab::new().label(tr(language, "panel_rules"))),
                 )
-                .child(match self.state.result.active_tab {
-                    ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
-                    ResultTab::Content => self.render_content_panel(cx).into_any_element(),
+                .child(match self.side_panel_tab {
+                    SidePanelTab::Results => self.render_results_panel(cx).into_any_element(),
+                    SidePanelTab::Rules => self.render_rules_panel(cx).into_any_element(),
                 }),
         )
+    }
+
+    fn render_results_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let selected_tab = if self.state.result.active_tab == ResultTab::Tree {
+            0
+        } else {
+            1
+        };
+
+        v_flex()
+            .gap_3()
+            .size_full()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(
+                        TabBar::new("result-tabs")
+                            .selected_index(selected_tab)
+                            .on_click(cx.listener(Self::set_tab))
+                            .child(Tab::new().label(tr(language, "tab_tree_preview")))
+                            .child(Tab::new().label(tr(language, "tab_merged_content"))),
+                    )
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("copy-active")
+                                    .outline()
+                                    .label(if self.state.result.active_tab == ResultTab::Tree {
+                                        tr(language, "copy_tree")
+                                    } else {
+                                        tr(language, "copy_current_page")
+                                    })
+                                    .on_click(cx.listener(
+                                        if self.state.result.active_tab == ResultTab::Tree {
+                                            Self::copy_tree
+                                        } else {
+                                            Self::copy_preview
+                                        },
+                                    )),
+                            )
+                            .child(
+                                Button::new("download-result")
+                                    .outline()
+                                    .label(tr(language, "download"))
+                                    .disabled(self.state.result.active_tab == ResultTab::Tree)
+                                    .on_click(cx.listener(Self::download_result)),
+                            ),
+                    ),
+            )
+            .child(match self.state.result.active_tab {
+                ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
+                ResultTab::Content => self.render_content_panel(cx).into_any_element(),
+            })
+    }
+
+    fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let blacklist_rows = self.build_blacklist_rows(cx);
+
+        v_flex()
+            .gap_3()
+            .size_full()
+            .child(
+                div()
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(language, "rules_secondary_hint")),
+            )
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(Input::new(&self.blacklist_add_input))
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("add-folder-blacklist")
+                                    .outline()
+                                    .label(tr(language, "add_folder"))
+                                    .on_click(cx.listener(Self::add_folder_blacklist)),
+                            )
+                            .child(
+                                Button::new("add-ext-blacklist")
+                                    .outline()
+                                    .label(tr(language, "add_ext"))
+                                    .on_click(cx.listener(Self::add_ext_blacklist)),
+                            ),
+                    ),
+            )
+            .child(Input::new(&self.blacklist_filter_input).cleanable(true))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("import-blacklist")
+                            .outline()
+                            .label(tr(language, "blacklist_import_append"))
+                            .on_click(cx.listener(Self::import_blacklist)),
+                    )
+                    .child(
+                        Button::new("export-blacklist")
+                            .outline()
+                            .label(tr(language, "blacklist_export"))
+                            .on_click(cx.listener(Self::export_blacklist)),
+                    ),
+            )
+            .child(if blacklist_rows.is_empty() {
+                empty_box(
+                    tr(language, "blacklist_empty_title"),
+                    tr(language, "blacklist_empty_hint"),
+                    IconName::Folder,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                let rows = blacklist_rows.clone();
+                div()
+                    .flex_1()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(12.))
+                    .bg(cx.theme().secondary.opacity(0.22))
+                    .child(
+                        v_virtual_list(
+                            cx.entity().clone(),
+                            "blacklist-items",
+                            fixed_list_sizes(rows.len(), px(44.)),
+                            move |_, visible_range, _, cx| {
+                                visible_range
+                                    .filter_map(|ix| rows.get(ix).cloned().map(|item| (ix, item)))
+                                    .map(|(ix, item)| {
+                                        let kind = item.kind;
+                                        let value = item.value.clone();
+                                        h_flex()
+                                            .justify_between()
+                                            .items_center()
+                                            .px_3()
+                                            .h(px(44.))
+                                            .child(
+                                                h_flex()
+                                                    .gap_2()
+                                                    .items_center()
+                                                    .child(
+                                                        pill_label(
+                                                            match item.kind {
+                                                                BlacklistItemKind::Folder => {
+                                                                    tr(language, "folder")
+                                                                }
+                                                                BlacklistItemKind::Ext => {
+                                                                    tr(language, "extension")
+                                                                }
+                                                            },
+                                                            cx,
+                                                        ),
+                                                    )
+                                                    .child(
+                                                        div()
+                                                            .truncate()
+                                                            .child(item.display_label.clone()),
+                                                    ),
+                                            )
+                                            .child(
+                                                Button::new(("remove-blacklist", ix))
+                                                    .outline()
+                                                    .label(tr(language, "remove_tag"))
+                                                    .disabled(!item.deletable)
+                                                    .on_click(cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.remove_blacklist_item(
+                                                                kind,
+                                                                value.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    )),
+                                            )
+                                            .into_any_element()
+                                    })
+                                    .collect::<Vec<_>>()
+                            },
+                        )
+                        .p_1(),
+                    )
+                    .into_any_element()
+            })
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        h_flex()
+                            .gap_2()
+                            .child(
+                                Button::new("reset-blacklist")
+                                    .outline()
+                                    .label(if self.pending_confirmation
+                                        == Some(PendingConfirmation::ResetBlacklist)
+                                    {
+                                        tr(language, "confirm_reset_blacklist")
+                                    } else {
+                                        tr(language, "blacklist_reset_default")
+                                    })
+                                    .on_click(cx.listener(Self::reset_blacklist)),
+                            )
+                            .child(
+                                Button::new("clear-blacklist")
+                                    .danger()
+                                    .label(if self.pending_confirmation
+                                        == Some(PendingConfirmation::ClearBlacklist)
+                                    {
+                                        tr(language, "confirm_clear_blacklist")
+                                    } else {
+                                        tr(language, "blacklist_clear_all")
+                                    })
+                                    .on_click(cx.listener(Self::clear_blacklist)),
+                            ),
+                    ),
+            )
     }
 
     fn render_tree_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -821,26 +1059,14 @@ impl Workspace {
                             )),
                     )
                     .child(
-                        div()
-                            .text_xs()
-                            .px_2()
-                            .py_1()
-                            .rounded(px(999.))
-                            .bg(if filter_active {
-                                cx.theme().accent
-                            } else {
-                                cx.theme().secondary
-                            })
-                            .text_color(if filter_active {
-                                cx.theme().accent_foreground
-                            } else {
-                                cx.theme().muted_foreground
-                            })
-                            .child(if filter_active {
+                        pill_label(
+                            if filter_active {
                                 tr(language, "tree_filter_active")
                             } else {
                                 tr(language, "tree_filter_idle")
-                            }),
+                            },
+                            cx,
+                        ),
                     ),
             )
             .child(
@@ -855,82 +1081,100 @@ impl Workspace {
                     .child(if has_visible_nodes {
                         tree_view.into_any_element()
                     } else {
-                        v_flex()
-                            .size_full()
-                            .items_center()
-                            .justify_center()
-                            .gap_2()
-                            .child(
-                                div()
-                                    .w(px(40.))
-                                    .h(px(40.))
-                                    .rounded(px(12.))
-                                    .bg(cx.theme().accent)
-                                    .text_color(cx.theme().accent_foreground)
-                                    .items_center()
-                                    .justify_center()
-                                    .child(IconName::FolderOpen),
-                            )
-                            .child(div().font_semibold().child(if has_result {
+                        empty_box(
+                            if has_result {
                                 tr(language, "tree_no_match")
                             } else {
                                 tr(language, "tree_empty")
-                            }))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(if has_result && filter_active {
-                                        tr(language, "tree_no_match_hint")
-                                    } else {
-                                        tr(language, "tree_empty_hint")
-                                    }),
-                            )
-                            .into_any_element()
+                            },
+                            if has_result && filter_active {
+                                tr(language, "tree_no_match_hint")
+                            } else {
+                                tr(language, "tree_empty_hint")
+                            },
+                            IconName::FolderOpen,
+                            cx,
+                        )
+                        .into_any_element()
                     }),
             )
     }
 
     fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let has_result = self.state.result.result.is_some();
+        let has_rows = !self.state.result.preview_rows.is_empty();
+
         v_flex()
             .gap_3()
             .size_full()
             .child(Input::new(&self.preview_filter_input).cleanable(true))
-            .child(
-                div().h(px(220.)).child(
-                    Table::new(&self.preview_table)
-                        .with_size(Size::Small)
-                        .stripe(true),
-                ),
-            )
+            .child(if has_result && has_rows {
+                div()
+                    .h(px(220.))
+                    .child(
+                        Table::new(&self.preview_table)
+                            .with_size(Size::Small)
+                            .stripe(true),
+                    )
+                    .into_any_element()
+            } else {
+                empty_box(
+                    if has_result {
+                        tr(language, "content_no_match")
+                    } else {
+                        tr(language, "content_empty")
+                    },
+                    if has_result {
+                        tr(language, "content_no_match_hint")
+                    } else {
+                        tr(language, "content_empty_hint")
+                    },
+                    IconName::File,
+                    cx,
+                )
+                .into_any_element()
+            })
             .child(self.render_preview(cx))
     }
 
     fn render_preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let selected_preview = self
+            .state
+            .workspace
+            .selected_preview_file_id
+            .and_then(|id| self.state.result.preview_rows.iter().find(|row| row.id == id));
+
         let Some(document) = &self.state.workspace.preview_document else {
-            return div()
-                .flex_1()
-                .rounded(cx.theme().radius)
-                .border_1()
-                .border_color(cx.theme().border)
-                .items_center()
-                .justify_center()
-                .child(tr(self.state.settings.language, "no_content"));
+            return empty_box(
+                tr(language, "preview_empty"),
+                tr(language, "preview_empty_hint"),
+                IconName::File,
+                cx,
+            );
         };
-        let line_count = document.line_count();
+
+        let file_path = selected_preview
+            .map(|row| row.display_path.clone())
+            .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+
         v_flex()
             .gap_2()
             .flex_1()
+            .child(render_kv(tr(language, "table_path"), file_path, cx))
             .child(
-                div()
-                    .text_sm()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(format!(
-                        "{} lines | {} bytes | cached {:?} | visible {:?}",
-                        line_count,
-                        document.byte_len(),
-                        self.state.workspace.preview_loaded_range,
-                        self.state.workspace.preview_visible_range
+                h_flex()
+                    .gap_3()
+                    .child(render_kv(
+                        tr(language, "line_count"),
+                        document.line_count().to_string(),
+                        cx,
+                    ))
+                    .child(render_kv(
+                        tr(language, "byte_size"),
+                        document.byte_len().to_string(),
+                        cx,
                     )),
             )
             .child(
@@ -995,6 +1239,71 @@ impl Workspace {
                     ),
             )
     }
+
+    fn render_main_content(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let is_narrow = window.bounds().size.width < px(1320.);
+
+        if is_narrow {
+            let selected_index = if self.narrow_content_tab == NarrowContentTab::Status {
+                0
+            } else {
+                1
+            };
+
+            h_resizable("codemerge-layout-compact")
+                .child(
+                    resizable_panel()
+                        .size(px(340.))
+                        .size_range(px(280.)..px(420.))
+                        .child(self.render_input_panel(cx)),
+                )
+                .child(
+                    resizable_panel().child(
+                        card(cx).size_full().child(
+                            v_flex()
+                                .gap_3()
+                                .size_full()
+                                .child(
+                                    TabBar::new("compact-content-tabs")
+                                        .selected_index(selected_index)
+                                        .on_click(cx.listener(Self::set_narrow_content_tab))
+                                        .child(Tab::new().label(tr(
+                                            self.state.settings.language,
+                                            "panel_status",
+                                        )))
+                                        .child(Tab::new().label(tr(
+                                            self.state.settings.language,
+                                            "panel_results",
+                                        ))),
+                                )
+                                .child(match self.narrow_content_tab {
+                                    NarrowContentTab::Status => {
+                                        self.render_status_panel(cx).into_any_element()
+                                    }
+                                    NarrowContentTab::Results => {
+                                        self.render_right_panel(cx).into_any_element()
+                                    }
+                                }),
+                        ),
+                    ),
+                )
+        } else {
+            h_resizable("codemerge-layout")
+                .child(
+                    resizable_panel()
+                        .size(px(340.))
+                        .size_range(px(280.)..px(460.))
+                        .child(self.render_input_panel(cx)),
+                )
+                .child(
+                    resizable_panel()
+                        .size(px(360.))
+                        .size_range(px(300.)..px(520.))
+                        .child(self.render_status_panel(cx)),
+                )
+                .child(resizable_panel().child(self.render_right_panel(cx)))
+        }
+    }
 }
 
 impl Focusable for Workspace {
@@ -1004,7 +1313,7 @@ impl Focusable for Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         v_flex()
             .id("codemerge-root")
             .track_focus(&self.focus_handle)
@@ -1012,24 +1321,7 @@ impl Render for Workspace {
             .p_4()
             .gap_4()
             .child(self.render_header(cx))
-            .child(
-                div().flex_1().child(
-                    h_resizable("codemerge-layout")
-                        .child(
-                            resizable_panel()
-                                .size(px(340.))
-                                .size_range(px(280.)..px(460.))
-                                .child(self.render_left_panel(cx)),
-                        )
-                        .child(
-                            resizable_panel()
-                                .size(px(360.))
-                                .size_range(px(280.)..px(520.))
-                                .child(self.render_center_panel(cx)),
-                        )
-                        .child(resizable_panel().child(self.render_right_panel(cx))),
-                ),
-            )
+            .child(div().flex_1().child(self.render_main_content(window, cx)))
     }
 }
 
@@ -1160,6 +1452,37 @@ fn section_title(title: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
+fn section_caption(title: &str, cx: &App) -> AnyElement {
+    div()
+        .text_sm()
+        .font_semibold()
+        .text_color(cx.theme().foreground)
+        .child(title.to_string())
+        .into_any_element()
+}
+
+fn render_info_block(label: &str, value: String, emphasized: bool, cx: &App) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .p_3()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(if emphasized {
+            cx.theme().secondary.opacity(0.25)
+        } else {
+            cx.theme().background
+        })
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(label.to_string()),
+        )
+        .child(div().text_sm().child(value))
+        .into_any_element()
+}
+
 fn render_kv(label: &str, value: String, cx: &App) -> AnyElement {
     h_flex()
         .justify_between()
@@ -1194,6 +1517,183 @@ fn stat_tile(label: &str, value: String, cx: &App) -> AnyElement {
                 .child(div().text_lg().font_semibold().child(value)),
         )
         .into_any_element()
+}
+
+fn status_banner(
+    title: &str,
+    message: String,
+    status: ProcessUiStatus,
+    cx: &App,
+) -> AnyElement {
+    let tone = match status {
+        ProcessUiStatus::Completed => cx.theme().primary.opacity(0.18),
+        ProcessUiStatus::Cancelled => cx.theme().warning.opacity(0.22),
+        ProcessUiStatus::Error => cx.theme().danger.opacity(0.18),
+        ProcessUiStatus::Running | ProcessUiStatus::Preflight => cx.theme().accent.opacity(0.18),
+        ProcessUiStatus::Idle => cx.theme().secondary,
+    };
+
+    v_flex()
+        .gap_1()
+        .p_3()
+        .rounded(px(12.))
+        .bg(tone)
+        .child(div().font_semibold().child(title.to_string()))
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(message),
+        )
+        .into_any_element()
+}
+
+fn empty_box(title: &str, hint: &str, icon: IconName, cx: &App) -> gpui::Div {
+    v_flex()
+        .size_full()
+        .items_center()
+        .justify_center()
+        .gap_2()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary.opacity(0.18))
+        .child(
+            div()
+                .w(px(40.))
+                .h(px(40.))
+                .rounded(px(12.))
+                .bg(cx.theme().accent)
+                .text_color(cx.theme().accent_foreground)
+                .items_center()
+                .justify_center()
+                .child(icon),
+        )
+        .child(div().font_semibold().child(title.to_string()))
+        .child(
+            div()
+                .text_sm()
+                .text_color(cx.theme().muted_foreground)
+                .child(hint.to_string()),
+        )
+}
+
+fn pill_label(label: &str, cx: &App) -> AnyElement {
+    div()
+        .text_xs()
+        .px_2()
+        .py_1()
+        .rounded(px(999.))
+        .bg(cx.theme().secondary)
+        .text_color(cx.theme().muted_foreground)
+        .child(label.to_string())
+        .into_any_element()
+}
+
+fn selected_file_row(entry: &FileEntry, cx: &App) -> AnyElement {
+    v_flex()
+        .gap_1()
+        .px_3()
+        .py_2()
+        .h(px(52.))
+        .child(
+            h_flex()
+                .justify_between()
+                .child(div().font_semibold().truncate().child(entry.name.clone()))
+                .child(
+                    div()
+                        .text_xs()
+                        .text_color(cx.theme().muted_foreground)
+                        .child(format_size(entry.size)),
+                ),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .truncate()
+                .child(entry.path.display().to_string()),
+        )
+        .into_any_element()
+}
+
+fn activity_row(record: &crate::domain::ProcessRecord, cx: &App) -> AnyElement {
+    let (icon, accent, status_label) = match record.status {
+        ProcessStatus::Success => (IconName::Check, cx.theme().primary, "OK"),
+        ProcessStatus::Skipped => (IconName::ArrowRight, cx.theme().warning, "Skip"),
+        ProcessStatus::Failed => (IconName::Close, cx.theme().danger, "Error"),
+    };
+
+    h_flex()
+        .justify_between()
+        .items_center()
+        .px_3()
+        .h(px(38.))
+        .child(
+            h_flex()
+                .gap_2()
+                .items_center()
+                .child(
+                    div()
+                        .w(px(20.))
+                        .h(px(20.))
+                        .rounded(px(999.))
+                        .bg(accent.opacity(0.15))
+                        .text_color(accent)
+                        .items_center()
+                        .justify_center()
+                        .child(icon),
+                )
+                .child(div().truncate().child(record.file_name.clone())),
+        )
+        .child(
+            div()
+                .text_xs()
+                .text_color(cx.theme().muted_foreground)
+                .child(status_label),
+        )
+        .into_any_element()
+}
+
+fn process_status_title(status: ProcessUiStatus, language: Language) -> &'static str {
+    match status {
+        ProcessUiStatus::Idle => tr(language, "status_idle"),
+        ProcessUiStatus::Preflight => tr(language, "status_preflight"),
+        ProcessUiStatus::Running => tr(language, "status_running"),
+        ProcessUiStatus::Completed => tr(language, "status_completed"),
+        ProcessUiStatus::Cancelled => tr(language, "status_cancelled"),
+        ProcessUiStatus::Error => tr(language, "status_error"),
+    }
+}
+
+fn process_status_message(workspace: &Workspace, language: Language) -> String {
+    match workspace.state.process.ui_status {
+        ProcessUiStatus::Idle => tr(language, "status_idle_hint").to_string(),
+        ProcessUiStatus::Preflight => format!(
+            "{} {}",
+            tr(language, "status_preflight_hint"),
+            workspace.state.process.preflight.scanned_entries
+        ),
+        ProcessUiStatus::Running => workspace.state.process.processing_current_file.clone(),
+        ProcessUiStatus::Completed => tr(language, "status_completed_hint").to_string(),
+        ProcessUiStatus::Cancelled => tr(language, "status_cancelled_hint").to_string(),
+        ProcessUiStatus::Error => workspace
+            .state
+            .process
+            .last_error
+            .clone()
+            .unwrap_or_else(|| tr(language, "status_error_hint").to_string()),
+    }
+}
+
+fn format_size(size: u64) -> String {
+    if size < 1024 {
+        format!("{size} B")
+    } else if size < 1024 * 1024 {
+        format!("{:.1} KB", size as f64 / 1024.0)
+    } else {
+        format!("{:.1} MB", size as f64 / 1024.0 / 1024.0)
+    }
 }
 
 fn copy_to_clipboard(content: &str, language: Language, window: &mut Window, cx: &mut App) {

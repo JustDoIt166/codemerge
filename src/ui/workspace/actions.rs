@@ -9,7 +9,10 @@ use gpui_component::{
     table::{TableEvent, TableState},
 };
 
-use super::{PreviewTableDelegate, TreeExpansionMode, Workspace, copy_to_clipboard};
+use super::{
+    BlacklistItemKind, NarrowContentTab, PendingConfirmation, PreviewTableDelegate, SidePanelTab,
+    TreeExpansionMode, Workspace, copy_to_clipboard,
+};
 use crate::domain::{FileEntry, ResultTab};
 use crate::services::preview::load_text;
 use crate::services::process::ProcessRequest;
@@ -167,7 +170,13 @@ impl Workspace {
     ) {
         self.state.settings.language = self.state.settings.language.toggle();
         self.persist_settings_async(cx);
-        self.push_notice(NotificationType::Info, "Language updated", window, cx);
+        self.sync_localized_inputs(window, cx);
+        self.push_notice(
+            NotificationType::Info,
+            tr(self.state.settings.language, "language_updated"),
+            window,
+            cx,
+        );
         cx.notify();
     }
 
@@ -307,10 +316,24 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_confirmation != Some(PendingConfirmation::ClearInputs) {
+            self.pending_confirmation = Some(PendingConfirmation::ClearInputs);
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.state.settings.language, "confirm_clear_notice"),
+                window,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.clear_pending_confirmation();
         self.state.selection.selected_folder = None;
         self.state.selection.selected_files.clear();
         self.state.selection.gitignore_file = None;
         self.state.result.result = None;
+        self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Idle;
+        self.state.process.last_error = None;
         self.clear_preview_state();
         self.sync_tree(cx);
         self.sync_preview_table(cx);
@@ -352,6 +375,11 @@ impl Workspace {
         }
         self.state.result.result = None;
         self.clear_preview_state();
+        self.clear_pending_confirmation();
+        self.side_panel_tab = SidePanelTab::Results;
+        self.narrow_content_tab = NarrowContentTab::Status;
+        self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Running;
+        self.state.process.last_error = None;
         self.state.process.processing_records.clear();
         self.state.process.processing_scanned = 0;
         self.state.process.processing_candidates = 0;
@@ -390,6 +418,7 @@ impl Workspace {
     ) {
         if let Some(handle) = &self.state.process.process_handle {
             handle.cancel.cancel();
+            self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Cancelled;
             self.push_notice(
                 NotificationType::Info,
                 tr(self.state.settings.language, "cancelled"),
@@ -400,27 +429,13 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn save_blacklists(
-        &mut self,
-        _: &ClickEvent,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        self.persist_settings_async(cx);
-        self.push_notice(
-            NotificationType::Success,
-            tr(self.state.settings.language, "blacklist_saved"),
-            window,
-            cx,
-        );
-    }
-
     pub(super) fn add_folder_blacklist(
         &mut self,
         _: &ClickEvent,
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         let added = self.consume_blacklist_input(false, window, cx);
         if added > 0 {
             self.refresh_preflight();
@@ -433,6 +448,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         let added = self.consume_blacklist_input(true, window, cx);
         if added > 0 {
             self.refresh_preflight();
@@ -542,6 +558,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         let _ = window;
         cx.spawn(async move |this, cx| {
             let path = rfd::AsyncFileDialog::new()
@@ -596,6 +613,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_confirmation != Some(PendingConfirmation::ResetBlacklist) {
+            self.pending_confirmation = Some(PendingConfirmation::ResetBlacklist);
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.state.settings.language, "confirm_reset_notice"),
+                window,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.clear_pending_confirmation();
         self.state.settings.folder_blacklist = crate::domain::default_folder_blacklist();
         self.state.settings.ext_blacklist = crate::domain::default_ext_blacklist();
         self.persist_settings_async(cx);
@@ -615,6 +644,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.pending_confirmation != Some(PendingConfirmation::ClearBlacklist) {
+            self.pending_confirmation = Some(PendingConfirmation::ClearBlacklist);
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.state.settings.language, "confirm_clear_notice"),
+                window,
+                cx,
+            );
+            cx.notify();
+            return;
+        }
+        self.clear_pending_confirmation();
         self.state.settings.folder_blacklist.clear();
         self.state.settings.ext_blacklist.clear();
         self.persist_settings_async(cx);
@@ -634,6 +675,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         self.state.settings.options.compress = *checked;
         self.persist_settings_async(cx);
         cx.notify();
@@ -645,6 +687,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         self.state.settings.options.use_gitignore = *checked;
         self.persist_settings_async(cx);
         cx.notify();
@@ -656,6 +699,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation();
         self.state.settings.options.ignore_git = *checked;
         if *checked {
             if !self
@@ -681,6 +725,7 @@ impl Workspace {
     }
 
     pub(super) fn toggle_dedupe(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
+        self.clear_pending_confirmation();
         self.state.selection.dedupe_exact_path = *checked;
         cx.notify();
     }
@@ -690,6 +735,34 @@ impl Workspace {
             ResultTab::Tree
         } else {
             ResultTab::Content
+        };
+        cx.notify();
+    }
+
+    pub(super) fn set_side_panel_tab(
+        &mut self,
+        ix: &usize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.side_panel_tab = if *ix == 0 {
+            SidePanelTab::Results
+        } else {
+            SidePanelTab::Rules
+        };
+        cx.notify();
+    }
+
+    pub(super) fn set_narrow_content_tab(
+        &mut self,
+        ix: &usize,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.narrow_content_tab = if *ix == 0 {
+            NarrowContentTab::Status
+        } else {
+            NarrowContentTab::Results
         };
         cx.notify();
     }
@@ -761,6 +834,29 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    pub(super) fn remove_blacklist_item(
+        &mut self,
+        kind: BlacklistItemKind,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation();
+        match kind {
+            BlacklistItemKind::Folder => self.state.settings.folder_blacklist.retain(|item| item != &value),
+            BlacklistItemKind::Ext => self.state.settings.ext_blacklist.retain(|item| item != &value),
+        }
+        self.persist_settings_async(cx);
+        self.refresh_preflight();
+        self.push_notice(
+            NotificationType::Info,
+            tr(self.state.settings.language, "blacklist_item_removed"),
+            window,
+            cx,
+        );
+        cx.notify();
     }
 
     pub(super) fn download_result(

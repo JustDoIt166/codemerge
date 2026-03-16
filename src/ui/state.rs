@@ -26,6 +26,17 @@ pub struct AppState {
     pub workspace: WorkspaceState,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ProcessUiStatus {
+    #[default]
+    Idle,
+    Preflight,
+    Running,
+    Completed,
+    Cancelled,
+    Error,
+}
+
 impl AppState {
     pub fn from_config(config: AppConfigV1, status_ready: String) -> Self {
         Self {
@@ -82,12 +93,14 @@ pub struct ProcessState {
     pub preflight_revision: u64,
     pub preflight_rx: Option<std::sync::mpsc::Receiver<PreflightEvent>>,
     pub process_handle: Option<ProcessHandle>,
+    pub ui_status: ProcessUiStatus,
     pub processing_records: Vec<ProcessRecord>,
     pub processing_scanned: usize,
     pub processing_candidates: usize,
     pub processing_skipped: usize,
     pub processing_current_file: String,
     pub processing_started_at: Option<Instant>,
+    pub last_error: Option<String>,
 }
 
 #[derive(Default)]

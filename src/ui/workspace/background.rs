@@ -11,6 +11,7 @@ use crate::domain::{ProcessResult, ProcessStatus, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
 use crate::services::preview::{PreviewEvent, PreviewRequest, start as start_preview};
 use crate::services::process::ProcessEvent;
+use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
 
 impl Workspace {
@@ -92,6 +93,9 @@ impl Workspace {
             PreflightEvent::Started { revision } => {
                 if revision == self.state.process.preflight_revision {
                     self.state.process.preflight.is_scanning = true;
+                    if !self.is_processing() {
+                        self.state.process.ui_status = ProcessUiStatus::Preflight;
+                    }
                 }
             }
             PreflightEvent::Progress {
@@ -106,16 +110,26 @@ impl Workspace {
                     self.state.process.preflight.skipped_files = skipped;
                     self.state.process.preflight.total_files = candidates + skipped;
                     self.state.process.preflight.is_scanning = true;
+                    if !self.is_processing() {
+                        self.state.process.ui_status = ProcessUiStatus::Preflight;
+                    }
                 }
             }
             PreflightEvent::Completed { revision, stats } => {
                 if revision == self.state.process.preflight_revision {
                     self.state.process.preflight = stats;
+                    if !self.is_processing() {
+                        self.state.process.ui_status = ProcessUiStatus::Idle;
+                        self.state.process.processing_current_file =
+                            tr(self.state.settings.language, "status_ready").to_string();
+                    }
                 }
             }
-            PreflightEvent::Failed { revision, .. } => {
+            PreflightEvent::Failed { revision, error } => {
                 if revision == self.state.process.preflight_revision {
                     self.state.process.preflight.is_scanning = false;
+                    self.state.process.ui_status = ProcessUiStatus::Error;
+                    self.state.process.last_error = Some(error.to_string());
                 }
             }
         }
@@ -131,6 +145,7 @@ impl Workspace {
                 self.state.process.processing_scanned = scanned;
                 self.state.process.processing_candidates = candidates;
                 self.state.process.processing_skipped = skipped;
+                self.state.process.ui_status = ProcessUiStatus::Running;
                 self.state.process.processing_current_file = format!(
                     "{} {}",
                     tr(self.state.settings.language, "scanning_files"),
@@ -139,6 +154,7 @@ impl Workspace {
                 false
             }
             ProcessEvent::Record(record) => {
+                self.state.process.ui_status = ProcessUiStatus::Running;
                 self.state.process.processing_current_file = record.file_name.clone();
                 if !matches!(record.status, ProcessStatus::Success) {
                     self.state.process.processing_skipped += 1;
@@ -147,10 +163,25 @@ impl Workspace {
                 false
             }
             ProcessEvent::Completed(result) => {
+                self.state.process.ui_status = ProcessUiStatus::Completed;
+                self.state.process.last_error = None;
+                self.state.process.processing_current_file =
+                    tr(self.state.settings.language, "status_completed_hint").to_string();
                 self.set_result(result, cx);
                 true
             }
-            ProcessEvent::Cancelled | ProcessEvent::Failed(_) => true,
+            ProcessEvent::Cancelled => {
+                self.state.process.ui_status = ProcessUiStatus::Cancelled;
+                self.state.process.processing_current_file =
+                    tr(self.state.settings.language, "status_cancelled_hint").to_string();
+                true
+            }
+            ProcessEvent::Failed(err) => {
+                self.state.process.ui_status = ProcessUiStatus::Error;
+                self.state.process.last_error = Some(err.to_string());
+                self.state.process.processing_current_file = err.to_string();
+                true
+            }
         }
     }
 
@@ -227,6 +258,7 @@ impl Workspace {
         }
         self.state.result.result = Some(result);
         self.state.result.active_tab = ResultTab::Tree;
+        self.side_panel_tab = super::SidePanelTab::Results;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
     }
@@ -315,6 +347,10 @@ impl Workspace {
 
     pub(super) fn refresh_preflight(&mut self) {
         self.state.process.preflight_revision += 1;
+        if !self.is_processing() {
+            self.state.process.ui_status = ProcessUiStatus::Preflight;
+            self.state.process.last_error = None;
+        }
         self.state.process.preflight_rx =
             Some(crate::services::preflight::start(PreflightRequest {
                 revision: self.state.process.preflight_revision,
