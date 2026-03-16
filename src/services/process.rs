@@ -10,6 +10,7 @@ use crate::domain::{
     FileDetail, Language, PreviewFileEntry, ProcessRecord, ProcessResult, ProcessStatus,
     ProcessingMode, ProcessingOptions,
 };
+use crate::error::AppError;
 use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text};
 use crate::processor::stats::ProcessingStats;
@@ -27,7 +28,7 @@ pub enum ProcessEvent {
     },
     Record(ProcessRecord),
     Completed(ProcessResult),
-    Failed(String),
+    Failed(AppError),
     Cancelled,
 }
 
@@ -80,7 +81,7 @@ async fn run_process(
     request: ProcessRequest,
     cancel: CancellationToken,
     tx: mpsc::Sender<ProcessEvent>,
-) -> Result<ProcessResult, String> {
+) -> Result<ProcessResult, AppError> {
     let lang = request.language;
     let progress_tx = tx.clone();
     let scan_cancel = cancel.clone();
@@ -101,15 +102,15 @@ async fn run_process(
     );
 
     if cancel.is_cancelled() {
-        return Err(tr(lang, "cancelled").to_string());
+        return Err(AppError::new(tr(lang, "cancelled")));
     }
 
     if walker.candidates.is_empty() {
-        return Err(format!(
+        return Err(AppError::new(format!(
             "{}, skipped={}",
             tr(lang, "no_valid_files"),
             walker.skipped
-        ));
+        )));
     }
 
     run_process_with_walker(request, walker, cancel, tx).await
@@ -120,7 +121,7 @@ async fn run_process_with_walker(
     walker: WalkerOutput,
     cancel: CancellationToken,
     tx: mpsc::Sender<ProcessEvent>,
-) -> Result<ProcessResult, String> {
+) -> Result<ProcessResult, AppError> {
     let lang = request.language;
     let tree_nodes = build_tree_nodes(&walker.candidates);
     let mut stats = ProcessingStats {
@@ -145,11 +146,11 @@ async fn run_process_with_walker(
     let preview_dir = crate::utils::temp_file::make_temp_preview_dir()?;
     let mut output = tokio::fs::File::create(&result_path)
         .await
-        .map_err(|e| format!("create merged file failed: {e}"))?;
+        .map_err(|e| AppError::new(format!("create merged file failed: {e}")))?;
     output
         .write_all(render_prefix(output_format, &walker.tree).as_bytes())
         .await
-        .map_err(|e| format!("write merged prefix failed: {e}"))?;
+        .map_err(|e| AppError::new(format!("write merged prefix failed: {e}")))?;
 
     let concurrency_limit = file_concurrency_limit(walker.candidates.len());
     let mut processed_stream = stream::iter(
@@ -167,7 +168,7 @@ async fn run_process_with_walker(
         if cancel.is_cancelled() {
             let _ = tokio::fs::remove_file(&result_path).await;
             let _ = crate::utils::temp_file::cleanup_preview_dir(&preview_dir);
-            return Err(tr(lang, "cancelled").to_string());
+            return Err(AppError::new(tr(lang, "cancelled")));
         }
 
         match outcome {
@@ -203,12 +204,12 @@ async fn run_process_with_walker(
                 output
                     .write_all(render_file_entry(output_format, &merged).as_bytes())
                     .await
-                    .map_err(|e| format!("write merged content failed: {e}"))?;
+                    .map_err(|e| AppError::new(format!("write merged content failed: {e}")))?;
                 let next_id = preview_files.len() as u32;
                 let blob_path = preview_dir.join(format!("preview_{next_id}.txt"));
                 tokio::fs::write(&blob_path, merged.content.as_bytes())
                     .await
-                    .map_err(|e| format!("write preview blob failed: {e}"))?;
+                    .map_err(|e| AppError::new(format!("write preview blob failed: {e}")))?;
                 preview_files.push(PreviewFileEntry {
                     id: next_id,
                     display_path: detail.path.clone(),
@@ -234,12 +235,12 @@ async fn run_process_with_walker(
         output
             .write_all(suffix.as_bytes())
             .await
-            .map_err(|e| format!("write merged suffix failed: {e}"))?;
+            .map_err(|e| AppError::new(format!("write merged suffix failed: {e}")))?;
     }
     output
         .flush()
         .await
-        .map_err(|e| format!("flush merged file failed: {e}"))?;
+        .map_err(|e| AppError::new(format!("flush merged file failed: {e}")))?;
 
     Ok(ProcessResult {
         stats,

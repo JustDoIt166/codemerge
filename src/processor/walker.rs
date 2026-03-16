@@ -95,7 +95,7 @@ where
                         &skipped_acc,
                     );
                     let scanned = scanned_acc.fetch_add(1, Ordering::Relaxed) + 1;
-                    if scanned % 200 == 0 {
+                    if scanned.is_multiple_of(200) {
                         let current_skipped = skipped_acc.load(Ordering::Relaxed);
                         let current_candidates =
                             candidates_acc.lock().map(|v| v.len()).unwrap_or_default();

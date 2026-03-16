@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 pub fn filename(path: &Path) -> String {
     path.file_name()
@@ -10,7 +10,7 @@ pub fn display_path(path: &Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
-pub fn ext(path: &PathBuf) -> String {
+pub fn ext(path: &Path) -> String {
     path.extension()
         .map(|v| format!(".{}", v.to_string_lossy().to_lowercase()))
         .unwrap_or_default()

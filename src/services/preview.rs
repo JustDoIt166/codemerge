@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
+use crate::error::{AppError, AppResult};
+
 #[derive(Debug, Clone)]
 pub enum PreviewRequest {
     Open {
@@ -38,7 +40,7 @@ pub enum PreviewEvent {
     Failed {
         revision: u64,
         file_id: u32,
-        message: String,
+        error: AppError,
     },
 }
 
@@ -72,7 +74,7 @@ pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
                 let document = index_document(&path)?;
                 let loaded_range = clamp_range(&document, initial_range);
                 let lines = load_range(&document, loaded_range.clone())?;
-                Ok::<_, String>((document, loaded_range, lines))
+                Ok::<_, AppError>((document, loaded_range, lines))
             })();
 
             match result {
@@ -85,11 +87,11 @@ pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
                         lines,
                     });
                 }
-                Err(message) => {
+                Err(error) => {
                     let _ = tx.send(PreviewEvent::Failed {
                         revision,
                         file_id,
-                        message,
+                        error,
                     });
                 }
             }
@@ -108,11 +110,11 @@ pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
                     lines,
                 });
             }
-            Err(message) => {
+            Err(error) => {
                 let _ = tx.send(PreviewEvent::Failed {
                     revision,
                     file_id,
-                    message,
+                    error,
                 });
             }
         },
@@ -120,11 +122,12 @@ pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
     rx
 }
 
-pub fn index_document(path: &Path) -> Result<PreviewDocument, String> {
-    let file = std::fs::File::open(path).map_err(|e| format!("open preview file failed: {e}"))?;
+pub fn index_document(path: &Path) -> AppResult<PreviewDocument> {
+    let file = std::fs::File::open(path)
+        .map_err(|e| AppError::new(format!("open preview file failed: {e}")))?;
     let byte_len = file
         .metadata()
-        .map_err(|e| format!("read preview metadata failed: {e}"))?
+        .map_err(|e| AppError::new(format!("read preview metadata failed: {e}")))?
         .len();
 
     let mut reader = BufReader::new(file);
@@ -136,7 +139,7 @@ pub fn index_document(path: &Path) -> Result<PreviewDocument, String> {
         buffer.clear();
         let read = reader
             .read_until(b'\n', &mut buffer)
-            .map_err(|e| format!("index preview file failed: {e}"))?;
+            .map_err(|e| AppError::new(format!("index preview file failed: {e}")))?;
         if read == 0 {
             break;
         }
@@ -153,7 +156,7 @@ pub fn index_document(path: &Path) -> Result<PreviewDocument, String> {
     })
 }
 
-pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> Result<Vec<String>, String> {
+pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> AppResult<Vec<String>> {
     if range.start >= document.line_count() || range.start >= range.end {
         return Ok(Vec::new());
     }
@@ -161,9 +164,9 @@ pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> Result<Vec
     let clamped_end = range.end.min(document.line_count());
     let start_offset = document.line_offsets[range.start];
     let mut file = std::fs::File::open(&document.path)
-        .map_err(|e| format!("open preview file failed: {e}"))?;
+        .map_err(|e| AppError::new(format!("open preview file failed: {e}")))?;
     file.seek(SeekFrom::Start(start_offset))
-        .map_err(|e| format!("seek preview file failed: {e}"))?;
+        .map_err(|e| AppError::new(format!("seek preview file failed: {e}")))?;
 
     let mut reader = BufReader::new(file);
     let mut lines = Vec::with_capacity(clamped_end - range.start);
@@ -171,7 +174,7 @@ pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> Result<Vec
         let mut line = String::new();
         let _ = reader
             .read_line(&mut line)
-            .map_err(|e| format!("read preview file failed: {e}"))?;
+            .map_err(|e| AppError::new(format!("read preview file failed: {e}")))?;
         if line.ends_with('\n') {
             line.pop();
             if line.ends_with('\r') {
@@ -188,8 +191,9 @@ pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> Result<Vec
     Ok(lines)
 }
 
-pub fn load_text(document: &PreviewDocument) -> Result<String, String> {
-    std::fs::read_to_string(&document.path).map_err(|e| format!("read preview file failed: {e}"))
+pub fn load_text(document: &PreviewDocument) -> AppResult<String> {
+    std::fs::read_to_string(&document.path)
+        .map_err(|e| AppError::new(format!("read preview file failed: {e}")))
 }
 
 fn clamp_range(document: &PreviewDocument, range: Range<usize>) -> Range<usize> {

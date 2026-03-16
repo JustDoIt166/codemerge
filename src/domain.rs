@@ -171,16 +171,11 @@ pub struct PreflightStats {
     pub is_scanning: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ResultTab {
+    #[default]
     Tree,
     Content,
-}
-
-impl Default for ResultTab {
-    fn default() -> Self {
-        Self::Tree
-    }
 }
 
 #[derive(Debug, Clone)]

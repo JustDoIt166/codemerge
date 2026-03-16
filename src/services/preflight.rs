@@ -3,6 +3,7 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use crate::domain::PreflightStats;
+use crate::error::AppError;
 use crate::processor::walker::collect_candidates_with_progress;
 
 #[derive(Debug, Clone)]
@@ -22,7 +23,7 @@ pub enum PreflightEvent {
     },
     Failed {
         revision: u64,
-        error: String,
+        error: AppError,
     },
 }
 
@@ -72,7 +73,7 @@ pub fn start(request: PreflightRequest) -> Receiver<PreflightEvent> {
             Err(_) => {
                 let _ = tx.send(PreflightEvent::Failed {
                     revision,
-                    error: "preflight failed".to_string(),
+                    error: AppError::new("preflight failed"),
                 });
             }
         }
