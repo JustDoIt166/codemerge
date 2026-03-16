@@ -4,6 +4,7 @@ mod model;
 mod panels;
 mod view;
 
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -142,6 +143,9 @@ pub struct Workspace {
     state: AppState,
     preview_scroll_handle: VirtualListScrollHandle,
     tree_state: Entity<TreeState>,
+    tree_row_map: HashMap<String, model::TreeRowViewModel>,
+    tree_total_summary: model::TreeCountSummary,
+    tree_visible_summary: model::TreeCountSummary,
     tree_filter_input: Entity<InputState>,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
@@ -196,6 +200,9 @@ impl Workspace {
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
             preview_scroll_handle: VirtualListScrollHandle::new(),
             tree_state,
+            tree_row_map: HashMap::new(),
+            tree_total_summary: model::TreeCountSummary::default(),
+            tree_visible_summary: model::TreeCountSummary::default(),
             tree_filter_input,
             preview_table,
             preview_filter_input,
@@ -315,6 +322,7 @@ impl Render for Workspace {
             .child(
                 gpui::div()
                     .flex_1()
+                    .min_h(px(0.))
                     .child(self.render_main_content(window, cx)),
             )
     }

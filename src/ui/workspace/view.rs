@@ -1,94 +1,366 @@
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, px,
+    AnyElement, App, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable, Size, StyledExt as _, WindowExt as _, h_flex,
-    notification::NotificationType, scroll::ScrollableElement, v_flex,
+    list::ListItem, notification::NotificationType, scroll::ScrollableElement, v_flex,
 };
 
 use super::Workspace;
-use crate::domain::{FileEntry, Language, ProcessStatus, TreeNode};
+use super::model::{FilterMatchKind, TreeCountSummary, TreeRowViewModel};
+use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
 
-pub(super) fn build_tree_items(
-    nodes: &[TreeNode],
-    filter: &str,
-    mode: TreeExpansionMode,
-) -> Vec<gpui_component::tree::TreeItem> {
-    nodes
-        .iter()
-        .filter_map(|node| build_tree_item(node, filter, mode, 0))
-        .collect()
-}
-
-fn build_tree_item(
-    node: &TreeNode,
-    filter: &str,
-    mode: TreeExpansionMode,
-    depth: usize,
-) -> Option<gpui_component::tree::TreeItem> {
-    let children = node
-        .children
-        .iter()
-        .filter_map(|child| build_tree_item(child, filter, mode, depth + 1))
-        .collect::<Vec<_>>();
-    let matches = tree_matches_filter(node, filter);
-    if !matches && children.is_empty() {
-        return None;
-    }
-
-    let mut item = gpui_component::tree::TreeItem::new(node.id.clone(), node.label.clone());
-    if node.is_folder {
-        let expanded = if !filter.is_empty() {
-            true
+pub(super) fn render_tree_row(
+    ix: usize,
+    row: &TreeRowViewModel,
+    selected: bool,
+    language: Language,
+    cx: &App,
+) -> ListItem {
+    let chevron = if row.is_folder {
+        if row.is_expanded {
+            IconName::ChevronDown
         } else {
-            match mode {
-                TreeExpansionMode::Default => depth < 2,
-                TreeExpansionMode::ExpandAll => true,
-                TreeExpansionMode::CollapseAll => false,
-            }
-        };
-        item = item.expanded(expanded).children(children);
+            IconName::ChevronRight
+        }
+    } else {
+        IconName::Dash
+    };
+    let guide_color = if selected {
+        cx.theme().primary.opacity(0.35)
+    } else {
+        cx.theme().border.opacity(0.65)
+    };
+    let (icon_bg, icon_fg) = tree_icon_palette(row, selected, cx);
+    let badge = tree_filter_badge(row, language);
+
+    ListItem::new(ix)
+        .w_full()
+        .h(px(42.))
+        .rounded(px(10.))
+        .child(
+            h_flex()
+                .w_full()
+                .items_center()
+                .gap_2()
+                .children((0..row.depth).map(|_| {
+                    div()
+                        .flex()
+                        .w(px(12.))
+                        .h(px(28.))
+                        .items_center()
+                        .justify_center()
+                        .child(div().w(px(1.)).h_full().bg(guide_color))
+                        .into_any_element()
+                }))
+                .child(
+                    div()
+                        .flex()
+                        .w(px(14.))
+                        .items_center()
+                        .justify_center()
+                        .text_color(if row.is_folder {
+                            icon_fg
+                        } else {
+                            cx.theme().muted_foreground.opacity(0.45)
+                        })
+                        .child(chevron),
+                )
+                .child(
+                    div()
+                        .w(px(3.))
+                        .h(px(22.))
+                        .rounded(px(999.))
+                        .bg(if selected {
+                            cx.theme().primary
+                        } else if row.is_folder && row.is_expanded {
+                            cx.theme().border
+                        } else {
+                            cx.theme().transparent
+                        }),
+                )
+                .child(
+                    div()
+                        .flex()
+                        .w(px(26.))
+                        .h(px(26.))
+                        .rounded(px(8.))
+                        .items_center()
+                        .justify_center()
+                        .bg(icon_bg)
+                        .child(
+                            row.icon_kind
+                                .icon()
+                                .text_color(icon_fg)
+                                .with_size(Size::Small),
+                        ),
+                )
+                .child(
+                    v_flex()
+                        .min_w(px(0.))
+                        .flex_1()
+                        .gap_1()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(render_match_label(
+                                    row.label.as_ref(),
+                                    row.match_kind,
+                                    row.match_range.as_ref(),
+                                    selected,
+                                    cx,
+                                ))
+                                .when_some(badge, |this, badge| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .px_2()
+                                            .py(px(1.))
+                                            .rounded(px(999.))
+                                            .bg(if selected {
+                                                cx.theme().primary_foreground.opacity(0.15)
+                                            } else {
+                                                cx.theme().accent.opacity(0.12)
+                                            })
+                                            .text_color(if selected {
+                                                cx.theme().primary_foreground
+                                            } else {
+                                                cx.theme().accent
+                                            })
+                                            .child(badge),
+                                    )
+                                }),
+                        )
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .justify_between()
+                                .gap_3()
+                                .child(
+                                    div()
+                                        .min_w(px(0.))
+                                        .text_xs()
+                                        .text_color(if selected {
+                                            cx.theme().primary_foreground.opacity(0.8)
+                                        } else {
+                                            cx.theme().muted_foreground
+                                        })
+                                        .truncate()
+                                        .child(
+                                            if matches!(row.match_kind, Some(FilterMatchKind::Path))
+                                            {
+                                                row.relative_path.clone()
+                                            } else {
+                                                SharedString::from(tree_secondary_label(
+                                                    row, language,
+                                                ))
+                                            },
+                                        ),
+                                )
+                                .when(!row.is_folder, |this| {
+                                    this.child(
+                                        div()
+                                            .text_xs()
+                                            .px_2()
+                                            .py(px(1.))
+                                            .rounded(px(999.))
+                                            .bg(if selected {
+                                                cx.theme().primary_foreground.opacity(0.12)
+                                            } else {
+                                                cx.theme().secondary
+                                            })
+                                            .text_color(if selected {
+                                                cx.theme().primary_foreground
+                                            } else {
+                                                cx.theme().muted_foreground
+                                            })
+                                            .child(
+                                                row.extension
+                                                    .clone()
+                                                    .unwrap_or_else(|| row.label.clone()),
+                                            ),
+                                    )
+                                }),
+                        ),
+                ),
+        )
+}
+
+fn tree_secondary_label(row: &TreeRowViewModel, language: Language) -> String {
+    if row.is_folder {
+        return format!(
+            "{} {} · {} {}",
+            row.child_folder_count,
+            tr(language, "folders"),
+            row.child_file_count,
+            tr(language, "files")
+        );
     }
 
-    Some(item)
+    row.extension
+        .as_ref()
+        .map(|ext| ext.to_string())
+        .unwrap_or_else(|| row.relative_path.to_string())
 }
 
-pub(super) fn summarize_visible_tree(nodes: &[TreeNode], filter: &str) -> TreeSummary {
-    nodes
-        .iter()
-        .filter_map(|node| summarize_visible_tree_node(node, filter))
-        .fold(TreeSummary::default(), |mut summary, node_summary| {
-            summary.merge(node_summary);
-            summary
-        })
-}
-
-fn summarize_visible_tree_node(node: &TreeNode, filter: &str) -> Option<TreeSummary> {
-    let child_summary = summarize_visible_tree(&node.children, filter);
-    let matches = tree_matches_filter(node, filter);
-    if !matches && child_summary.total() == 0 {
+fn tree_filter_badge(row: &TreeRowViewModel, language: Language) -> Option<String> {
+    if !row.is_filter_match && row.matched_descendants == 0 {
         return None;
     }
 
-    let mut summary = child_summary;
-    if node.is_folder {
-        summary.folders += 1;
-    } else {
-        summary.files += 1;
+    if row.is_filter_match {
+        return Some(match row.match_kind {
+            Some(FilterMatchKind::Path) => tr(language, "tree_path_match").to_string(),
+            _ => tr(language, "tree_match").to_string(),
+        });
     }
-    Some(summary)
+
+    Some(format!(
+        "{} {}",
+        row.matched_descendants,
+        tr(language, "tree_hits")
+    ))
 }
 
-fn tree_matches_filter(node: &TreeNode, filter: &str) -> bool {
-    filter.is_empty()
-        || node.label.to_ascii_lowercase().contains(filter)
-        || node.relative_path.to_ascii_lowercase().contains(filter)
+fn tree_icon_palette(row: &TreeRowViewModel, selected: bool, cx: &App) -> (Hsla, Hsla) {
+    if selected {
+        return (
+            cx.theme().primary_foreground.opacity(0.18),
+            cx.theme().primary_foreground,
+        );
+    }
+
+    match row.icon_kind {
+        super::model::TreeIconKind::FolderOpen => {
+            (cx.theme().primary.opacity(0.16), cx.theme().primary)
+        }
+        super::model::TreeIconKind::FolderClosed => {
+            (cx.theme().warning.opacity(0.16), cx.theme().warning)
+        }
+        super::model::TreeIconKind::Code => (cx.theme().accent.opacity(0.16), cx.theme().accent),
+        super::model::TreeIconKind::Document => {
+            (cx.theme().primary.opacity(0.12), cx.theme().primary)
+        }
+        super::model::TreeIconKind::Config => {
+            (cx.theme().warning.opacity(0.14), cx.theme().warning)
+        }
+        super::model::TreeIconKind::Data => (cx.theme().accent.opacity(0.12), cx.theme().accent),
+        super::model::TreeIconKind::Media => (cx.theme().danger.opacity(0.12), cx.theme().danger),
+        super::model::TreeIconKind::Text => (cx.theme().secondary, cx.theme().muted_foreground),
+    }
+}
+
+fn render_match_label(
+    text: &str,
+    match_kind: Option<FilterMatchKind>,
+    match_range: Option<&std::ops::Range<usize>>,
+    selected: bool,
+    cx: &App,
+) -> AnyElement {
+    let text_color = if selected {
+        cx.theme().primary_foreground
+    } else {
+        cx.theme().foreground
+    };
+    let base = div()
+        .font_semibold()
+        .text_color(text_color)
+        .truncate()
+        .whitespace_nowrap();
+
+    if !matches!(match_kind, Some(FilterMatchKind::Label)) {
+        return base.child(text.to_string()).into_any_element();
+    }
+
+    let Some(range) = match_range else {
+        return base.child(text.to_string()).into_any_element();
+    };
+    if range.start >= text.len() || range.end > text.len() || range.start >= range.end {
+        return base.child(text.to_string()).into_any_element();
+    }
+
+    let prefix = &text[..range.start];
+    let matched = &text[range.start..range.end];
+    let suffix = &text[range.end..];
+
+    h_flex()
+        .gap_1()
+        .items_center()
+        .child(
+            div()
+                .font_semibold()
+                .text_color(text_color)
+                .truncate()
+                .child(prefix.to_string()),
+        )
+        .child(
+            div()
+                .font_semibold()
+                .px_1()
+                .rounded(px(4.))
+                .bg(if selected {
+                    cx.theme().primary_foreground.opacity(0.18)
+                } else {
+                    cx.theme().primary.opacity(0.14)
+                })
+                .text_color(if selected {
+                    cx.theme().primary_foreground
+                } else {
+                    cx.theme().primary
+                })
+                .child(matched.to_string()),
+        )
+        .child(
+            div()
+                .font_semibold()
+                .text_color(text_color)
+                .truncate()
+                .child(suffix.to_string()),
+        )
+        .into_any_element()
+}
+
+pub(super) fn format_tree_summary(
+    visible: TreeCountSummary,
+    total: TreeCountSummary,
+    language: Language,
+) -> String {
+    if total.total() == 0 {
+        return format!(
+            "0 {} · 0 {}",
+            tr(language, "folders"),
+            tr(language, "files")
+        );
+    }
+    if visible == total {
+        return format!(
+            "{} {} · {} {}",
+            total.folders,
+            tr(language, "folders"),
+            total.files,
+            tr(language, "files")
+        );
+    }
+    format!(
+        "{} / {} {} · {} / {} {}",
+        visible.folders,
+        total.folders,
+        tr(language, "folders"),
+        visible.files,
+        total.files,
+        tr(language, "files")
+    )
 }
 
 pub(super) fn card(cx: &App) -> gpui::Div {
     div()
+        .size_full()
+        .min_h(px(0.))
+        .overflow_hidden()
         .p_4()
         .border_1()
         .border_color(cx.theme().border)
@@ -97,12 +369,13 @@ pub(super) fn card(cx: &App) -> gpui::Div {
 }
 
 pub(super) fn panel_viewport(content: AnyElement, min_height: gpui::Pixels) -> gpui::Div {
-    div().size_full().overflow_x_hidden().child(
+    div().size_full().min_h(px(0.)).overflow_hidden().child(
         div()
             .size_full()
             .min_h(min_height)
-            .child(content)
-            .overflow_y_scrollbar(),
+            .overflow_x_hidden()
+            .overflow_y_scrollbar()
+            .child(content),
     )
 }
 
@@ -268,6 +541,7 @@ pub(super) fn empty_box(title: &str, hint: &str, icon: IconName, cx: &App) -> gp
         .bg(cx.theme().secondary.opacity(0.18))
         .child(
             div()
+                .flex()
                 .w(px(40.))
                 .h(px(40.))
                 .rounded(px(12.))
@@ -275,7 +549,7 @@ pub(super) fn empty_box(title: &str, hint: &str, icon: IconName, cx: &App) -> gp
                 .text_color(cx.theme().accent_foreground)
                 .items_center()
                 .justify_center()
-                .child(icon),
+                .child(Icon::new(icon).with_size(Size::Medium)),
         )
         .child(div().font_semibold().child(title.to_string()))
         .child(
@@ -356,14 +630,14 @@ pub(super) fn activity_row(record: &crate::domain::ProcessRecord, cx: &App) -> A
                 .items_center()
                 .child(
                     div()
+                        .flex()
                         .w(px(20.))
                         .h(px(20.))
                         .rounded(px(999.))
                         .bg(accent.opacity(0.15))
-                        .text_color(accent)
                         .items_center()
                         .justify_center()
-                        .child(icon),
+                        .child(Icon::new(icon).text_color(accent).with_size(Size::Small)),
                 )
                 .child(div().truncate().child(record.file_name.clone())),
         )
@@ -378,6 +652,7 @@ pub(super) fn activity_row(record: &crate::domain::ProcessRecord, cx: &App) -> A
 
 pub(super) fn accent_icon_badge(icon: IconName, fg: Hsla, bg: Hsla) -> gpui::Div {
     div()
+        .flex()
         .w(px(24.))
         .h(px(24.))
         .rounded(px(8.))
@@ -477,21 +752,4 @@ pub(super) enum TreeExpansionMode {
     Default,
     ExpandAll,
     CollapseAll,
-}
-
-#[derive(Default, Clone, Copy)]
-pub(super) struct TreeSummary {
-    pub folders: usize,
-    pub files: usize,
-}
-
-impl TreeSummary {
-    pub fn total(self) -> usize {
-        self.folders + self.files
-    }
-
-    pub fn merge(&mut self, other: Self) {
-        self.folders += other.folders;
-        self.files += other.files;
-    }
 }

@@ -1,3 +1,4 @@
+mod assets;
 pub mod state;
 mod workspace;
 
@@ -6,7 +7,7 @@ use gpui::{AppContext, Application, WindowOptions};
 use gpui_component::Root;
 
 pub fn run() {
-    let app = Application::new();
+    let app = Application::new().with_assets(assets::AppAssets);
     app.run(move |cx| {
         gpui_component::init(cx);
         cx.activate(true);

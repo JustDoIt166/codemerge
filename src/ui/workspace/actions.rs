@@ -357,10 +357,12 @@ impl Workspace {
         }
         self.state.result.result = None;
         self.state.result.preview_rows.clear();
+        self.state.workspace.reset_tree();
         self.clear_preview_state();
         self.clear_pending_confirmation();
         self.side_panel_tab = SidePanelTab::Results;
         self.narrow_content_tab = NarrowContentTab::Status;
+        self.sync_tree(cx);
         self.state
             .process
             .reset_for_run(tr(self.state.settings.language, "scanning_files").to_string());

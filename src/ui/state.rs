@@ -1,3 +1,4 @@
+use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -77,6 +78,7 @@ impl AppState {
         self.process.ui_status = ProcessUiStatus::Idle;
         self.process.last_error = None;
         self.process.processing_current_file = status_ready;
+        self.workspace.reset_tree();
         self.workspace.reset_preview();
     }
 }
@@ -150,6 +152,8 @@ pub struct ResultState {
 }
 
 pub struct WorkspaceState {
+    pub selected_tree_node_id: Option<String>,
+    pub tree_expanded_ids: BTreeSet<String>,
     pub selected_preview_file_id: Option<u32>,
     pub preview_revision: u64,
     pub preview_rx: Option<std::sync::mpsc::Receiver<PreviewEvent>>,
@@ -164,6 +168,8 @@ pub struct WorkspaceState {
 impl Default for WorkspaceState {
     fn default() -> Self {
         Self {
+            selected_tree_node_id: None,
+            tree_expanded_ids: BTreeSet::new(),
             selected_preview_file_id: None,
             preview_revision: 0,
             preview_rx: None,
@@ -178,6 +184,11 @@ impl Default for WorkspaceState {
 }
 
 impl WorkspaceState {
+    pub fn reset_tree(&mut self) {
+        self.selected_tree_node_id = None;
+        self.tree_expanded_ids.clear();
+    }
+
     pub fn reset_preview(&mut self) {
         self.selected_preview_file_id = None;
         self.preview_rx = None;

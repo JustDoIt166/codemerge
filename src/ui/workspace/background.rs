@@ -4,7 +4,7 @@ use std::sync::mpsc::TryRecvError;
 
 use gpui::{Context, SharedString, px, size};
 
-use super::view::{TreeExpansionMode, build_tree_items};
+use super::view::TreeExpansionMode;
 use super::{Workspace, model, preview_line_height};
 use crate::domain::{ProcessResult, ProcessStatus, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
@@ -80,6 +80,7 @@ impl Workspace {
             }
         }
 
+        dirty = self.sync_tree_selection(cx) || dirty;
         dirty = self.refresh_preview_window() || dirty;
         if dirty {
             cx.notify();
@@ -216,6 +217,15 @@ impl Workspace {
         self.state.result.result = Some(result);
         self.state.result.active_tab = ResultTab::Tree;
         self.side_panel_tab = super::SidePanelTab::Results;
+        let expanded_ids = self
+            .state
+            .result
+            .result
+            .as_ref()
+            .map(|result| model::default_expanded_ids(&result.tree_nodes))
+            .unwrap_or_default();
+        self.state.workspace.reset_tree();
+        self.state.workspace.tree_expanded_ids = expanded_ids;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
     }
@@ -225,21 +235,45 @@ impl Workspace {
     }
 
     pub(super) fn sync_tree_with_mode(&mut self, mode: TreeExpansionMode, cx: &mut Context<Self>) {
+        if let Some(result) = self.state.result.result.as_ref() {
+            match mode {
+                TreeExpansionMode::Default => {}
+                TreeExpansionMode::ExpandAll => {
+                    self.state.workspace.tree_expanded_ids =
+                        model::collect_folder_ids(&result.tree_nodes);
+                }
+                TreeExpansionMode::CollapseAll => {
+                    self.state.workspace.tree_expanded_ids.clear();
+                }
+            }
+        }
+
         let filter = self
             .tree_filter_input
             .read(cx)
             .value()
             .trim()
             .to_ascii_lowercase();
-        let items = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .map(|result| build_tree_items(&result.tree_nodes, filter.as_str(), mode))
-            .unwrap_or_default();
-        self.tree_state
-            .update(cx, |state, cx| state.set_items(items, cx));
+        let tree_model = model::build_tree_panel_model(
+            self.state.result.result.as_ref(),
+            filter.as_str(),
+            &self.state.workspace.tree_expanded_ids,
+            self.state.workspace.selected_tree_node_id.as_deref(),
+        );
+        let tree_row_map = tree_model
+            .rows
+            .into_iter()
+            .map(|row| (row.node_id.to_string(), row))
+            .collect();
+        let tree_total_summary = tree_model.total_summary;
+        let tree_visible_summary = tree_model.visible_summary;
+        self.tree_state.update(cx, |state, tree_cx| {
+            state.set_items(tree_model.items, tree_cx);
+            state.set_selected_index(tree_model.selected_row_ix, tree_cx);
+        });
+        self.tree_row_map = tree_row_map;
+        self.tree_total_summary = tree_total_summary;
+        self.tree_visible_summary = tree_visible_summary;
     }
 
     pub(super) fn sync_preview_table(&mut self, cx: &mut Context<Self>) {
@@ -303,6 +337,70 @@ impl Workspace {
 
     pub(super) fn clear_preview_state(&mut self) {
         self.state.workspace.reset_preview();
+    }
+
+    fn sync_tree_selection(&mut self, cx: &mut Context<Self>) -> bool {
+        let selected_entry = self.tree_state.read(cx).selected_entry().cloned();
+        let selected_entry_state = selected_entry
+            .as_ref()
+            .map(|entry| (entry.is_folder(), entry.is_expanded()));
+        let selected_row = selected_entry
+            .as_ref()
+            .and_then(|entry| self.tree_row_map.get(entry.item().id.as_ref()))
+            .cloned();
+        let selected_node_id = selected_row.as_ref().map(|row| row.node_id.to_string());
+
+        if self.state.workspace.selected_tree_node_id == selected_node_id {
+            if let Some(row) = selected_row
+                && row.is_folder
+            {
+                let is_expanded = selected_entry_state
+                    .map(|(_, expanded)| expanded)
+                    .unwrap_or(row.is_expanded);
+                if is_expanded {
+                    self.state
+                        .workspace
+                        .tree_expanded_ids
+                        .insert(row.node_id.to_string());
+                } else {
+                    self.state
+                        .workspace
+                        .tree_expanded_ids
+                        .remove(row.node_id.as_ref());
+                }
+            }
+            return false;
+        }
+
+        self.state.workspace.selected_tree_node_id = selected_node_id;
+        let Some(row) = selected_row else {
+            return true;
+        };
+
+        if row.is_folder {
+            let is_expanded = selected_entry_state
+                .map(|(_, expanded)| expanded)
+                .unwrap_or(row.is_expanded);
+            if is_expanded {
+                self.state
+                    .workspace
+                    .tree_expanded_ids
+                    .insert(row.node_id.to_string());
+            } else {
+                self.state
+                    .workspace
+                    .tree_expanded_ids
+                    .remove(row.node_id.as_ref());
+            }
+            self.sync_tree(cx);
+            return true;
+        }
+
+        if let Some(file_id) = row.preview_file_id {
+            self.state.result.active_tab = ResultTab::Content;
+            self.load_preview(file_id, cx);
+        }
+        true
     }
 
     fn padded_preview_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
