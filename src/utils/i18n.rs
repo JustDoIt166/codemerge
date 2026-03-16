@@ -1,4 +1,4 @@
-use crate::app::model::Language;
+use crate::domain::Language;
 
 pub fn tr(lang: Language, key: &str) -> &'static str {
     match (lang, key) {

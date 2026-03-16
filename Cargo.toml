@@ -7,12 +7,13 @@ license = "MIT"
 repository = "https://github.com/hellotime/codemerge"
 
 [dependencies]
+anyhow = "1.0.98"
 arboard = "3.6.1"
 chrono = { version = "0.4.42", default-features = false, features = ["clock"] }
 futures = "0.3.31"
+gpui = "0.2.2"
+gpui-component = "0.5.1"
 globset = "0.4.18"
-iced_aw = { version = "0.13.0", default-features = false }
-iced_fonts = { version = "0.3.0", features = ["bootstrap", "fontawesome"] }
 ignore = "0.4.25"
 dirs = "6.0.0"
 minifier = "0.3.6"
@@ -23,15 +24,8 @@ rfd = "0.17.2"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tempfile = "3.25.0"
-thiserror = "2.0.18"
-tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "sync", "time"] }
+tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.17"
-
-[target.'cfg(target_os = "windows")'.dependencies]
-iced = { version = "0.14.0", default-features = false, features = ["tokio", "wgpu"] }
-
-[target.'cfg(target_os = "linux")'.dependencies]
-iced = { version = "0.14.0", default-features = false, features = ["tokio", "wgpu", "x11", "wayland", "linux-theme-detection"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"

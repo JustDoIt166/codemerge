@@ -1,4 +1,4 @@
-use codemerge::app::model::OutputFormat;
+use codemerge::domain::OutputFormat;
 use codemerge::processor::{merger, reader, walker};
 use std::fs;
 use tempfile::tempdir;

@@ -1,4 +1,4 @@
-use crate::app::model::OutputFormat;
+use crate::domain::OutputFormat;
 
 #[derive(Debug, Clone)]
 pub struct MergedFile {

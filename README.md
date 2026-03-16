@@ -1,6 +1,6 @@
-# CodeMerge (Rust + Iced)
+# CodeMerge (Rust + GPUI Component)
 
-Desktop file merge tool for Linux and Windows.
+Desktop file merge tool with a `gpui + gpui-component` UI and a framework-independent processing core.
 
 ## Features
 - Select folder, files, and `.gitignore`
@@ -11,6 +11,9 @@ Desktop file merge tool for Linux and Windows.
 - Char/token estimation
 - Copy tree/content and download merged output
 - Config persistence (`language/options/blacklists`)
+- Resizable three-pane workspace
+- Virtualized result table, tree, and preview list
+- Lazy preview indexing and range loading for large files
 
 ## Run
 ```bash
@@ -28,4 +31,4 @@ cargo test
 
 ## Notes
 - `.gitignore` negation rules (`!`) are not supported in this version.
-- Large preview defaults to 1MB; full load requires confirmation.
+- Windows is the primary target; Linux is kept compile-compatible.

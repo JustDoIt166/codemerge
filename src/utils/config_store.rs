@@ -1,29 +1,6 @@
 use std::path::PathBuf;
 
-use serde::{Deserialize, Serialize};
-
-use crate::app::model::{
-    Language, ProcessingOptions, default_ext_blacklist, default_folder_blacklist,
-};
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct AppConfigV1 {
-    pub language: Language,
-    pub options: ProcessingOptions,
-    pub folder_blacklist: Vec<String>,
-    pub ext_blacklist: Vec<String>,
-}
-
-impl Default for AppConfigV1 {
-    fn default() -> Self {
-        Self {
-            language: Language::Zh,
-            options: ProcessingOptions::default(),
-            folder_blacklist: default_folder_blacklist(),
-            ext_blacklist: default_ext_blacklist(),
-        }
-    }
-}
+use crate::domain::AppConfigV1;
 
 pub fn config_path() -> Option<PathBuf> {
     let base = dirs::config_dir()?;
