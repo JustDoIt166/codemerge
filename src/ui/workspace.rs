@@ -7,7 +7,7 @@ use arboard::Clipboard;
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Pixels, Render, SharedString, Styled,
-    Subscription, Task, Timer, Window, div, px, size,
+    Subscription, Task, Timer, Window, div, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable, IconName, Sizable, Size, StyledExt as _,
@@ -106,6 +106,7 @@ pub struct Workspace {
     state: AppState,
     preview_scroll_handle: VirtualListScrollHandle,
     tree_state: Entity<TreeState>,
+    tree_filter_input: Entity<InputState>,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
     blacklist_filter_input: Entity<InputState>,
@@ -121,6 +122,8 @@ impl Workspace {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let cfg = settings::load();
+        let tree_filter_input =
+            cx.new(|cx| InputState::new(window, cx).placeholder(tr(cfg.language, "tree_filter")));
         let preview_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr(cfg.language, "file_filter")));
         let blacklist_filter_input = cx.new(|cx| {
@@ -132,6 +135,7 @@ impl Workspace {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table = cx.new(|cx| TableState::new(PreviewTableDelegate::new(), window, cx));
         let subscriptions = vec![
+            cx.subscribe_in(&tree_filter_input, window, Self::on_tree_filter_event),
             cx.subscribe_in(&preview_filter_input, window, Self::on_preview_filter_event),
             cx.subscribe_in(
                 &blacklist_filter_input,
@@ -151,6 +155,7 @@ impl Workspace {
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
             preview_scroll_handle: VirtualListScrollHandle::new(),
             tree_state,
+            tree_filter_input,
             preview_table,
             preview_filter_input,
             blacklist_filter_input,
@@ -378,12 +383,22 @@ impl Workspace {
     }
 
     fn sync_tree(&mut self, cx: &mut Context<Self>) {
+        self.sync_tree_with_mode(TreeExpansionMode::Default, cx);
+    }
+
+    fn sync_tree_with_mode(&mut self, mode: TreeExpansionMode, cx: &mut Context<Self>) {
+        let filter = self
+            .tree_filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_ascii_lowercase();
         let items = self
             .state
             .result
             .result
             .as_ref()
-            .map(|result| build_tree_items(&result.tree_nodes))
+            .map(|result| build_tree_items(&result.tree_nodes, filter.as_str(), mode))
             .unwrap_or_default();
         self.tree_state
             .update(cx, |state, cx| state.set_items(items, cx));
@@ -661,6 +676,18 @@ impl Workspace {
         if matches!(event, InputEvent::Change) {
             self.clear_preview_state();
             self.sync_preview_table(cx);
+        }
+    }
+
+    fn on_tree_filter_event(
+        &mut self,
+        _: &Entity<InputState>,
+        event: &InputEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if matches!(event, InputEvent::Change) {
+            self.sync_tree(cx);
         }
     }
 
@@ -1095,6 +1122,14 @@ impl Workspace {
             ResultTab::Content
         };
         cx.notify();
+    }
+
+    fn expand_tree(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.sync_tree_with_mode(TreeExpansionMode::ExpandAll, cx);
+    }
+
+    fn collapse_tree(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.sync_tree_with_mode(TreeExpansionMode::CollapseAll, cx);
     }
 
     fn copy_tree(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
@@ -1658,26 +1693,245 @@ impl Workspace {
     }
 
     fn render_tree_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.state.settings.language;
+        let tree_filter = self.tree_filter_input.read(cx).value().trim().to_string();
+        let filter_active = !tree_filter.is_empty();
+        let visible_summary = self
+            .state
+            .result
+            .result
+            .as_ref()
+            .map(|result| summarize_visible_tree(&result.tree_nodes, tree_filter.as_str()))
+            .unwrap_or_default();
+        let has_result = self.state.result.result.is_some();
+        let has_visible_nodes = visible_summary.total() > 0;
         let view = cx.entity();
-        tree(&self.tree_state, move |ix, entry, _, _, cx| {
-            view.update(cx, |_, cx| {
-                let item = entry.item();
-                let icon = if !entry.is_folder() {
-                    IconName::File
-                } else if entry.is_expanded() {
-                    IconName::FolderOpen
-                } else {
-                    IconName::Folder
-                };
-                ListItem::new(ix)
-                    .w_full()
-                    .px_3()
-                    .pl(px(16.) * entry.depth() + px(12.))
-                    .rounded(cx.theme().radius)
-                    .child(h_flex().gap_2().child(icon).child(item.label.clone()))
+        let tree_view =
+            tree(&self.tree_state, move |ix, entry, selected, _, cx| {
+                view.update(cx, |_, cx| {
+                    let item = entry.item();
+                    let chevron = if entry.is_folder() {
+                        if entry.is_expanded() {
+                            IconName::ChevronDown
+                        } else {
+                            IconName::ChevronRight
+                        }
+                    } else {
+                        IconName::Dash
+                    };
+                    let icon = if !entry.is_folder() {
+                        IconName::File
+                    } else if entry.is_expanded() {
+                        IconName::FolderOpen
+                    } else {
+                        IconName::Folder
+                    };
+                    let guide_color = if selected {
+                        cx.theme().primary.opacity(0.35)
+                    } else {
+                        cx.theme().border.opacity(0.65)
+                    };
+                    let icon_color = if selected {
+                        cx.theme().primary_foreground
+                    } else if entry.is_folder() && entry.is_expanded() {
+                        cx.theme().primary
+                    } else if entry.is_folder() {
+                        cx.theme().foreground
+                    } else {
+                        cx.theme().muted_foreground
+                    };
+                    ListItem::new(ix)
+                        .w_full()
+                        .h(px(32.))
+                        .rounded(px(10.))
+                        .child(
+                            h_flex()
+                                .w_full()
+                                .items_center()
+                                .gap_1()
+                                .children((0..entry.depth()).map(|_| {
+                                    div()
+                                        .w(px(12.))
+                                        .h(px(22.))
+                                        .items_center()
+                                        .justify_center()
+                                        .child(div().w(px(1.)).h_full().bg(guide_color))
+                                        .into_any_element()
+                                }))
+                                .child(
+                                    div()
+                                        .w(px(14.))
+                                        .items_center()
+                                        .justify_center()
+                                        .text_color(if entry.is_folder() {
+                                            icon_color
+                                        } else {
+                                            cx.theme().muted_foreground.opacity(0.35)
+                                        })
+                                        .child(chevron),
+                                )
+                                .child(div().w(px(3.)).h(px(18.)).rounded(px(999.)).bg(
+                                    if selected {
+                                        cx.theme().primary
+                                    } else if entry.is_folder() && entry.is_expanded() {
+                                        cx.theme().border
+                                    } else {
+                                        cx.theme().transparent
+                                    },
+                                ))
+                                .child(
+                                    div()
+                                        .w(px(22.))
+                                        .h(px(22.))
+                                        .rounded(px(6.))
+                                        .items_center()
+                                        .justify_center()
+                                        .bg(if entry.is_folder() {
+                                            if selected {
+                                                cx.theme().primary_foreground.opacity(0.15)
+                                            } else {
+                                                cx.theme().secondary
+                                            }
+                                        } else {
+                                            cx.theme().transparent
+                                        })
+                                        .text_color(icon_color)
+                                        .child(icon),
+                                )
+                                .child(
+                                    div().min_w(px(0.)).flex_1().overflow_hidden().child(
+                                        div()
+                                            .truncate()
+                                            .whitespace_nowrap()
+                                            .text_color(if selected {
+                                                cx.theme().primary_foreground
+                                            } else {
+                                                cx.theme().foreground
+                                            })
+                                            .when(entry.is_folder(), |this| this.font_semibold())
+                                            .child(item.label.clone()),
+                                    ),
+                                ),
+                        )
+                })
             })
-        })
-        .h_full()
+            .h_full();
+
+        v_flex()
+            .gap_3()
+            .size_full()
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Input::new(&self.tree_filter_input)
+                            .prefix(IconName::Search)
+                            .cleanable(true),
+                    )
+                    .child(
+                        Button::new("tree-expand")
+                            .outline()
+                            .icon(IconName::ChevronDown)
+                            .label(tr(language, "tree_expand_all"))
+                            .disabled(!has_result || filter_active)
+                            .on_click(cx.listener(Self::expand_tree)),
+                    )
+                    .child(
+                        Button::new("tree-collapse")
+                            .outline()
+                            .icon(IconName::ChevronRight)
+                            .label(tr(language, "tree_collapse_all"))
+                            .disabled(!has_result || filter_active)
+                            .on_click(cx.listener(Self::collapse_tree)),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} {} · {} {}",
+                                visible_summary.folders,
+                                tr(language, "folders"),
+                                visible_summary.files,
+                                tr(language, "files")
+                            )),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .px_2()
+                            .py_1()
+                            .rounded(px(999.))
+                            .bg(if filter_active {
+                                cx.theme().accent
+                            } else {
+                                cx.theme().secondary
+                            })
+                            .text_color(if filter_active {
+                                cx.theme().accent_foreground
+                            } else {
+                                cx.theme().muted_foreground
+                            })
+                            .child(if filter_active {
+                                tr(language, "tree_filter_active")
+                            } else {
+                                tr(language, "tree_filter_idle")
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(14.))
+                    .bg(cx.theme().secondary.opacity(0.35))
+                    .p_2()
+                    .child(if has_visible_nodes {
+                        tree_view.into_any_element()
+                    } else {
+                        v_flex()
+                            .size_full()
+                            .items_center()
+                            .justify_center()
+                            .gap_2()
+                            .child(
+                                div()
+                                    .w(px(40.))
+                                    .h(px(40.))
+                                    .rounded(px(12.))
+                                    .bg(cx.theme().accent)
+                                    .text_color(cx.theme().accent_foreground)
+                                    .items_center()
+                                    .justify_center()
+                                    .child(IconName::FolderOpen),
+                            )
+                            .child(div().font_semibold().child(if has_result {
+                                tr(language, "tree_no_match")
+                            } else {
+                                tr(language, "tree_empty")
+                            }))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(if has_result && filter_active {
+                                        tr(language, "tree_no_match_hint")
+                                    } else {
+                                        tr(language, "tree_empty_hint")
+                                    }),
+                            )
+                            .into_any_element()
+                    }),
+            )
     }
 
     fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1836,17 +2090,100 @@ impl Drop for Workspace {
     }
 }
 
-fn build_tree_items(nodes: &[TreeNode]) -> Vec<TreeItem> {
+#[derive(Clone, Copy)]
+enum TreeExpansionMode {
+    Default,
+    ExpandAll,
+    CollapseAll,
+}
+
+#[derive(Default, Clone, Copy)]
+struct TreeSummary {
+    folders: usize,
+    files: usize,
+}
+
+impl TreeSummary {
+    fn total(self) -> usize {
+        self.folders + self.files
+    }
+
+    fn merge(&mut self, other: Self) {
+        self.folders += other.folders;
+        self.files += other.files;
+    }
+}
+
+fn build_tree_items(nodes: &[TreeNode], filter: &str, mode: TreeExpansionMode) -> Vec<TreeItem> {
     nodes
         .iter()
-        .map(|node| {
-            let mut item = TreeItem::new(node.id.clone(), node.label.clone());
-            if node.is_folder {
-                item = item.children(build_tree_items(&node.children));
-            }
-            item
-        })
+        .filter_map(|node| build_tree_item(node, filter, mode, 0))
         .collect()
+}
+
+fn build_tree_item(
+    node: &TreeNode,
+    filter: &str,
+    mode: TreeExpansionMode,
+    depth: usize,
+) -> Option<TreeItem> {
+    let children = node
+        .children
+        .iter()
+        .filter_map(|child| build_tree_item(child, filter, mode, depth + 1))
+        .collect::<Vec<_>>();
+    let matches = tree_matches_filter(node, filter);
+    if !matches && children.is_empty() {
+        return None;
+    }
+
+    let mut item = TreeItem::new(node.id.clone(), node.label.clone());
+    if node.is_folder {
+        let expanded = if !filter.is_empty() {
+            true
+        } else {
+            match mode {
+                TreeExpansionMode::Default => depth < 2,
+                TreeExpansionMode::ExpandAll => true,
+                TreeExpansionMode::CollapseAll => false,
+            }
+        };
+        item = item.expanded(expanded).children(children);
+    }
+
+    Some(item)
+}
+
+fn summarize_visible_tree(nodes: &[TreeNode], filter: &str) -> TreeSummary {
+    nodes
+        .iter()
+        .filter_map(|node| summarize_visible_tree_node(node, filter))
+        .fold(TreeSummary::default(), |mut summary, node_summary| {
+            summary.merge(node_summary);
+            summary
+        })
+}
+
+fn summarize_visible_tree_node(node: &TreeNode, filter: &str) -> Option<TreeSummary> {
+    let child_summary = summarize_visible_tree(&node.children, filter);
+    let matches = tree_matches_filter(node, filter);
+    if !matches && child_summary.total() == 0 {
+        return None;
+    }
+
+    let mut summary = child_summary;
+    if node.is_folder {
+        summary.folders += 1;
+    } else {
+        summary.files += 1;
+    }
+    Some(summary)
+}
+
+fn tree_matches_filter(node: &TreeNode, filter: &str) -> bool {
+    filter.is_empty()
+        || node.label.to_ascii_lowercase().contains(filter)
+        || node.relative_path.to_ascii_lowercase().contains(filter)
 }
 
 fn card(cx: &App) -> gpui::Div {
