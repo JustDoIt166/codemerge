@@ -4,9 +4,8 @@ use std::sync::mpsc::TryRecvError;
 
 use gpui::{Context, SharedString, px, size};
 
-use super::{
-    PreviewRowViewModel, TreeExpansionMode, Workspace, build_tree_items, preview_line_height,
-};
+use super::view::{TreeExpansionMode, build_tree_items};
+use super::{Workspace, model, preview_line_height};
 use crate::domain::{ProcessResult, ProcessStatus, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
 use crate::services::preview::{PreviewEvent, PreviewRequest, start as start_preview};
@@ -57,8 +56,7 @@ impl Workspace {
             }
         }
         if finish_processing {
-            self.state.process.process_handle = None;
-            self.state.process.processing_started_at = None;
+            self.state.process.finish_run();
             dirty = true;
         }
 
@@ -89,50 +87,9 @@ impl Workspace {
     }
 
     fn apply_preflight_event(&mut self, event: PreflightEvent) {
-        match event {
-            PreflightEvent::Started { revision } => {
-                if revision == self.state.process.preflight_revision {
-                    self.state.process.preflight.is_scanning = true;
-                    if !self.is_processing() {
-                        self.state.process.ui_status = ProcessUiStatus::Preflight;
-                    }
-                }
-            }
-            PreflightEvent::Progress {
-                revision,
-                scanned,
-                candidates,
-                skipped,
-            } => {
-                if revision == self.state.process.preflight_revision {
-                    self.state.process.preflight.scanned_entries = scanned;
-                    self.state.process.preflight.to_process_files = candidates;
-                    self.state.process.preflight.skipped_files = skipped;
-                    self.state.process.preflight.total_files = candidates + skipped;
-                    self.state.process.preflight.is_scanning = true;
-                    if !self.is_processing() {
-                        self.state.process.ui_status = ProcessUiStatus::Preflight;
-                    }
-                }
-            }
-            PreflightEvent::Completed { revision, stats } => {
-                if revision == self.state.process.preflight_revision {
-                    self.state.process.preflight = stats;
-                    if !self.is_processing() {
-                        self.state.process.ui_status = ProcessUiStatus::Idle;
-                        self.state.process.processing_current_file =
-                            tr(self.state.settings.language, "status_ready").to_string();
-                    }
-                }
-            }
-            PreflightEvent::Failed { revision, error } => {
-                if revision == self.state.process.preflight_revision {
-                    self.state.process.preflight.is_scanning = false;
-                    self.state.process.ui_status = ProcessUiStatus::Error;
-                    self.state.process.last_error = Some(error.to_string());
-                }
-            }
-        }
+        let ready_label = tr(self.state.settings.language, "status_ready");
+        let is_processing = self.is_processing();
+        model::apply_preflight_event(&mut self.state.process, event, is_processing, ready_label);
     }
 
     fn apply_process_event(&mut self, event: ProcessEvent, cx: &mut Context<Self>) -> bool {
@@ -292,46 +249,23 @@ impl Workspace {
             .value()
             .trim()
             .to_ascii_lowercase();
-        let rows = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .map(|result| {
-                result
-                    .preview_files
-                    .iter()
-                    .filter(|entry| {
-                        filter.is_empty()
-                            || entry
-                                .display_path
-                                .to_ascii_lowercase()
-                                .contains(filter.as_str())
-                    })
-                    .map(|entry| PreviewRowViewModel {
-                        id: entry.id,
-                        display_path: entry.display_path.clone(),
-                        chars: entry.chars,
-                        tokens: entry.tokens,
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default();
-        self.state.result.preview_rows = rows.clone();
-        let selected_row_ix = rows
-            .iter()
-            .position(|row| Some(row.id) == self.state.workspace.selected_preview_file_id);
-        let next_selected_id = selected_row_ix
-            .and_then(|ix| rows.get(ix))
-            .map(|row| row.id)
-            .or_else(|| rows.first().map(|row| row.id));
+        let table_model = model::build_preview_table_model(
+            self.state.result.result.as_ref(),
+            filter.as_str(),
+            self.state.workspace.selected_preview_file_id,
+        );
+        self.state.result.preview_rows = table_model.rows.clone();
         self.preview_table.update(cx, |table, cx| {
-            table.delegate_mut().rows = rows;
-            if let Some(row_ix) = selected_row_ix.or(if next_selected_id.is_some() {
-                Some(0)
-            } else {
-                None
-            }) {
+            table.delegate_mut().rows = table_model.rows;
+            if let Some(row_ix) =
+                table_model
+                    .selected_row_ix
+                    .or(if table_model.next_selected_file_id.is_some() {
+                        Some(0)
+                    } else {
+                        None
+                    })
+            {
                 table.set_selected_row(row_ix, cx);
             } else {
                 table.clear_selection(cx);
@@ -339,7 +273,7 @@ impl Workspace {
             cx.notify();
         });
 
-        match next_selected_id {
+        match table_model.next_selected_file_id {
             Some(file_id) => self.load_preview(file_id, cx),
             None => self.clear_preview_state(),
         }
@@ -368,14 +302,7 @@ impl Workspace {
     }
 
     pub(super) fn clear_preview_state(&mut self) {
-        self.state.workspace.selected_preview_file_id = None;
-        self.state.workspace.preview_rx = None;
-        self.state.workspace.preview_requested_range = None;
-        self.state.workspace.preview_document = None;
-        self.state.workspace.preview_loaded_range = 0..0;
-        self.state.workspace.preview_loaded_lines.clear();
-        self.state.workspace.preview_visible_range = 0..0;
-        self.state.workspace.preview_sizes = Rc::new(vec![size(px(10.), preview_line_height())]);
+        self.state.workspace.reset_preview();
     }
 
     fn padded_preview_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {

@@ -64,7 +64,6 @@ pub fn start(request: ProcessRequest) -> ProcessHandle {
             }
             Err(err) if thread_cancel.is_cancelled() => {
                 let _ = tx.send(ProcessEvent::Cancelled);
-                let _ = tx.send(ProcessEvent::Failed(err));
             }
             Err(err) => {
                 let _ = tx.send(ProcessEvent::Failed(err));
@@ -144,13 +143,20 @@ async fn run_process_with_walker(
     let output_format = request.options.output_format;
     let result_path = crate::utils::temp_file::make_temp_result_path()?;
     let preview_dir = crate::utils::temp_file::make_temp_preview_dir()?;
-    let mut output = tokio::fs::File::create(&result_path)
-        .await
-        .map_err(|e| AppError::new(format!("create merged file failed: {e}")))?;
-    output
+    let mut output = match tokio::fs::File::create(&result_path).await {
+        Ok(file) => file,
+        Err(err) => {
+            let _ = crate::utils::temp_file::cleanup_preview_dir(&preview_dir);
+            return Err(AppError::new(format!("create merged file failed: {err}")));
+        }
+    };
+    if let Err(err) = output
         .write_all(render_prefix(output_format, &walker.tree).as_bytes())
         .await
-        .map_err(|e| AppError::new(format!("write merged prefix failed: {e}")))?;
+    {
+        cleanup_failed_run(&result_path, &preview_dir).await;
+        return Err(AppError::new(format!("write merged prefix failed: {err}")));
+    }
 
     let concurrency_limit = file_concurrency_limit(walker.candidates.len());
     let mut processed_stream = stream::iter(
@@ -201,15 +207,19 @@ async fn run_process_with_walker(
                 stats.processed_files += 1;
                 stats.total_chars += chars;
                 stats.total_tokens += tokens;
-                output
+                if let Err(err) = output
                     .write_all(render_file_entry(output_format, &merged).as_bytes())
                     .await
-                    .map_err(|e| AppError::new(format!("write merged content failed: {e}")))?;
+                {
+                    cleanup_failed_run(&result_path, &preview_dir).await;
+                    return Err(AppError::new(format!("write merged content failed: {err}")));
+                }
                 let next_id = preview_files.len() as u32;
                 let blob_path = preview_dir.join(format!("preview_{next_id}.txt"));
-                tokio::fs::write(&blob_path, merged.content.as_bytes())
-                    .await
-                    .map_err(|e| AppError::new(format!("write preview blob failed: {e}")))?;
+                if let Err(err) = tokio::fs::write(&blob_path, merged.content.as_bytes()).await {
+                    cleanup_failed_run(&result_path, &preview_dir).await;
+                    return Err(AppError::new(format!("write preview blob failed: {err}")));
+                }
                 preview_files.push(PreviewFileEntry {
                     id: next_id,
                     display_path: detail.path.clone(),
@@ -231,16 +241,16 @@ async fn run_process_with_walker(
     }
 
     let suffix = render_suffix(output_format);
-    if !suffix.is_empty() {
-        output
-            .write_all(suffix.as_bytes())
-            .await
-            .map_err(|e| AppError::new(format!("write merged suffix failed: {e}")))?;
+    if !suffix.is_empty()
+        && let Err(err) = output.write_all(suffix.as_bytes()).await
+    {
+        cleanup_failed_run(&result_path, &preview_dir).await;
+        return Err(AppError::new(format!("write merged suffix failed: {err}")));
     }
-    output
-        .flush()
-        .await
-        .map_err(|e| AppError::new(format!("flush merged file failed: {e}")))?;
+    if let Err(err) = output.flush().await {
+        cleanup_failed_run(&result_path, &preview_dir).await;
+        return Err(AppError::new(format!("flush merged file failed: {err}")));
+    }
 
     Ok(ProcessResult {
         stats,
@@ -251,6 +261,11 @@ async fn run_process_with_walker(
         preview_files,
         preview_blob_dir: Some(preview_dir),
     })
+}
+
+async fn cleanup_failed_run(result_path: &std::path::Path, preview_dir: &std::path::Path) {
+    let _ = tokio::fs::remove_file(result_path).await;
+    let _ = crate::utils::temp_file::cleanup_preview_dir(preview_dir);
 }
 
 #[derive(Debug)]

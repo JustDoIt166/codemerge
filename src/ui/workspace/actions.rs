@@ -1,5 +1,4 @@
 use std::collections::BTreeSet;
-use std::time::Instant;
 
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window};
 use gpui_component::{
@@ -9,9 +8,10 @@ use gpui_component::{
     table::{TableEvent, TableState},
 };
 
+use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{
     BlacklistItemKind, NarrowContentTab, PendingConfirmation, PreviewTableDelegate, SidePanelTab,
-    TreeExpansionMode, Workspace, copy_to_clipboard,
+    Workspace,
 };
 use crate::domain::{FileEntry, ResultTab};
 use crate::services::preview::load_text;
@@ -20,11 +20,7 @@ use crate::utils::i18n::tr;
 use crate::utils::path::filename;
 
 impl Workspace {
-    fn notify_active_window(
-        cx: &mut App,
-        kind: NotificationType,
-        message: impl Into<String>,
-    ) {
+    fn notify_active_window(cx: &mut App, kind: NotificationType, message: impl Into<String>) {
         if let Some(window) = cx.active_window() {
             let message = SharedString::from(message.into());
             let _ = window.update(cx, |_, window, cx| {
@@ -34,12 +30,7 @@ impl Workspace {
     }
 
     fn persist_settings_async(&self, cx: &mut Context<Self>) {
-        let config = crate::domain::AppConfigV1 {
-            language: self.state.settings.language,
-            options: self.state.settings.options.clone(),
-            folder_blacklist: self.state.settings.folder_blacklist.clone(),
-            ext_blacklist: self.state.settings.ext_blacklist.clone(),
-        };
+        let config = self.state.to_config();
         cx.spawn(async move |this, cx| {
             let result =
                 crate::services::settings::execute(crate::domain::SettingsCommand::Save(config));
@@ -79,11 +70,7 @@ impl Workspace {
         cx.notify();
     }
 
-    pub(super) fn apply_selected_files(
-        &mut self,
-        files: Vec<FileEntry>,
-        cx: &mut Context<Self>,
-    ) {
+    pub(super) fn apply_selected_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
         let mut existing = self
             .state
             .selection
@@ -328,13 +315,8 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation();
-        self.state.selection.selected_folder = None;
-        self.state.selection.selected_files.clear();
-        self.state.selection.gitignore_file = None;
-        self.state.result.result = None;
-        self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Idle;
-        self.state.process.last_error = None;
-        self.clear_preview_state();
+        let status_ready = tr(self.state.settings.language, "status_ready").to_string();
+        self.state.clear_inputs(status_ready);
         self.sync_tree(cx);
         self.sync_preview_table(cx);
         self.refresh_preflight();
@@ -374,19 +356,14 @@ impl Workspace {
             let _ = crate::utils::temp_file::cleanup_preview_dir(prev_dir);
         }
         self.state.result.result = None;
+        self.state.result.preview_rows.clear();
         self.clear_preview_state();
         self.clear_pending_confirmation();
         self.side_panel_tab = SidePanelTab::Results;
         self.narrow_content_tab = NarrowContentTab::Status;
-        self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Running;
-        self.state.process.last_error = None;
-        self.state.process.processing_records.clear();
-        self.state.process.processing_scanned = 0;
-        self.state.process.processing_candidates = 0;
-        self.state.process.processing_skipped = 0;
-        self.state.process.processing_current_file =
-            tr(self.state.settings.language, "scanning_files").to_string();
-        self.state.process.processing_started_at = Some(Instant::now());
+        self.state
+            .process
+            .reset_for_run(tr(self.state.settings.language, "scanning_files").to_string());
         self.state.process.process_handle = Some(crate::services::process::start(ProcessRequest {
             selected_folder: self.state.selection.selected_folder.clone(),
             selected_files: self
@@ -601,7 +578,9 @@ impl Workspace {
                     );
                     cx.notify();
                 }
-                Err(err) => Self::notify_active_window(cx, NotificationType::Error, err.to_string()),
+                Err(err) => {
+                    Self::notify_active_window(cx, NotificationType::Error, err.to_string())
+                }
             });
         })
         .detach();
@@ -845,8 +824,16 @@ impl Workspace {
     ) {
         self.clear_pending_confirmation();
         match kind {
-            BlacklistItemKind::Folder => self.state.settings.folder_blacklist.retain(|item| item != &value),
-            BlacklistItemKind::Ext => self.state.settings.ext_blacklist.retain(|item| item != &value),
+            BlacklistItemKind::Folder => self
+                .state
+                .settings
+                .folder_blacklist
+                .retain(|item| item != &value),
+            BlacklistItemKind::Ext => self
+                .state
+                .settings
+                .ext_blacklist
+                .retain(|item| item != &value),
         }
         self.persist_settings_async(cx);
         self.refresh_preflight();

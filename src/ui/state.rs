@@ -58,6 +58,27 @@ impl AppState {
             workspace: WorkspaceState::default(),
         }
     }
+
+    pub fn to_config(&self) -> AppConfigV1 {
+        AppConfigV1 {
+            language: self.settings.language,
+            options: self.settings.options.clone(),
+            folder_blacklist: self.settings.folder_blacklist.clone(),
+            ext_blacklist: self.settings.ext_blacklist.clone(),
+        }
+    }
+
+    pub fn clear_inputs(&mut self, status_ready: String) {
+        self.selection.selected_folder = None;
+        self.selection.selected_files.clear();
+        self.selection.gitignore_file = None;
+        self.result.result = None;
+        self.result.preview_rows.clear();
+        self.process.ui_status = ProcessUiStatus::Idle;
+        self.process.last_error = None;
+        self.process.processing_current_file = status_ready;
+        self.workspace.reset_preview();
+    }
 }
 
 #[derive(Default)]
@@ -103,6 +124,24 @@ pub struct ProcessState {
     pub last_error: Option<String>,
 }
 
+impl ProcessState {
+    pub fn reset_for_run(&mut self, scanning_label: String) {
+        self.ui_status = ProcessUiStatus::Running;
+        self.last_error = None;
+        self.processing_records.clear();
+        self.processing_scanned = 0;
+        self.processing_candidates = 0;
+        self.processing_skipped = 0;
+        self.processing_current_file = scanning_label;
+        self.processing_started_at = Some(Instant::now());
+    }
+
+    pub fn finish_run(&mut self) {
+        self.process_handle = None;
+        self.processing_started_at = None;
+    }
+}
+
 #[derive(Default)]
 pub struct ResultState {
     pub result: Option<ProcessResult>,
@@ -135,5 +174,18 @@ impl Default for WorkspaceState {
             preview_loaded_lines: Vec::new(),
             preview_sizes: Rc::new(vec![size(px(10.), preview_line_height())]),
         }
+    }
+}
+
+impl WorkspaceState {
+    pub fn reset_preview(&mut self) {
+        self.selected_preview_file_id = None;
+        self.preview_rx = None;
+        self.preview_requested_range = None;
+        self.preview_document = None;
+        self.preview_loaded_range = 0..0;
+        self.preview_visible_range = 0..0;
+        self.preview_loaded_lines.clear();
+        self.preview_sizes = Rc::new(vec![size(px(10.), preview_line_height())]);
     }
 }

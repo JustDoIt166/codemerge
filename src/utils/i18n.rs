@@ -6,7 +6,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "title") => "文件合并工具",
         (Language::En, "title") => "File Merge Tool",
         (Language::Zh, "app_subtitle") => "更清晰地整理输入、处理状态与合并结果",
-        (Language::En, "app_subtitle") => "A clearer workspace for inputs, progress, and merged results",
+        (Language::En, "app_subtitle") => {
+            "A clearer workspace for inputs, progress, and merged results"
+        }
 
         // 通用按钮
         (Language::Zh, "start") => "开始处理",
@@ -72,13 +74,19 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "selected_files_empty") => "还没有单独选中的文件",
         (Language::En, "selected_files_empty") => "No individual files selected",
         (Language::Zh, "selected_files_hint") => "选择文件夹或直接添加文件后，这里会显示输入列表",
-        (Language::En, "selected_files_hint") => "Selected files will appear here after choosing a folder or files",
+        (Language::En, "selected_files_hint") => {
+            "Selected files will appear here after choosing a folder or files"
+        }
         (Language::Zh, "gitignore") => ".gitignore",
         (Language::En, "gitignore") => ".gitignore",
         (Language::Zh, "gitignore_auto_hint") => "将优先使用当前目录下自动发现的 .gitignore",
-        (Language::En, "gitignore_auto_hint") => "Auto-detected .gitignore from the selected folder will be used first",
+        (Language::En, "gitignore_auto_hint") => {
+            "Auto-detected .gitignore from the selected folder will be used first"
+        }
         (Language::Zh, "gitignore_apply_hint") => "手动选择后再应用规则，避免误覆盖当前黑名单",
-        (Language::En, "gitignore_apply_hint") => "Apply a manually selected file only when you want to append its rules",
+        (Language::En, "gitignore_apply_hint") => {
+            "Apply a manually selected file only when you want to append its rules"
+        }
         (Language::Zh, "folder_label") => "文件夹: ",
         (Language::En, "folder_label") => "folder: ",
         (Language::Zh, "files_label") => "文件数: ",
@@ -122,7 +130,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "section_blacklist") => "黑名单",
         (Language::En, "section_blacklist") => "Blacklist",
         (Language::Zh, "rules_secondary_hint") => "高级规则从主流程中拆出，在这里维护更安全。",
-        (Language::En, "rules_secondary_hint") => "Advanced rules are managed here so the main flow stays focused.",
+        (Language::En, "rules_secondary_hint") => {
+            "Advanced rules are managed here so the main flow stays focused."
+        }
         (Language::Zh, "folder_name") => "文件夹名",
         (Language::En, "folder_name") => "folder name",
         (Language::Zh, "blacklist_filter") => "过滤黑名单条目",
@@ -160,7 +170,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "blacklist_empty_title") => "当前没有匹配到规则",
         (Language::En, "blacklist_empty_title") => "No matching rules",
         (Language::Zh, "blacklist_empty_hint") => "添加新规则或调整筛选条件后，这里会更新。",
-        (Language::En, "blacklist_empty_hint") => "Add a rule or adjust the filter to populate this list.",
+        (Language::En, "blacklist_empty_hint") => {
+            "Add a rule or adjust the filter to populate this list."
+        }
         (Language::Zh, "blacklist_import_append") => "导入追加",
         (Language::En, "blacklist_import_append") => "Import Append",
         (Language::Zh, "blacklist_import_replace") => "导入替换",
@@ -198,15 +210,21 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "status_completed") => "已完成",
         (Language::En, "status_completed") => "Completed",
         (Language::Zh, "status_completed_hint") => "处理完成，可以查看目录树或合并内容。",
-        (Language::En, "status_completed_hint") => "Processing finished. Review the tree or merged content.",
+        (Language::En, "status_completed_hint") => {
+            "Processing finished. Review the tree or merged content."
+        }
         (Language::Zh, "status_cancelled") => "已取消",
         (Language::En, "status_cancelled") => "Cancelled",
         (Language::Zh, "status_cancelled_hint") => "任务已取消，重新开始前可调整输入或规则。",
-        (Language::En, "status_cancelled_hint") => "The task was cancelled. Adjust inputs or rules before restarting.",
+        (Language::En, "status_cancelled_hint") => {
+            "The task was cancelled. Adjust inputs or rules before restarting."
+        }
         (Language::Zh, "status_error") => "有错误",
         (Language::En, "status_error") => "Error",
         (Language::Zh, "status_error_hint") => "处理遇到错误，请检查日志与输入。",
-        (Language::En, "status_error_hint") => "Processing failed. Check the activity log and inputs.",
+        (Language::En, "status_error_hint") => {
+            "Processing failed. Check the activity log and inputs."
+        }
         (Language::Zh, "scanning_files") => "扫描文件中",
         (Language::En, "scanning_files") => "Scanning files",
         (Language::Zh, "processing") => "处理中: ",
@@ -236,7 +254,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "activity_empty") => "还没有处理记录",
         (Language::En, "activity_empty") => "No activity yet",
         (Language::Zh, "activity_empty_hint") => "开始处理后，最近的成功、跳过和错误会显示在这里。",
-        (Language::En, "activity_empty_hint") => "Recent success, skipped, and error events will appear here after processing starts.",
+        (Language::En, "activity_empty_hint") => {
+            "Recent success, skipped, and error events will appear here after processing starts."
+        }
         (Language::Zh, "failed_count") => "失败数",
         (Language::En, "failed_count") => "Failed",
         (Language::Zh, "section_summary") => "处理摘要",
@@ -290,7 +310,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "content_empty") => "还没有可预览的结果",
         (Language::En, "content_empty") => "No previewable result yet",
         (Language::Zh, "content_empty_hint") => "完成一次处理后，这里会显示可预览的文件列表。",
-        (Language::En, "content_empty_hint") => "Previewable files will appear here after processing completes.",
+        (Language::En, "content_empty_hint") => {
+            "Previewable files will appear here after processing completes."
+        }
         (Language::Zh, "content_no_match") => "没有匹配到文件",
         (Language::En, "content_no_match") => "No matching files",
         (Language::Zh, "content_no_match_hint") => "调整文件过滤条件后，再试一次。",
@@ -298,7 +320,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "preview_empty") => "尚未选择预览文件",
         (Language::En, "preview_empty") => "No preview file selected",
         (Language::Zh, "preview_empty_hint") => "从上方列表中选择一个文件后，这里会显示内容预览。",
-        (Language::En, "preview_empty_hint") => "Select a file from the table above to preview its content.",
+        (Language::En, "preview_empty_hint") => {
+            "Select a file from the table above to preview its content."
+        }
         (Language::Zh, "preview_unknown_path") => "未知路径",
         (Language::En, "preview_unknown_path") => "Unknown path",
         (Language::Zh, "line_count") => "行数",
@@ -344,7 +368,9 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::Zh, "danger_zone") => "危险操作",
         (Language::En, "danger_zone") => "Danger Zone",
         (Language::Zh, "danger_zone_hint") => "以下操作会清空当前选择或规则，请谨慎执行。",
-        (Language::En, "danger_zone_hint") => "These actions clear current inputs or rules. Use with care.",
+        (Language::En, "danger_zone_hint") => {
+            "These actions clear current inputs or rules. Use with care."
+        }
 
         // Toast 消息
         (Language::Zh, "saved") => "已保存",
@@ -441,6 +467,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "blacklist_exported") => "Blacklist exported",
         (Language::Zh, "config_updated") => "设置已更新",
         (Language::En, "config_updated") => "Settings updated",
+        (Language::Zh, "config_fallback_defaults") => "配置读取失败，已回退到默认设置",
+        (Language::En, "config_fallback_defaults") => "Config load failed, defaults were restored",
         (Language::Zh, "process_started") => "开始处理",
         (Language::En, "process_started") => "Processing started",
 
