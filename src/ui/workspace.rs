@@ -599,6 +599,58 @@ impl Workspace {
         window.push_notification((kind, SharedString::from(message.into())), cx);
     }
 
+    fn apply_selected_folder_path(&mut self, path: std::path::PathBuf, cx: &mut Context<Self>) {
+        self.state.selection.selected_folder = Some(path.clone());
+        if self.state.settings.options.use_gitignore {
+            let gitignore = crate::processor::walker::auto_gitignore_path(&path);
+            if gitignore.exists() {
+                if let Ok(content) = std::fs::read_to_string(&gitignore) {
+                    for rule in crate::processor::walker::parse_gitignore_rules(&content) {
+                        if !self.state.settings.folder_blacklist.contains(&rule) {
+                            self.state.settings.folder_blacklist.push(rule);
+                        }
+                    }
+                }
+            }
+        }
+        let _ = self.save_settings();
+        self.refresh_preflight();
+        cx.notify();
+    }
+
+    fn apply_selected_files(&mut self, files: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
+        let mut existing = self
+            .state
+            .selection
+            .selected_files
+            .iter()
+            .map(|entry| entry.path.to_string_lossy().to_string())
+            .collect::<std::collections::BTreeSet<_>>();
+        for path in files {
+            let key = path.to_string_lossy().to_string();
+            if self.state.selection.dedupe_exact_path && !existing.insert(key) {
+                continue;
+            }
+            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+            self.state.selection.selected_files.push(FileEntry {
+                name: filename(&path),
+                path,
+                size,
+            });
+        }
+        self.refresh_preflight();
+        cx.notify();
+    }
+
+    fn apply_selected_gitignore(
+        &mut self,
+        path: Option<std::path::PathBuf>,
+        cx: &mut Context<Self>,
+    ) {
+        self.state.selection.gitignore_file = path;
+        cx.notify();
+    }
+
     fn on_preview_filter_event(
         &mut self,
         _: &Entity<InputState>,
@@ -646,78 +698,53 @@ impl Workspace {
     }
 
     fn select_folder(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(path) = rfd::FileDialog::new().pick_folder() {
-            self.state.selection.selected_folder = Some(path.clone());
-            if self.state.settings.options.use_gitignore {
-                let gitignore = crate::processor::walker::auto_gitignore_path(&path);
-                if gitignore.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&gitignore) {
-                        for rule in crate::processor::walker::parse_gitignore_rules(&content) {
-                            if !self.state.settings.folder_blacklist.contains(&rule) {
-                                self.state.settings.folder_blacklist.push(rule);
-                            }
-                        }
-                    }
+        let _ = window;
+        cx.spawn(async move |this, cx| {
+            let picked = rfd::AsyncFileDialog::new()
+                .pick_folder()
+                .await
+                .map(|handle| handle.path().to_path_buf());
+            let _ = this.update(cx, |this, cx| {
+                if let Some(path) = picked {
+                    this.apply_selected_folder_path(path, cx);
                 }
-            }
-            let _ = self.save_settings();
-            self.refresh_preflight();
-            self.push_notice(
-                NotificationType::Success,
-                tr(self.state.settings.language, "folder_selected"),
-                window,
-                cx,
-            );
-            cx.notify();
-        }
+            });
+        })
+        .detach();
     }
 
     fn select_files(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(files) = rfd::FileDialog::new().pick_files() else {
-            return;
-        };
-        let mut existing = self
-            .state
-            .selection
-            .selected_files
-            .iter()
-            .map(|entry| entry.path.to_string_lossy().to_string())
-            .collect::<std::collections::BTreeSet<_>>();
-        for path in files {
-            let key = path.to_string_lossy().to_string();
-            if self.state.selection.dedupe_exact_path && !existing.insert(key) {
-                continue;
-            }
-            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-            self.state.selection.selected_files.push(FileEntry {
-                name: filename(&path),
-                path,
-                size,
+        let _ = window;
+        cx.spawn(async move |this, cx| {
+            let picked = rfd::AsyncFileDialog::new()
+                .pick_files()
+                .await
+                .map(|handles| {
+                    handles
+                        .into_iter()
+                        .map(|handle| handle.path().to_path_buf())
+                        .collect::<Vec<_>>()
+                });
+            let _ = this.update(cx, |this, cx| {
+                if let Some(files) = picked {
+                    this.apply_selected_files(files, cx);
+                }
             });
-        }
-        self.refresh_preflight();
-        self.push_notice(
-            NotificationType::Success,
-            tr(self.state.settings.language, "files_added"),
-            window,
-            cx,
-        );
-        cx.notify();
+        })
+        .detach();
     }
 
     fn select_gitignore(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
-        self.state.selection.gitignore_file = rfd::FileDialog::new()
-            .add_filter("gitignore", &["gitignore"])
-            .pick_file();
-        if self.state.selection.gitignore_file.is_some() {
-            self.push_notice(
-                NotificationType::Info,
-                tr(self.state.settings.language, "gitignore_selected"),
-                window,
-                cx,
-            );
-        }
-        cx.notify();
+        let _ = window;
+        cx.spawn(async move |this, cx| {
+            let picked = rfd::AsyncFileDialog::new()
+                .add_filter("gitignore", &["gitignore"])
+                .pick_file()
+                .await
+                .map(|handle| handle.path().to_path_buf());
+            let _ = this.update(cx, |this, cx| this.apply_selected_gitignore(picked, cx));
+        })
+        .detach();
     }
 
     fn apply_gitignore(&mut self, _: &ClickEvent, window: &mut Window, cx: &mut Context<Self>) {
