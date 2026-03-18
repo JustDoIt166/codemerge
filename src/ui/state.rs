@@ -1,10 +1,9 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::time::Instant;
 
-use gpui::{Pixels, SharedString, px, size};
+use gpui::SharedString;
 
 use crate::domain::{
     AppConfigV1, FileEntry, PreflightStats, PreviewRowViewModel, ProcessRecord, ProcessResult,
@@ -13,10 +12,6 @@ use crate::domain::{
 use crate::services::preflight::PreflightEvent;
 use crate::services::preview::{PreviewDocument, PreviewEvent};
 use crate::services::process::ProcessHandle;
-
-fn preview_line_height() -> Pixels {
-    px(22.)
-}
 
 #[derive(Default)]
 pub struct AppState {
@@ -182,6 +177,12 @@ pub struct TreePanelState {
     pub expanded_ids: BTreeSet<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewChunk {
+    pub range: Range<usize>,
+    pub lines: Vec<SharedString>,
+}
+
 pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
     pub preview_revision: u64,
@@ -189,10 +190,83 @@ pub struct PreviewPanelState {
     pub preview_requested_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
     pub preview_error: Option<String>,
-    pub preview_loaded_range: Range<usize>,
-    pub preview_visible_range: Range<usize>,
-    pub preview_loaded_lines: Vec<SharedString>,
-    pub preview_sizes: Rc<Vec<gpui::Size<Pixels>>>,
+    pub preview_last_visible_range: Range<usize>,
+    pub preview_chunks: Vec<PreviewChunk>,
+}
+
+impl PreviewPanelState {
+    const MAX_CHUNKS: usize = 3;
+
+    pub fn clear_loaded_chunks(&mut self) {
+        self.preview_chunks.clear();
+    }
+
+    pub fn set_visible_range(&mut self, range: Range<usize>) {
+        self.preview_last_visible_range = range;
+    }
+
+    pub fn store_chunk(&mut self, range: Range<usize>, lines: Vec<SharedString>) {
+        if range.start >= range.end || lines.is_empty() {
+            return;
+        }
+
+        self.preview_chunks
+            .retain(|chunk| chunk.range.end <= range.start || chunk.range.start >= range.end);
+        self.preview_chunks.push(PreviewChunk {
+            range: range.clone(),
+            lines,
+        });
+        self.preview_chunks.sort_by_key(|chunk| chunk.range.start);
+
+        let focus = if self.preview_last_visible_range.start < self.preview_last_visible_range.end {
+            self.preview_last_visible_range.clone()
+        } else {
+            range
+        };
+        while self.preview_chunks.len() > Self::MAX_CHUNKS {
+            let focus_center = range_center(&focus);
+            let prune_ix = self
+                .preview_chunks
+                .iter()
+                .enumerate()
+                .max_by_key(|(_, chunk)| range_center(&chunk.range).abs_diff(focus_center))
+                .map(|(ix, _)| ix)
+                .unwrap_or(0);
+            self.preview_chunks.remove(prune_ix);
+        }
+    }
+
+    pub fn has_loaded_range(&self, range: &Range<usize>) -> bool {
+        if range.start >= range.end {
+            return true;
+        }
+
+        let mut covered_until = range.start;
+        for chunk in &self.preview_chunks {
+            if chunk.range.end <= covered_until {
+                continue;
+            }
+            if chunk.range.start > covered_until {
+                return false;
+            }
+            covered_until = covered_until.max(chunk.range.end);
+            if covered_until >= range.end {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    pub fn line_at(&self, ix: usize) -> Option<SharedString> {
+        self.preview_chunks.iter().find_map(|chunk| {
+            if ix < chunk.range.start || ix >= chunk.range.end {
+                return None;
+            }
+
+            chunk.lines.get(ix - chunk.range.start).cloned()
+        })
+    }
 }
 
 impl Default for PreviewPanelState {
@@ -204,10 +278,8 @@ impl Default for PreviewPanelState {
             preview_requested_range: None,
             preview_document: None,
             preview_error: None,
-            preview_loaded_range: 0..0,
-            preview_visible_range: 0..0,
-            preview_loaded_lines: Vec::new(),
-            preview_sizes: Rc::new(vec![size(px(10.), preview_line_height())]),
+            preview_last_visible_range: 0..0,
+            preview_chunks: Vec::new(),
         }
     }
 }
@@ -228,9 +300,13 @@ impl WorkspaceState {
     }
 }
 
+fn range_center(range: &Range<usize>) -> usize {
+    range.start + (range.end.saturating_sub(range.start) / 2)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::AppState;
+    use super::{AppState, PreviewPanelState};
     use crate::domain::{
         AppConfigV1, FileEntry, Language, OutputFormat, PreflightStats, PreviewFileEntry,
         ProcessResult, ProcessingMode, ProcessingOptions,
@@ -379,5 +455,65 @@ mod tests {
 
         assert!(!state.has_content_result());
         assert!(state.is_tree_only_result());
+    }
+
+    #[test]
+    fn preview_panel_tracks_covered_ranges_across_adjacent_chunks() {
+        let mut state = PreviewPanelState::default();
+        state.store_chunk(
+            0..50,
+            (0..50).map(|ix| format!("line-{ix}").into()).collect(),
+        );
+        state.store_chunk(
+            50..120,
+            (50..120).map(|ix| format!("line-{ix}").into()).collect(),
+        );
+
+        assert!(state.has_loaded_range(&(10..90)));
+        assert!(state.has_loaded_range(&(0..120)));
+        assert!(!state.has_loaded_range(&(0..121)));
+        assert_eq!(
+            state.line_at(65).map(|line| line.to_string()),
+            Some("line-65".into())
+        );
+    }
+
+    #[test]
+    fn preview_panel_prunes_far_chunks_and_keeps_nearby_data() {
+        let mut state = PreviewPanelState::default();
+        state.set_visible_range(220..260);
+        state.store_chunk(0..50, (0..50).map(|ix| format!("a-{ix}").into()).collect());
+        state.store_chunk(
+            100..150,
+            (100..150).map(|ix| format!("b-{ix}").into()).collect(),
+        );
+        state.store_chunk(
+            200..250,
+            (200..250).map(|ix| format!("c-{ix}").into()).collect(),
+        );
+        state.store_chunk(
+            250..300,
+            (250..300).map(|ix| format!("d-{ix}").into()).collect(),
+        );
+
+        assert_eq!(state.preview_chunks.len(), 3);
+        assert!(
+            !state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (0..50))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (200..250))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (250..300))
+        );
     }
 }

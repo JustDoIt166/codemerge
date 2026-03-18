@@ -5,14 +5,14 @@ mod panels;
 mod view;
 
 use std::rc::Rc;
-use std::time::Duration;
 
 use gpui::{
     App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, ParentElement,
-    Pixels, Render, SharedString, Styled, Subscription, Task, Timer, Window, px, size,
+    Pixels, Render, SharedString, Styled, Subscription, Task, Timer, UniformListScrollHandle,
+    Window, px, size,
 };
 use gpui_component::{
-    VirtualListScrollHandle, WindowExt as _,
+    WindowExt as _,
     input::InputState,
     notification::NotificationType,
     table::{Column, TableDelegate, TableState},
@@ -140,7 +140,7 @@ pub(super) struct TreePanelController {
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
-    preview_scroll_handle: VirtualListScrollHandle,
+    preview_scroll_handle: UniformListScrollHandle,
     tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
@@ -149,7 +149,8 @@ pub struct Workspace {
     side_panel_tab: SidePanelTab,
     narrow_content_tab: NarrowContentTab,
     pending_confirmation: Option<PendingConfirmation>,
-    _poll_task: Task<()>,
+    poll_task: Option<Task<()>>,
+    poll_task_running: bool,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -183,17 +184,17 @@ impl Workspace {
                 Self::on_blacklist_filter_event,
             ),
             cx.subscribe_in(&preview_table, window, Self::on_preview_table_event),
+            cx.observe(&tree_state, |this, _, cx| {
+                let dirty = this.sync_tree_interaction(cx);
+                if dirty {
+                    cx.notify();
+                }
+            }),
         ];
-        let poll_task = cx.spawn(async move |this, cx| {
-            loop {
-                Timer::after(Duration::from_millis(33)).await;
-                let _ = this.update(cx, |this, cx| this.poll_background(cx));
-            }
-        });
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
-            preview_scroll_handle: VirtualListScrollHandle::new(),
+            preview_scroll_handle: UniformListScrollHandle::new(),
             tree_panel: TreePanelController {
                 state: tree_state,
                 filter_input: tree_filter_input,
@@ -208,7 +209,8 @@ impl Workspace {
             side_panel_tab: SidePanelTab::Results,
             narrow_content_tab: NarrowContentTab::Status,
             pending_confirmation: None,
-            _poll_task: poll_task,
+            poll_task: None,
+            poll_task_running: false,
             _subscriptions: subscriptions,
         };
         if matches!(
@@ -223,8 +225,41 @@ impl Workspace {
                 cx,
             );
         }
-        this.refresh_preflight();
+        this.refresh_preflight(cx);
         this
+    }
+
+    fn ensure_background_polling(&mut self, cx: &mut Context<Self>) {
+        if self.poll_task_running || !self.needs_background_polling() {
+            return;
+        }
+
+        self.poll_task_running = true;
+        self.poll_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                let Some(delay) = this
+                    .update(cx, |this, cx| this.poll_background(cx))
+                    .ok()
+                    .flatten()
+                else {
+                    break;
+                };
+                Timer::after(delay).await;
+            }
+        }));
+    }
+
+    fn needs_background_polling(&self) -> bool {
+        self.state.process.preflight_rx.is_some()
+            || self.state.process.process_handle.is_some()
+            || self.state.workspace.preview_panel.preview_rx.is_some()
+            || (self.state.result.active_tab == crate::domain::ResultTab::Content
+                && self
+                    .state
+                    .workspace
+                    .preview_panel
+                    .preview_document
+                    .is_some())
     }
 
     fn has_inputs(&self) -> bool {

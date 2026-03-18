@@ -1,6 +1,8 @@
 use std::rc::Rc;
 
-use gpui::{Context, IntoElement, ParentElement, SharedString, Styled, Window, div, px};
+use gpui::{
+    Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div, px, uniform_list,
+};
 use gpui_component::{
     ActiveTheme as _, Disableable, Icon, IconName, Sizable, Size, StyledExt as _,
     button::{Button, ButtonVariants},
@@ -19,10 +21,10 @@ use gpui_component::{
 };
 
 use super::view::{
-    activity_row, card, empty_box, format_duration, format_tree_summary, panel_viewport,
-    pill_label, process_status_message, process_status_title, render_blacklist_section,
-    render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
-    section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
+    activity_row, card, empty_box, format_duration, format_tree_summary, panel_frame,
+    panel_viewport, pill_label, process_status_message, process_status_title,
+    render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
+    section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
 use super::{
     NarrowContentTab, PendingConfirmation, SidePanelTab, Workspace, fixed_list_sizes,
@@ -621,10 +623,12 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(match self.state.result.active_tab {
-                ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
-                ResultTab::Content => self.render_content_panel(cx).into_any_element(),
-            })
+            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                match self.state.result.active_tab {
+                    ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
+                    ResultTab::Content => self.render_content_panel(cx).into_any_element(),
+                },
+            ))
     }
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -819,28 +823,20 @@ impl Workspace {
         let filter_active = !tree_filter.is_empty();
         let has_result = self.state.result.result.is_some();
         let has_visible_nodes = !self.tree_panel.render_state.rows.is_empty();
-        let view = cx.entity();
+        let rows_by_id = Rc::new(self.tree_panel.render_state.rows_by_id.clone());
         let tree_view = tree(&self.tree_panel.state, move |ix, entry, selected, _, cx| {
-            view.update(cx, |workspace, cx| {
-                let Some(mut row) = workspace
-                    .tree_panel
-                    .render_state
-                    .rows_by_id
-                    .get(entry.item().id.as_ref())
-                    .cloned()
-                else {
-                    return ListItem::new(ix).child(entry.item().label.clone());
+            let Some(mut row) = rows_by_id.get(entry.item().id.as_ref()).cloned() else {
+                return ListItem::new(ix).child(entry.item().label.clone());
+            };
+            row.is_expanded = entry.is_expanded();
+            if row.is_folder {
+                row.icon_kind = if entry.is_expanded() {
+                    super::model::TreeIconKind::FolderOpen
+                } else {
+                    super::model::TreeIconKind::FolderClosed
                 };
-                row.is_expanded = entry.is_expanded();
-                if row.is_folder {
-                    row.icon_kind = if entry.is_expanded() {
-                        super::model::TreeIconKind::FolderOpen
-                    } else {
-                        super::model::TreeIconKind::FolderClosed
-                    };
-                }
-                render_tree_row(ix, &row, selected, workspace.state.settings.language, cx)
-            })
+            }
+            render_tree_row(ix, &row, selected, language, cx)
         })
         .h_full();
 
@@ -1023,6 +1019,8 @@ impl Workspace {
         let file_path = selected_preview
             .map(|row| row.display_path.clone())
             .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+        let line_count = document.line_count();
+        let view = cx.entity();
 
         v_flex()
             .gap_2()
@@ -1051,72 +1049,35 @@ impl Workspace {
                     .border_color(cx.theme().border)
                     .rounded(cx.theme().radius)
                     .child(
-                        v_virtual_list(
-                            cx.entity().clone(),
-                            "preview-lines",
-                            self.state.workspace.preview_panel.preview_sizes.clone(),
-                            move |view, visible_range, _, cx| {
-                                view.state.workspace.preview_panel.preview_visible_range =
-                                    visible_range.clone();
-                                let Some(document) =
-                                    &view.state.workspace.preview_panel.preview_document
-                                else {
-                                    return Vec::new();
-                                };
-                                let line_count = document.line_count();
-                                visible_range
-                                    .filter(|ix| *ix < line_count)
-                                    .map(|ix| {
-                                        let line = if ix
-                                            >= view
-                                                .state
-                                                .workspace
-                                                .preview_panel
-                                                .preview_loaded_range
-                                                .start
-                                            && ix
-                                                < view
-                                                    .state
-                                                    .workspace
-                                                    .preview_panel
-                                                    .preview_loaded_range
-                                                    .end
-                                        {
-                                            view.state
-                                                .workspace
-                                                .preview_panel
-                                                .preview_loaded_lines
-                                                .get(
-                                                    ix - view
-                                                        .state
-                                                        .workspace
-                                                        .preview_panel
-                                                        .preview_loaded_range
-                                                        .start,
-                                                )
-                                                .cloned()
-                                                .unwrap_or_default()
-                                        } else {
-                                            SharedString::from("")
-                                        };
-                                        h_flex()
-                                            .gap_3()
-                                            .px_3()
-                                            .h(preview_line_height())
-                                            .font_family(cx.theme().mono_font_family.clone())
-                                            .child(
-                                                div()
-                                                    .w(px(64.))
-                                                    .text_right()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child((ix + 1).to_string()),
-                                            )
-                                            .child(div().flex_1().child(line))
-                                    })
-                                    .collect()
-                            },
-                        )
-                        .track_scroll(&self.preview_scroll_handle)
+                        uniform_list("preview-lines", line_count, move |visible_range, _, app| {
+                            let workspace = view.read(app);
+                            visible_range
+                                .filter(|ix| *ix < line_count)
+                                .map(|ix| {
+                                    let line = workspace
+                                        .state
+                                        .workspace
+                                        .preview_panel
+                                        .line_at(ix)
+                                        .unwrap_or_default();
+                                    h_flex()
+                                        .gap_3()
+                                        .px_3()
+                                        .h(preview_line_height())
+                                        .font_family(app.theme().mono_font_family.clone())
+                                        .child(
+                                            div()
+                                                .w(px(64.))
+                                                .text_right()
+                                                .text_color(app.theme().muted_foreground)
+                                                .child((ix + 1).to_string()),
+                                        )
+                                        .child(div().flex_1().child(line))
+                                })
+                                .collect()
+                        })
+                        .track_scroll(self.preview_scroll_handle.clone())
+                        .with_sizing_behavior(ListSizingBehavior::Auto)
                         .p_2(),
                     ),
             )
@@ -1152,14 +1113,16 @@ impl Workspace {
                                 .label(tr(self.state.settings.language, "panel_results")),
                         ),
                 )
-                .child(match self.narrow_content_tab {
-                    NarrowContentTab::Status => {
-                        self.render_status_panel_body(cx).into_any_element()
-                    }
-                    NarrowContentTab::Results => {
-                        self.render_right_panel_body(cx).into_any_element()
-                    }
-                }),
+                .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                    match self.narrow_content_tab {
+                        NarrowContentTab::Status => {
+                            self.render_status_panel_body(cx).into_any_element()
+                        }
+                        NarrowContentTab::Results => {
+                            self.render_right_panel_body(cx).into_any_element()
+                        }
+                    },
+                )),
         )
     }
 
@@ -1206,7 +1169,7 @@ impl Workspace {
                             panel_min_height,
                         )),
                 )
-                .child(resizable_panel().child(panel_viewport(
+                .child(resizable_panel().child(panel_frame(
                     self.render_right_panel(cx).into_any_element(),
                     panel_min_height,
                 )))

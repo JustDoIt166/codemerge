@@ -1,11 +1,11 @@
 use std::ops::Range;
-use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
+use std::time::Duration;
 
-use gpui::{Context, SharedString, px, size};
+use gpui::{Context, ScrollStrategy, SharedString};
 
 use super::view::TreeExpansionMode;
-use super::{Workspace, model, preview_line_height};
+use super::{Workspace, model};
 use crate::domain::{ProcessResult, ProcessStatus, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
 use crate::services::preview::{PreviewEvent, PreviewRequest, start as start_preview};
@@ -14,7 +14,7 @@ use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
 
 impl Workspace {
-    pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) {
+    pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
         let mut dirty = false;
 
         if let Some(rx) = self.state.process.preflight_rx.take() {
@@ -80,11 +80,35 @@ impl Workspace {
             }
         }
 
-        dirty = self.sync_tree_interaction(cx) || dirty;
-        dirty = self.refresh_preview_window() || dirty;
+        dirty = self.refresh_preview_window(cx) || dirty;
         if dirty {
             cx.notify();
         }
+
+        let next_delay = if self.state.process.preflight_rx.is_some()
+            || self.state.process.process_handle.is_some()
+            || self.state.workspace.preview_panel.preview_rx.is_some()
+        {
+            Some(Duration::from_millis(16))
+        } else if self.state.result.active_tab == ResultTab::Content
+            && self
+                .state
+                .workspace
+                .preview_panel
+                .preview_document
+                .is_some()
+        {
+            Some(Duration::from_millis(33))
+        } else {
+            None
+        };
+
+        if next_delay.is_none() {
+            self.poll_task_running = false;
+            self.poll_task = None;
+        }
+
+        next_delay
     }
 
     fn apply_preflight_event(&mut self, event: PreflightEvent) {
@@ -157,19 +181,16 @@ impl Workspace {
                 {
                     return false;
                 }
-                let line_count = document.line_count().max(1);
                 self.state.workspace.preview_panel.preview_document = Some(document);
                 self.state.workspace.preview_panel.preview_error = None;
-                self.state.workspace.preview_panel.preview_loaded_range = loaded_range;
-                self.state.workspace.preview_panel.preview_loaded_lines =
-                    lines.into_iter().map(SharedString::from).collect();
                 self.state.workspace.preview_panel.preview_requested_range = None;
-                self.state.workspace.preview_panel.preview_sizes = Rc::new(
-                    (0..line_count)
-                        .map(|_| size(px(100.), preview_line_height()))
-                        .collect::<Vec<_>>(),
+                self.state.workspace.preview_panel.clear_loaded_chunks();
+                self.state.workspace.preview_panel.store_chunk(
+                    loaded_range,
+                    lines.into_iter().map(SharedString::from).collect(),
                 );
-                self.preview_scroll_handle.scroll_to_top_of_item(0);
+                self.preview_scroll_handle
+                    .scroll_to_item_strict(0, ScrollStrategy::Top);
                 true
             }
             PreviewEvent::Loaded {
@@ -184,10 +205,11 @@ impl Workspace {
                     return false;
                 }
                 self.state.workspace.preview_panel.preview_error = None;
-                self.state.workspace.preview_panel.preview_loaded_range = loaded_range;
-                self.state.workspace.preview_panel.preview_loaded_lines =
-                    lines.into_iter().map(SharedString::from).collect();
                 self.state.workspace.preview_panel.preview_requested_range = None;
+                self.state.workspace.preview_panel.store_chunk(
+                    loaded_range,
+                    lines.into_iter().map(SharedString::from).collect(),
+                );
                 true
             }
             PreviewEvent::Failed {
@@ -202,12 +224,15 @@ impl Workspace {
                 }
                 self.state.workspace.preview_panel.preview_error = Some(error.to_string());
                 self.state.workspace.preview_panel.preview_requested_range = None;
-                self.state.workspace.preview_panel.preview_loaded_range = 0..0;
-                self.state
+                if self
+                    .state
                     .workspace
                     .preview_panel
-                    .preview_loaded_lines
-                    .clear();
+                    .preview_document
+                    .is_none()
+                {
+                    self.state.workspace.preview_panel.clear_loaded_chunks();
+                }
                 true
             }
         }
@@ -305,7 +330,7 @@ impl Workspace {
         }
     }
 
-    pub(super) fn refresh_preflight(&mut self) {
+    pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
         self.state.process.preflight_revision += 1;
         if !self.is_processing() {
             self.state.process.ui_status = ProcessUiStatus::Preflight;
@@ -330,13 +355,14 @@ impl Workspace {
                 ignore_git: self.state.settings.options.ignore_git,
             },
         ));
+        self.ensure_background_polling(cx);
     }
 
     pub(super) fn clear_preview_state(&mut self) {
         self.state.workspace.reset_preview();
     }
 
-    fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
         let next = self.current_tree_interaction_snapshot(cx);
         let effect = model::apply_tree_interaction(
             &mut self.state.workspace.tree_panel,
@@ -395,10 +421,14 @@ impl Workspace {
         }
         let start = range.start.min(line_count.saturating_sub(1));
         let end = range.end.max(start + 1).min(line_count);
-        start.saturating_sub(50)..(end + 100).min(line_count)
+        let visible_len = end.saturating_sub(start).max(1);
+        let preload_before = visible_len.max(64);
+        let preload_after = visible_len.saturating_mul(2).max(128);
+
+        start.saturating_sub(preload_before)..(end + preload_after).min(line_count)
     }
 
-    fn request_preview_range(&mut self, range: Range<usize>) -> bool {
+    fn request_preview_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> bool {
         let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return false;
         };
@@ -410,15 +440,7 @@ impl Workspace {
         if padded.start >= padded.end {
             return false;
         }
-        if self
-            .state
-            .workspace
-            .preview_panel
-            .preview_loaded_range
-            .start
-            <= padded.start
-            && self.state.workspace.preview_panel.preview_loaded_range.end >= padded.end
-        {
+        if self.state.workspace.preview_panel.has_loaded_range(&padded) {
             return false;
         }
         if self
@@ -428,7 +450,6 @@ impl Workspace {
             .preview_requested_range
             .as_ref()
             == Some(&padded)
-            || self.state.workspace.preview_panel.preview_rx.is_some()
         {
             return false;
         }
@@ -441,10 +462,11 @@ impl Workspace {
                 document: document.clone(),
                 range: padded,
             }));
+        self.ensure_background_polling(cx);
         true
     }
 
-    fn refresh_preview_window(&mut self) -> bool {
+    fn refresh_preview_window(&mut self, cx: &mut Context<Self>) -> bool {
         let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return false;
         };
@@ -453,36 +475,35 @@ impl Workspace {
             return false;
         }
 
-        let visible = if self
-            .state
+        let visible = {
+            let scroll_state = self.preview_scroll_handle.0.borrow();
+            let scroll_handle = &scroll_state.base_handle;
+            if scroll_handle.bounds().size.height > gpui::Pixels::ZERO {
+                let start = scroll_handle.top_item().min(line_count.saturating_sub(1));
+                let end = scroll_handle
+                    .bottom_item()
+                    .saturating_add(1)
+                    .min(line_count);
+                start..end.max(start + 1).min(line_count)
+            } else {
+                0..line_count.min(1)
+            }
+        };
+        self.state
             .workspace
             .preview_panel
-            .preview_visible_range
-            .start
-            < self.state.workspace.preview_panel.preview_visible_range.end
-        {
-            self.state
-                .workspace
-                .preview_panel
-                .preview_visible_range
-                .clone()
-        } else {
-            0..line_count.min(1)
-        };
+            .set_visible_range(visible.clone());
 
         if self
             .state
             .workspace
             .preview_panel
-            .preview_loaded_range
-            .start
-            <= visible.start
-            && self.state.workspace.preview_panel.preview_loaded_range.end >= visible.end
+            .has_loaded_range(&visible)
         {
             return false;
         }
 
-        self.request_preview_range(visible)
+        self.request_preview_range(visible, cx)
     }
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
@@ -516,16 +537,14 @@ impl Workspace {
         }));
         self.state.workspace.preview_panel.preview_requested_range = Some(0..200);
         self.state.workspace.preview_panel.preview_document = None;
-        self.state.workspace.preview_panel.preview_loaded_range = 0..0;
         self.state
             .workspace
             .preview_panel
-            .preview_loaded_lines
-            .clear();
-        self.state.workspace.preview_panel.preview_visible_range = 0..0;
-        self.state.workspace.preview_panel.preview_sizes =
-            Rc::new(vec![size(px(100.), preview_line_height())]);
-        self.preview_scroll_handle.scroll_to_top_of_item(0);
+            .preview_last_visible_range = 0..0;
+        self.state.workspace.preview_panel.clear_loaded_chunks();
+        self.preview_scroll_handle
+            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        self.ensure_background_polling(cx);
         cx.notify();
     }
 }

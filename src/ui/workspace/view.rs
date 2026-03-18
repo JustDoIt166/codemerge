@@ -384,6 +384,16 @@ pub(super) fn panel_viewport(content: AnyElement, min_height: gpui::Pixels) -> g
     )
 }
 
+pub(super) fn panel_frame(content: AnyElement, min_height: gpui::Pixels) -> gpui::Div {
+    div().size_full().min_h(px(0.)).overflow_hidden().child(
+        div()
+            .size_full()
+            .min_h(min_height)
+            .overflow_hidden()
+            .child(content),
+    )
+}
+
 pub(super) fn section_title(title: &str, icon: IconName, cx: &App) -> AnyElement {
     h_flex()
         .gap_2()

@@ -62,7 +62,7 @@ impl Workspace {
     ) {
         self.state.selection.selected_folder = Some(path);
         self.state.selection.gitignore_rules = gitignore_rules;
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         cx.notify();
     }
 
@@ -81,7 +81,7 @@ impl Workspace {
             }
             self.state.selection.selected_files.push(entry);
         }
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         cx.notify();
     }
 
@@ -275,7 +275,7 @@ impl Workspace {
                         }
                     }
                     this.persist_settings_async(cx);
-                    this.refresh_preflight();
+                    this.refresh_preflight(cx);
                     Self::notify_active_window(
                         cx,
                         NotificationType::Success,
@@ -327,7 +327,7 @@ impl Workspace {
         self.tree_panel.last_interaction = None;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
             tr(self.state.settings.language, "files_cleared"),
@@ -383,6 +383,7 @@ impl Workspace {
             options: self.state.settings.options.clone(),
             language: self.state.settings.language,
         }));
+        self.ensure_background_polling(cx);
         self.push_notice(
             NotificationType::Info,
             tr(self.state.settings.language, "process_started"),
@@ -420,7 +421,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         let added = self.consume_blacklist_input(false, window, cx);
         if added > 0 {
-            self.refresh_preflight();
+            self.refresh_preflight(cx);
         }
     }
 
@@ -433,7 +434,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         let added = self.consume_blacklist_input(true, window, cx);
         if added > 0 {
-            self.refresh_preflight();
+            self.refresh_preflight(cx);
         }
     }
 
@@ -575,7 +576,7 @@ impl Workspace {
                         }
                     }
                     this.persist_settings_async(cx);
-                    this.refresh_preflight();
+                    this.refresh_preflight(cx);
                     Self::notify_active_window(
                         cx,
                         NotificationType::Success,
@@ -612,7 +613,7 @@ impl Workspace {
         self.state.settings.folder_blacklist = crate::domain::default_folder_blacklist();
         self.state.settings.ext_blacklist = crate::domain::default_ext_blacklist();
         self.persist_settings_async(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
             tr(self.state.settings.language, "blacklist_reset_default"),
@@ -643,7 +644,7 @@ impl Workspace {
         self.state.settings.folder_blacklist.clear();
         self.state.settings.ext_blacklist.clear();
         self.persist_settings_async(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
             tr(self.state.settings.language, "blacklist_cleared"),
@@ -674,7 +675,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         self.state.settings.options.use_gitignore = *checked;
         self.persist_settings_async(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         cx.notify();
     }
 
@@ -705,7 +706,7 @@ impl Workspace {
                 .retain(|item| item != ".git");
         }
         self.persist_settings_async(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         cx.notify();
     }
 
@@ -726,6 +727,9 @@ impl Workspace {
         } else {
             ResultTab::Content
         };
+        if self.state.result.active_tab == ResultTab::Content {
+            self.ensure_background_polling(cx);
+        }
         cx.notify();
     }
 
@@ -847,7 +851,7 @@ impl Workspace {
                 .retain(|item| item != &value),
         }
         self.persist_settings_async(cx);
-        self.refresh_preflight();
+        self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
             tr(self.state.settings.language, "blacklist_item_removed"),
