@@ -8,6 +8,7 @@ use gpui_component::{
     table::{TableEvent, TableState},
 };
 
+use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{
     BlacklistItemKind, NarrowContentTab, PendingConfirmation, PreviewTableDelegate, SidePanelTab,
@@ -60,12 +61,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.state.selection.selected_folder = Some(path);
-        for rule in gitignore_rules {
-            if !self.state.settings.folder_blacklist.contains(&rule) {
-                self.state.settings.folder_blacklist.push(rule);
-            }
-        }
-        self.persist_settings_async(cx);
+        self.state.selection.gitignore_rules = gitignore_rules;
         self.refresh_preflight();
         cx.notify();
     }
@@ -315,8 +311,20 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation();
+        if let Some(handle) = self.state.process.process_handle.as_ref() {
+            handle.cancel.cancel();
+        }
+        self.state.process.preflight_rx = None;
+        self.state.workspace.preview_panel.preview_rx = None;
+        self.cleanup_current_result_artifacts();
         let status_ready = tr(self.state.settings.language, "status_ready").to_string();
         self.state.clear_inputs(status_ready);
+        self.tree_panel.state.update(cx, |state, tree_cx| {
+            state.set_selected_index(None, tree_cx);
+        });
+        self.tree_panel.data = None;
+        self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.last_interaction = None;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
         self.refresh_preflight();
@@ -335,6 +343,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.is_processing() {
+            return;
+        }
         if self.state.selection.selected_folder.is_none()
             && self.state.selection.selected_files.is_empty()
         {
@@ -346,22 +357,14 @@ impl Workspace {
             );
             return;
         }
-        if let Some(prev_dir) = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .and_then(|result| result.preview_blob_dir.as_ref())
-        {
-            let _ = crate::utils::temp_file::cleanup_preview_dir(prev_dir);
-        }
-        self.state.result.result = None;
-        self.state.result.preview_rows.clear();
+        self.cleanup_current_result_artifacts();
+        self.state.result = crate::ui::state::ResultState::default();
         self.state.workspace.reset_tree();
+        self.tree_panel.data = None;
+        self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.last_interaction = None;
         self.clear_preview_state();
         self.clear_pending_confirmation();
-        self.side_panel_tab = SidePanelTab::Results;
-        self.narrow_content_tab = NarrowContentTab::Status;
         self.sync_tree(cx);
         self.state
             .process
@@ -375,7 +378,7 @@ impl Workspace {
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect(),
-            folder_blacklist: self.state.settings.folder_blacklist.clone(),
+            folder_blacklist: self.state.effective_folder_blacklist(),
             ext_blacklist: self.state.settings.ext_blacklist.clone(),
             options: self.state.settings.options.clone(),
             language: self.state.settings.language,
@@ -671,6 +674,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         self.state.settings.options.use_gitignore = *checked;
         self.persist_settings_async(cx);
+        self.refresh_preflight();
         cx.notify();
     }
 
@@ -712,6 +716,11 @@ impl Workspace {
     }
 
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
+        if *ix == 1 && !self.state.has_content_result() {
+            self.state.result.active_tab = ResultTab::Tree;
+            cx.notify();
+            return;
+        }
         self.state.result.active_tab = if *ix == 0 {
             ResultTab::Tree
         } else {
@@ -785,7 +794,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(document) = &self.state.workspace.preview_document else {
+        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.state.settings.language, "no_content"),
@@ -858,6 +867,12 @@ impl Workspace {
             return;
         };
         let Some(path) = &result.merged_content_path else {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.state.settings.language, "mode_tree_only_desc"),
+                window,
+                cx,
+            );
             return;
         };
         let extension = match self.state.settings.options.output_format {

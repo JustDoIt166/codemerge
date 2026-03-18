@@ -1,14 +1,19 @@
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div,
+    AnyElement, App, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, hsla,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable, Size, StyledExt as _, WindowExt as _, h_flex,
-    list::ListItem, notification::NotificationType, scroll::ScrollableElement, v_flex,
+    list::ListItem, notification::NotificationType, scroll::ScrollableElement, tag::Tag,
+    tag::TagVariant, v_flex,
 };
 
+use super::BlacklistItemKind;
 use super::Workspace;
-use super::model::{FilterMatchKind, TreeCountSummary, TreeRowViewModel};
+use super::model::{
+    BlacklistSectionViewModel, BlacklistTagViewModel, FilterMatchKind, TreeCountSummary,
+    TreeRowViewModel,
+};
 use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
@@ -529,7 +534,14 @@ pub(super) fn status_banner(
         .into_any_element()
 }
 
-pub(super) fn empty_box(title: &str, hint: &str, icon: IconName, cx: &App) -> gpui::Div {
+pub(super) fn empty_box(
+    title: impl Into<SharedString>,
+    hint: impl Into<SharedString>,
+    icon: IconName,
+    cx: &App,
+) -> gpui::Div {
+    let title = title.into();
+    let hint = hint.into();
     v_flex()
         .size_full()
         .items_center()
@@ -551,13 +563,87 @@ pub(super) fn empty_box(title: &str, hint: &str, icon: IconName, cx: &App) -> gp
                 .justify_center()
                 .child(Icon::new(icon).with_size(Size::Medium)),
         )
-        .child(div().font_semibold().child(title.to_string()))
+        .child(div().font_semibold().child(title))
         .child(
             div()
                 .text_sm()
                 .text_color(cx.theme().muted_foreground)
-                .child(hint.to_string()),
+                .child(hint),
         )
+}
+
+pub(super) fn render_blacklist_section(
+    section: &BlacklistSectionViewModel,
+    tags: Vec<AnyElement>,
+    cx: &App,
+) -> AnyElement {
+    let (icon, fg, bg) = blacklist_palette(section.kind, cx);
+
+    div()
+        .w_full()
+        .p_3()
+        .rounded(px(12.))
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().secondary.opacity(0.18))
+        .child(
+            v_flex()
+                .gap_3()
+                .child(
+                    h_flex()
+                        .justify_between()
+                        .items_center()
+                        .gap_2()
+                        .child(
+                            h_flex()
+                                .items_center()
+                                .gap_2()
+                                .child(accent_icon_badge(icon, fg, bg))
+                                .child(
+                                    div()
+                                        .font_semibold()
+                                        .text_color(cx.theme().foreground)
+                                        .child(section.title.clone()),
+                                ),
+                        )
+                        .child(pill_label(&section.count.to_string(), cx)),
+                )
+                .child(div().flex().flex_wrap().gap_2().children(tags)),
+        )
+        .into_any_element()
+}
+
+pub(super) fn render_blacklist_tag(
+    item: &BlacklistTagViewModel,
+    action: AnyElement,
+    cx: &App,
+) -> AnyElement {
+    let (icon, fg, bg) = blacklist_palette(item.kind, cx);
+    let border = fg.opacity(0.38);
+    let text_fg = cx.theme().foreground;
+
+    h_flex()
+        .items_center()
+        .gap_1()
+        .child(
+            Tag::new()
+                .with_variant(TagVariant::Custom {
+                    color: bg,
+                    foreground: text_fg,
+                    border,
+                })
+                .with_size(Size::Small)
+                .rounded_full()
+                .child(Icon::new(icon).text_color(fg).with_size(Size::Small))
+                .child(
+                    div()
+                        .max_w(px(220.))
+                        .truncate()
+                        .child(item.display_label.clone()),
+                ),
+        )
+        .child(action)
+        .into_any_element()
 }
 
 pub(super) fn pill_label(label: &str, cx: &App) -> AnyElement {
@@ -660,6 +746,29 @@ pub(super) fn accent_icon_badge(icon: IconName, fg: Hsla, bg: Hsla) -> gpui::Div
         .items_center()
         .justify_center()
         .child(Icon::new(icon).text_color(fg).with_size(Size::Small))
+}
+
+fn blacklist_palette(kind: BlacklistItemKind, cx: &App) -> (IconName, Hsla, Hsla) {
+    match kind {
+        BlacklistItemKind::Folder => (
+            IconName::Folder,
+            cx.theme().warning,
+            cx.theme().warning.opacity(0.24),
+        ),
+        BlacklistItemKind::Ext => {
+            let fg = if cx.theme().is_dark() {
+                hsla(0.58, 0.90, 0.78, 1.0)
+            } else {
+                hsla(0.58, 0.70, 0.42, 1.0)
+            };
+            let bg = if cx.theme().is_dark() {
+                hsla(0.58, 0.75, 0.28, 0.55)
+            } else {
+                hsla(0.58, 0.95, 0.90, 1.0)
+            };
+            (IconName::File, fg, bg)
+        }
+    }
 }
 
 pub(super) fn tab_icon_badge(icon: IconName, warm: bool, cx: &App) -> gpui::Div {

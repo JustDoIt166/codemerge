@@ -18,17 +18,25 @@ pub struct WalkerOutput {
     pub tree: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct WalkerOptions {
+    pub use_gitignore: bool,
+    pub ignore_git: bool,
+}
+
 pub fn collect_candidates(
     selected_folder: Option<&PathBuf>,
     selected_files: &[PathBuf],
     folder_blacklist: &[String],
     ext_blacklist: &[String],
+    options: WalkerOptions,
 ) -> WalkerOutput {
     collect_candidates_with_progress(
         selected_folder,
         selected_files,
         folder_blacklist,
         ext_blacklist,
+        options,
         |_scanned, _candidates, _skipped| {},
     )
 }
@@ -38,6 +46,7 @@ pub fn collect_candidates_with_progress<F>(
     selected_files: &[PathBuf],
     folder_blacklist: &[String],
     ext_blacklist: &[String],
+    options: WalkerOptions,
     on_progress: F,
 ) -> WalkerOutput
 where
@@ -65,10 +74,10 @@ where
         let mut builder = WalkBuilder::new(&root);
         builder
             .hidden(false)
-            .ignore(true)
-            .git_ignore(true)
-            .git_global(true)
-            .git_exclude(true)
+            .ignore(options.use_gitignore)
+            .git_ignore(options.use_gitignore)
+            .git_global(options.use_gitignore)
+            .git_exclude(options.use_gitignore)
             .require_git(false)
             .parents(true);
         if let Ok(parallelism) = std::thread::available_parallelism() {
@@ -86,20 +95,22 @@ where
 
             Box::new(move |entry| match entry {
                 Ok(entry) => {
-                    process_entry(
+                    if process_entry(
                         &entry,
                         &root,
                         &folder_blacklist_set,
                         &ext_blacklist_set,
+                        options.ignore_git,
                         &candidates_acc,
                         &skipped_acc,
-                    );
-                    let scanned = scanned_acc.fetch_add(1, Ordering::Relaxed) + 1;
-                    if scanned.is_multiple_of(200) {
-                        let current_skipped = skipped_acc.load(Ordering::Relaxed);
-                        let current_candidates =
-                            candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
-                        on_progress(scanned, current_candidates, current_skipped);
+                    ) {
+                        let scanned = scanned_acc.fetch_add(1, Ordering::Relaxed) + 1;
+                        if scanned.is_multiple_of(200) {
+                            let current_skipped = skipped_acc.load(Ordering::Relaxed);
+                            let current_candidates =
+                                candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
+                            on_progress(scanned, current_candidates, current_skipped);
+                        }
                     }
                     WalkState::Continue
                 }
@@ -128,7 +139,12 @@ where
             .file_name()
             .map(|v| v.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        if should_skip(&rel, &folder_blacklist_set, &ext_blacklist_set) {
+        if should_skip(
+            &rel,
+            &folder_blacklist_set,
+            &ext_blacklist_set,
+            options.ignore_git,
+        ) {
             skipped += 1;
             on_progress(scanned_total, candidates.len(), skipped);
             continue;
@@ -156,11 +172,12 @@ fn process_entry(
     root: &Path,
     folder_blacklist: &HashSet<String>,
     ext_blacklist: &HashSet<String>,
+    ignore_git: bool,
     candidates: &Arc<Mutex<Vec<CandidateFile>>>,
     skipped: &Arc<AtomicUsize>,
-) {
+) -> bool {
     if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-        return;
+        return false;
     }
 
     let path = entry.path().to_path_buf();
@@ -170,9 +187,9 @@ fn process_entry(
         .to_string_lossy()
         .replace('\\', "/");
 
-    if should_skip(&rel, folder_blacklist, ext_blacklist) {
+    if should_skip(&rel, folder_blacklist, ext_blacklist, ignore_git) {
         skipped.fetch_add(1, Ordering::Relaxed);
-        return;
+        return true;
     }
 
     if let Ok(mut locked) = candidates.lock() {
@@ -181,14 +198,22 @@ fn process_entry(
             relative: rel,
         });
     }
+    true
 }
 
 fn should_skip(
     path: &str,
     folder_blacklist: &HashSet<String>,
     ext_blacklist: &HashSet<String>,
+    ignore_git: bool,
 ) -> bool {
     let lower = path.to_lowercase();
+
+    if (ignore_git || folder_blacklist.contains(".git"))
+        && lower.split('/').any(|segment| segment == ".git")
+    {
+        return true;
+    }
 
     if lower
         .split('/')

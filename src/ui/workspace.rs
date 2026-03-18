@@ -4,7 +4,6 @@ mod model;
 mod panels;
 mod view;
 
-use std::collections::HashMap;
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -20,7 +19,7 @@ use gpui_component::{
     tree::TreeState,
 };
 
-use crate::domain::{Language, PreviewRowViewModel};
+use crate::domain::{Language, PreviewRowViewModel, ProcessResult};
 use crate::services::settings::{self, ConfigLoadIssue};
 use crate::ui::state::{AppState, ProcessUiStatus};
 use crate::utils::i18n::tr;
@@ -37,18 +36,10 @@ pub(super) fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<
     Rc::new((0..len).map(|_| size(px(100.), height)).collect::<Vec<_>>())
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum BlacklistItemKind {
     Folder,
     Ext,
-}
-
-#[derive(Clone)]
-pub(super) struct BlacklistItemViewModel {
-    pub kind: BlacklistItemKind,
-    pub value: String,
-    pub display_label: SharedString,
-    pub deletable: bool,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -138,15 +129,19 @@ impl TableDelegate for PreviewTableDelegate {
 
 use gpui::IntoElement;
 
+pub(super) struct TreePanelController {
+    state: Entity<TreeState>,
+    filter_input: Entity<InputState>,
+    data: Option<model::TreePanelData>,
+    render_state: model::TreeRenderState,
+    last_interaction: Option<model::TreeInteractionSnapshot>,
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
     preview_scroll_handle: VirtualListScrollHandle,
-    tree_state: Entity<TreeState>,
-    tree_row_map: HashMap<String, model::TreeRowViewModel>,
-    tree_total_summary: model::TreeCountSummary,
-    tree_visible_summary: model::TreeCountSummary,
-    tree_filter_input: Entity<InputState>,
+    tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
     blacklist_filter_input: Entity<InputState>,
@@ -199,11 +194,13 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
             preview_scroll_handle: VirtualListScrollHandle::new(),
-            tree_state,
-            tree_row_map: HashMap::new(),
-            tree_total_summary: model::TreeCountSummary::default(),
-            tree_visible_summary: model::TreeCountSummary::default(),
-            tree_filter_input,
+            tree_panel: TreePanelController {
+                state: tree_state,
+                filter_input: tree_filter_input,
+                data: None,
+                render_state: model::TreeRenderState::default(),
+                last_interaction: None,
+            },
             preview_table,
             preview_filter_input,
             blacklist_filter_input,
@@ -243,9 +240,24 @@ impl Workspace {
         self.pending_confirmation = None;
     }
 
+    pub(super) fn cleanup_result_artifacts(result: &ProcessResult) {
+        if let Some(path) = &result.merged_content_path {
+            let _ = std::fs::remove_file(path);
+        }
+        if let Some(dir) = &result.preview_blob_dir {
+            let _ = crate::utils::temp_file::cleanup_preview_dir(dir);
+        }
+    }
+
+    pub(super) fn cleanup_current_result_artifacts(&self) {
+        if let Some(result) = self.state.result.result.as_ref() {
+            Self::cleanup_result_artifacts(result);
+        }
+    }
+
     fn sync_localized_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let language = self.state.settings.language;
-        self.tree_filter_input.update(cx, |state, cx| {
+        self.tree_panel.filter_input.update(cx, |state, cx| {
             state.set_placeholder(tr(language, "tree_filter"), window, cx)
         });
         self.preview_filter_input.update(cx, |state, cx| {
@@ -264,43 +276,6 @@ impl Workspace {
         if !self.is_processing() && self.state.process.ui_status == ProcessUiStatus::Idle {
             self.state.process.processing_current_file = tr(language, "status_ready").to_string();
         }
-    }
-
-    fn build_blacklist_rows(&self, cx: &Context<Self>) -> Rc<Vec<BlacklistItemViewModel>> {
-        let filter = self
-            .blacklist_filter_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_ascii_lowercase();
-        Rc::new(
-            self.state
-                .settings
-                .folder_blacklist
-                .iter()
-                .map(|item| BlacklistItemViewModel {
-                    kind: BlacklistItemKind::Folder,
-                    value: item.clone(),
-                    display_label: SharedString::from(format!("folder: {item}")),
-                    deletable: true,
-                })
-                .chain(self.state.settings.ext_blacklist.iter().map(|item| {
-                    BlacklistItemViewModel {
-                        kind: BlacklistItemKind::Ext,
-                        value: item.clone(),
-                        display_label: SharedString::from(format!("ext: {item}")),
-                        deletable: true,
-                    }
-                }))
-                .filter(|item| {
-                    filter.is_empty()
-                        || item
-                            .display_label
-                            .to_ascii_lowercase()
-                            .contains(filter.as_str())
-                })
-                .collect::<Vec<_>>(),
-        )
     }
 }
 
@@ -330,14 +305,8 @@ impl Render for Workspace {
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        if let Some(dir) = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .and_then(|result| result.preview_blob_dir.as_ref())
-        {
-            let _ = crate::utils::temp_file::cleanup_preview_dir(dir);
+        if let Some(result) = self.state.result.result.as_ref() {
+            Self::cleanup_result_artifacts(result);
         }
     }
 }

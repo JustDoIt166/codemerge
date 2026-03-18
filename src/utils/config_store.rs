@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use crate::domain::AppConfigV1;
@@ -83,7 +84,21 @@ pub fn save_config_to_path(cfg: &AppConfigV1, path: &Path) -> AppResult<()> {
 
     let body = serde_json::to_string_pretty(cfg)
         .map_err(|e| AppError::new(format!("serialize config failed: {e}")))?;
-    std::fs::write(path, body).map_err(|e| AppError::new(format!("write config failed: {e}")))
+    let mut temp = tempfile::NamedTempFile::new_in(parent)
+        .map_err(|e| AppError::new(format!("create temp config file failed: {e}")))?;
+    temp.as_file_mut()
+        .write_all(body.as_bytes())
+        .map_err(|e| AppError::new(format!("write temp config failed: {e}")))?;
+    temp.as_file_mut()
+        .flush()
+        .map_err(|e| AppError::new(format!("flush temp config failed: {e}")))?;
+    temp.as_file()
+        .sync_all()
+        .map_err(|e| AppError::new(format!("sync temp config failed: {e}")))?;
+
+    temp.persist(path)
+        .map_err(|err| AppError::new(format!("persist config failed: {err}")))?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -91,7 +106,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ConfigLoadIssue, load_config_report_from_path, save_config_to_path};
-    use crate::domain::AppConfigV1;
+    use crate::domain::{AppConfigV1, Language, OutputFormat, ProcessingMode, ProcessingOptions};
 
     #[test]
     fn missing_file_returns_default_with_issue() {
@@ -128,5 +143,53 @@ mod tests {
         let result = save_config_to_path(&AppConfigV1::default(), &path);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn save_then_load_roundtrip_replaces_existing_file() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        std::fs::write(&path, "{broken").expect("seed broken file");
+
+        let config = AppConfigV1 {
+            language: Language::En,
+            options: ProcessingOptions {
+                compress: true,
+                use_gitignore: false,
+                ignore_git: false,
+                output_format: OutputFormat::Markdown,
+                mode: ProcessingMode::TreeOnly,
+            },
+            folder_blacklist: vec!["src".to_string(), "build".to_string()],
+            ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+        };
+
+        save_config_to_path(&config, &path).expect("save config");
+
+        let report = load_config_report_from_path(&path);
+        assert_eq!(report.issue, None);
+        assert_eq!(report.config.language, config.language);
+        assert_eq!(report.config.options.compress, config.options.compress);
+        assert_eq!(
+            report.config.options.use_gitignore,
+            config.options.use_gitignore
+        );
+        assert_eq!(report.config.options.ignore_git, config.options.ignore_git);
+        assert_eq!(
+            report.config.options.output_format,
+            config.options.output_format
+        );
+        assert_eq!(report.config.options.mode, config.options.mode);
+        assert_eq!(report.config.folder_blacklist, config.folder_blacklist);
+        assert_eq!(report.config.ext_blacklist, config.ext_blacklist);
+    }
+
+    #[test]
+    fn unreadable_path_returns_read_issue() {
+        let dir = tempdir().expect("tempdir");
+
+        let report = load_config_report_from_path(dir.path());
+
+        assert!(matches!(report.issue, Some(ConfigLoadIssue::ReadFailed(_))));
     }
 }

@@ -21,6 +21,12 @@ fn unique_suffix() -> String {
     )
 }
 
+fn create_temp_child_dir(prefix: &str) -> Result<PathBuf, String> {
+    let dir = codemerge_temp_root()?.join(format!("{prefix}_{}", unique_suffix()));
+    std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir failed: {e}"))?;
+    Ok(dir)
+}
+
 pub fn make_temp_result_path() -> Result<PathBuf, String> {
     let dir = codemerge_temp_root()?;
     Ok(dir.join(format!("merged_{}.txt", unique_suffix())))
@@ -33,16 +39,36 @@ pub fn make_temp_preview_dir() -> Result<PathBuf, String> {
     Ok(dir)
 }
 
-pub fn cleanup_preview_dir(path: &std::path::Path) -> Result<(), String> {
+pub fn make_temp_process_dir() -> Result<PathBuf, String> {
+    create_temp_child_dir("process")
+}
+
+pub fn make_temp_result_path_in(process_dir: &std::path::Path) -> PathBuf {
+    process_dir.join("merged.txt")
+}
+
+pub fn make_temp_preview_dir_in(process_dir: &std::path::Path) -> Result<PathBuf, String> {
+    std::fs::create_dir_all(process_dir).map_err(|e| format!("create preview dir failed: {e}"))?;
+    Ok(process_dir.to_path_buf())
+}
+
+pub fn cleanup_temp_dir(path: &std::path::Path) -> Result<(), String> {
     if path.exists() {
-        std::fs::remove_dir_all(path).map_err(|e| format!("remove preview dir failed: {e}"))?;
+        std::fs::remove_dir_all(path).map_err(|e| format!("remove temp dir failed: {e}"))?;
     }
     Ok(())
 }
 
+pub fn cleanup_preview_dir(path: &std::path::Path) -> Result<(), String> {
+    cleanup_temp_dir(path)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{cleanup_preview_dir, make_temp_preview_dir, make_temp_result_path};
+    use super::{
+        cleanup_preview_dir, cleanup_temp_dir, make_temp_preview_dir, make_temp_process_dir,
+        make_temp_result_path, make_temp_result_path_in,
+    };
 
     #[test]
     fn temp_paths_are_unique() {
@@ -58,5 +84,17 @@ mod tests {
 
         cleanup_preview_dir(&dir).expect("cleanup preview dir");
         assert!(!dir.exists());
+    }
+
+    #[test]
+    fn process_dir_cleanup_removes_nested_result_file() {
+        let dir = make_temp_process_dir().expect("process dir");
+        let result_path = make_temp_result_path_in(&dir);
+        std::fs::write(&result_path, "content").expect("write result file");
+        assert!(result_path.exists());
+
+        cleanup_temp_dir(&dir).expect("cleanup temp dir");
+        assert!(!dir.exists());
+        assert!(!result_path.exists());
     }
 }

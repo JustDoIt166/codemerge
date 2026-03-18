@@ -55,8 +55,16 @@ fn collect_candidates_honors_gitignore_and_ext_blacklist() {
     fs::write(root.join("ignored_dir").join("inside.rs"), "ignored").expect("write ignored file");
     fs::write(root.join("debug.log"), "ignored by gitignore").expect("write log file");
 
-    let out =
-        walker::collect_candidates(Some(&root.to_path_buf()), &[], &[], &[String::from(".tmp")]);
+    let out = walker::collect_candidates(
+        Some(&root.to_path_buf()),
+        &[],
+        &[],
+        &[String::from(".tmp")],
+        walker::WalkerOptions {
+            use_gitignore: true,
+            ignore_git: false,
+        },
+    );
 
     let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
     assert_eq!(
@@ -64,4 +72,52 @@ fn collect_candidates_honors_gitignore_and_ext_blacklist() {
         vec![".gitignore".to_string(), "src/main.rs".to_string()]
     );
     assert_eq!(out.skipped, 1);
+}
+
+#[test]
+fn collect_candidates_can_disable_gitignore_rules() {
+    let dir = tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::write(root.join(".gitignore"), "ignored.txt\n").expect("write gitignore");
+    fs::write(root.join("ignored.txt"), "ignored").expect("write ignored file");
+    fs::write(root.join("kept.txt"), "kept").expect("write kept file");
+
+    let out = walker::collect_candidates(
+        Some(&root.to_path_buf()),
+        &[],
+        &[],
+        &[],
+        walker::WalkerOptions {
+            use_gitignore: false,
+            ignore_git: false,
+        },
+    );
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert!(rels.contains(&"ignored.txt".to_string()));
+    assert!(rels.contains(&"kept.txt".to_string()));
+}
+
+#[test]
+fn collect_candidates_can_ignore_git_directory() {
+    let dir = tempdir().expect("create temp dir");
+    let root = dir.path();
+    fs::create_dir_all(root.join(".git")).expect("create git dir");
+    fs::write(root.join(".git").join("config"), "hidden").expect("write git config");
+    fs::write(root.join("visible.txt"), "visible").expect("write visible file");
+
+    let out = walker::collect_candidates(
+        Some(&root.to_path_buf()),
+        &[],
+        &[],
+        &[],
+        walker::WalkerOptions {
+            use_gitignore: false,
+            ignore_git: true,
+        },
+    );
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert!(rels.contains(&"visible.txt".to_string()));
+    assert!(!rels.iter().any(|rel| rel.starts_with(".git/")));
 }

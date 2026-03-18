@@ -60,6 +60,30 @@ impl AppState {
         }
     }
 
+    pub fn effective_folder_blacklist(&self) -> Vec<String> {
+        let mut rules = self.settings.folder_blacklist.clone();
+        if self.settings.options.use_gitignore {
+            for rule in &self.selection.gitignore_rules {
+                if !rules.contains(rule) {
+                    rules.push(rule.clone());
+                }
+            }
+        }
+        rules
+    }
+
+    pub fn has_content_result(&self) -> bool {
+        self.result.result.as_ref().is_some_and(|result| {
+            result.merged_content_path.is_some() || !result.preview_files.is_empty()
+        })
+    }
+
+    pub fn is_tree_only_result(&self) -> bool {
+        self.result.result.as_ref().is_some_and(|result| {
+            result.merged_content_path.is_none() && result.preview_files.is_empty()
+        })
+    }
+
     pub fn to_config(&self) -> AppConfigV1 {
         AppConfigV1 {
             language: self.settings.language,
@@ -70,16 +94,16 @@ impl AppState {
     }
 
     pub fn clear_inputs(&mut self, status_ready: String) {
-        self.selection.selected_folder = None;
-        self.selection.selected_files.clear();
-        self.selection.gitignore_file = None;
-        self.result.result = None;
-        self.result.preview_rows.clear();
-        self.process.ui_status = ProcessUiStatus::Idle;
-        self.process.last_error = None;
-        self.process.processing_current_file = status_ready;
-        self.workspace.reset_tree();
-        self.workspace.reset_preview();
+        self.selection = SelectionState {
+            dedupe_exact_path: self.selection.dedupe_exact_path,
+            ..SelectionState::default()
+        };
+        self.result = ResultState::default();
+        self.process = ProcessState {
+            processing_current_file: status_ready,
+            ..ProcessState::default()
+        };
+        self.workspace = WorkspaceState::default();
     }
 }
 
@@ -89,6 +113,7 @@ pub struct SelectionState {
     pub selected_folder: Option<PathBuf>,
     pub selected_files: Vec<FileEntry>,
     pub gitignore_file: Option<PathBuf>,
+    pub gitignore_rules: Vec<String>,
 }
 
 pub struct SettingsState {
@@ -151,30 +176,34 @@ pub struct ResultState {
     pub preview_rows: Vec<PreviewRowViewModel>,
 }
 
-pub struct WorkspaceState {
-    pub selected_tree_node_id: Option<String>,
-    pub tree_expanded_ids: BTreeSet<String>,
+#[derive(Default)]
+pub struct TreePanelState {
+    pub selected_node_id: Option<String>,
+    pub expanded_ids: BTreeSet<String>,
+}
+
+pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
     pub preview_revision: u64,
     pub preview_rx: Option<std::sync::mpsc::Receiver<PreviewEvent>>,
     pub preview_requested_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
+    pub preview_error: Option<String>,
     pub preview_loaded_range: Range<usize>,
     pub preview_visible_range: Range<usize>,
     pub preview_loaded_lines: Vec<SharedString>,
     pub preview_sizes: Rc<Vec<gpui::Size<Pixels>>>,
 }
 
-impl Default for WorkspaceState {
+impl Default for PreviewPanelState {
     fn default() -> Self {
         Self {
-            selected_tree_node_id: None,
-            tree_expanded_ids: BTreeSet::new(),
             selected_preview_file_id: None,
             preview_revision: 0,
             preview_rx: None,
             preview_requested_range: None,
             preview_document: None,
+            preview_error: None,
             preview_loaded_range: 0..0,
             preview_visible_range: 0..0,
             preview_loaded_lines: Vec::new(),
@@ -183,20 +212,172 @@ impl Default for WorkspaceState {
     }
 }
 
+#[derive(Default)]
+pub struct WorkspaceState {
+    pub tree_panel: TreePanelState,
+    pub preview_panel: PreviewPanelState,
+}
+
 impl WorkspaceState {
     pub fn reset_tree(&mut self) {
-        self.selected_tree_node_id = None;
-        self.tree_expanded_ids.clear();
+        self.tree_panel = TreePanelState::default();
     }
 
     pub fn reset_preview(&mut self) {
-        self.selected_preview_file_id = None;
-        self.preview_rx = None;
-        self.preview_requested_range = None;
-        self.preview_document = None;
-        self.preview_loaded_range = 0..0;
-        self.preview_visible_range = 0..0;
-        self.preview_loaded_lines.clear();
-        self.preview_sizes = Rc::new(vec![size(px(10.), preview_line_height())]);
+        self.preview_panel = PreviewPanelState::default();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::AppState;
+    use crate::domain::{
+        AppConfigV1, FileEntry, Language, OutputFormat, PreflightStats, PreviewFileEntry,
+        ProcessResult, ProcessingMode, ProcessingOptions,
+    };
+    use crate::processor::stats::ProcessingStats;
+    use std::path::PathBuf;
+
+    #[test]
+    fn clear_inputs_resets_runtime_state_and_keeps_dedupe_setting() {
+        let config = AppConfigV1 {
+            language: Language::En,
+            options: ProcessingOptions {
+                compress: true,
+                use_gitignore: true,
+                ignore_git: false,
+                output_format: OutputFormat::Markdown,
+                mode: ProcessingMode::TreeOnly,
+            },
+            folder_blacklist: vec!["target".into()],
+            ext_blacklist: vec![".log".into()],
+        };
+        let mut state = AppState::from_config(config, "ready".to_string());
+        state.selection.selected_folder = Some(PathBuf::from("root"));
+        state.selection.selected_files.push(FileEntry {
+            path: PathBuf::from("file.rs"),
+            name: "file.rs".into(),
+            size: 10,
+        });
+        state.selection.gitignore_file = Some(PathBuf::from("root/.gitignore"));
+        state.selection.gitignore_rules = vec!["node_modules".into()];
+        state.process.preflight = PreflightStats {
+            total_files: 3,
+            skipped_files: 1,
+            to_process_files: 2,
+            scanned_entries: 4,
+            is_scanning: true,
+        };
+        state
+            .process
+            .processing_records
+            .push(crate::domain::ProcessRecord {
+                file_name: "file.rs".into(),
+                status: crate::domain::ProcessStatus::Success,
+                chars: Some(12),
+                tokens: Some(4),
+                error: None,
+            });
+        state.process.last_error = Some("boom".into());
+        state.result.result = Some(ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            merged_content_path: Some(PathBuf::from("merged.txt")),
+            file_details: Vec::new(),
+            preview_files: vec![PreviewFileEntry {
+                id: 1,
+                display_path: "file.rs".into(),
+                chars: 12,
+                tokens: 4,
+                preview_blob_path: PathBuf::from("preview.txt"),
+                byte_len: 12,
+            }],
+            preview_blob_dir: Some(PathBuf::from("preview-dir")),
+        });
+        state
+            .result
+            .preview_rows
+            .push(crate::domain::PreviewRowViewModel {
+                id: 1,
+                display_path: "file.rs".into(),
+                chars: 12,
+                tokens: 4,
+            });
+        state.workspace.tree_panel.selected_node_id = Some("file.rs".into());
+        state.workspace.preview_panel.preview_error = Some("broken".into());
+        state.workspace.preview_panel.selected_preview_file_id = Some(1);
+
+        state.clear_inputs("Status: Ready".into());
+
+        assert!(state.selection.selected_folder.is_none());
+        assert!(state.selection.selected_files.is_empty());
+        assert!(state.selection.gitignore_file.is_none());
+        assert!(state.selection.gitignore_rules.is_empty());
+        assert!(state.selection.dedupe_exact_path);
+        assert!(state.result.result.is_none());
+        assert!(state.result.preview_rows.is_empty());
+        assert_eq!(state.process.processing_current_file, "Status: Ready");
+        assert_eq!(
+            state.process.ui_status,
+            crate::ui::state::ProcessUiStatus::Idle
+        );
+        assert_eq!(state.process.preflight.total_files, 0);
+        assert_eq!(state.process.preflight.skipped_files, 0);
+        assert_eq!(state.process.preflight.to_process_files, 0);
+        assert_eq!(state.process.preflight.scanned_entries, 0);
+        assert!(!state.process.preflight.is_scanning);
+        assert!(state.process.processing_records.is_empty());
+        assert!(state.process.last_error.is_none());
+        assert!(state.workspace.tree_panel.selected_node_id.is_none());
+        assert!(state.workspace.preview_panel.preview_error.is_none());
+        assert!(
+            state
+                .workspace
+                .preview_panel
+                .selected_preview_file_id
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn effective_folder_blacklist_respects_use_gitignore() {
+        let config = AppConfigV1::default();
+        let mut state = AppState::from_config(config, "ready".to_string());
+        state.settings.folder_blacklist = vec!["target".into()];
+        state.selection.gitignore_rules = vec!["node_modules".into()];
+
+        assert_eq!(
+            state.effective_folder_blacklist(),
+            vec!["target".to_string(), "node_modules".to_string()]
+        );
+
+        state.settings.options.use_gitignore = false;
+        assert_eq!(
+            state.effective_folder_blacklist(),
+            vec!["target".to_string()]
+        );
+    }
+
+    #[test]
+    fn tree_only_and_content_flags_track_result_shape() {
+        let config = AppConfigV1::default();
+        let mut state = AppState::from_config(config, "ready".to_string());
+
+        assert!(!state.has_content_result());
+        assert!(!state.is_tree_only_result());
+
+        state.result.result = Some(ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            merged_content_path: None,
+            file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
+        });
+
+        assert!(!state.has_content_result());
+        assert!(state.is_tree_only_result());
     }
 }

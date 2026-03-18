@@ -4,9 +4,12 @@ use std::ops::Range;
 use gpui::SharedString;
 use gpui_component::{Icon, IconName, tree::TreeItem};
 
-use crate::domain::{PreviewFileEntry, PreviewRowViewModel, ProcessResult, TreeNode};
+use super::BlacklistItemKind;
+use crate::domain::{Language, PreviewFileEntry, PreviewRowViewModel, ProcessResult};
 use crate::services::preflight::PreflightEvent;
-use crate::ui::state::{ProcessState, ProcessUiStatus};
+use crate::services::tree::{IndexedTreeNode, TreeIndex};
+use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
+use crate::utils::i18n::tr;
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) struct TreeCountSummary {
@@ -72,20 +75,58 @@ pub(super) struct TreeRowViewModel {
     pub matched_descendants: usize,
 }
 
-impl TreeRowViewModel {}
-
-pub(super) struct TreePanelModel {
+#[derive(Default)]
+pub(super) struct TreeRenderState {
     pub items: Vec<TreeItem>,
     pub rows: Vec<TreeRowViewModel>,
+    pub rows_by_id: HashMap<String, TreeRowViewModel>,
     pub visible_summary: TreeCountSummary,
     pub total_summary: TreeCountSummary,
     pub selected_row_ix: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct TreePanelData {
+    pub index: TreeIndex,
+    pub preview_file_ids: HashMap<String, u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct TreeInteractionSnapshot {
+    pub node_id: Option<String>,
+    pub is_folder: bool,
+    pub is_expanded: bool,
+    pub preview_file_id: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum TreePanelEffect {
+    None,
+    RefreshTree,
+    OpenPreview(u32),
+    SwitchToContentAndOpen(u32),
 }
 
 pub(super) struct PreviewTableModel {
     pub rows: Vec<PreviewRowViewModel>,
     pub selected_row_ix: Option<usize>,
     pub next_selected_file_id: Option<u32>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BlacklistTagViewModel {
+    pub kind: BlacklistItemKind,
+    pub value: String,
+    pub display_label: SharedString,
+    pub deletable: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct BlacklistSectionViewModel {
+    pub kind: BlacklistItemKind,
+    pub title: SharedString,
+    pub count: usize,
+    pub items: Vec<BlacklistTagViewModel>,
 }
 
 pub(super) fn apply_preflight_event(
@@ -177,104 +218,146 @@ pub(super) fn build_preview_table_model(
     }
 }
 
-pub(super) fn default_expanded_ids(nodes: &[TreeNode]) -> BTreeSet<String> {
-    let mut expanded = BTreeSet::new();
-    collect_default_expanded_ids(nodes, 0, &mut expanded);
-    expanded
-}
+pub(super) fn build_blacklist_sections(
+    folder_blacklist: &[String],
+    ext_blacklist: &[String],
+    filter: &str,
+    language: Language,
+) -> Vec<BlacklistSectionViewModel> {
+    let filter = filter.trim().to_ascii_lowercase();
+    let mut sections = Vec::new();
 
-fn collect_default_expanded_ids(nodes: &[TreeNode], depth: usize, expanded: &mut BTreeSet<String>) {
-    for node in nodes {
-        if node.is_folder && depth < 2 {
-            expanded.insert(node.id.clone());
-            collect_default_expanded_ids(&node.children, depth + 1, expanded);
-        }
+    let folder_items =
+        build_blacklist_section_items(folder_blacklist, BlacklistItemKind::Folder, &filter);
+    if !folder_items.is_empty() {
+        sections.push(BlacklistSectionViewModel {
+            kind: BlacklistItemKind::Folder,
+            title: SharedString::from(tr(language, "rules_group_folders")),
+            count: folder_items.len(),
+            items: folder_items,
+        });
     }
-}
 
-pub(super) fn collect_folder_ids(nodes: &[TreeNode]) -> BTreeSet<String> {
-    let mut ids = BTreeSet::new();
-    collect_folder_ids_inner(nodes, &mut ids);
-    ids
-}
-
-fn collect_folder_ids_inner(nodes: &[TreeNode], ids: &mut BTreeSet<String>) {
-    for node in nodes {
-        if node.is_folder {
-            ids.insert(node.id.clone());
-            collect_folder_ids_inner(&node.children, ids);
-        }
+    let ext_items = build_blacklist_section_items(ext_blacklist, BlacklistItemKind::Ext, &filter);
+    if !ext_items.is_empty() {
+        sections.push(BlacklistSectionViewModel {
+            kind: BlacklistItemKind::Ext,
+            title: SharedString::from(tr(language, "rules_group_extensions")),
+            count: ext_items.len(),
+            items: ext_items,
+        });
     }
+
+    sections
 }
 
-pub(super) fn build_tree_panel_model(
-    result: Option<&ProcessResult>,
+pub(super) fn build_tree_panel_data(result: Option<&ProcessResult>) -> Option<TreePanelData> {
+    result.map(|result| TreePanelData {
+        index: crate::services::tree::build_tree_index(&result.tree_nodes),
+        preview_file_ids: preview_file_id_map(&result.preview_files),
+    })
+}
+
+pub(super) fn project_tree_panel(
+    data: Option<&TreePanelData>,
     filter: &str,
     expanded_ids: &BTreeSet<String>,
     selected_node_id: Option<&str>,
-) -> TreePanelModel {
-    let Some(result) = result else {
-        return TreePanelModel {
-            items: Vec::new(),
-            rows: Vec::new(),
-            visible_summary: TreeCountSummary::default(),
-            total_summary: TreeCountSummary::default(),
-            selected_row_ix: None,
-        };
+) -> TreeRenderState {
+    let Some(data) = data else {
+        return TreeRenderState::default();
     };
 
-    let preview_map = preview_file_id_map(&result.preview_files);
-    let total_summary = summarize_tree_counts(&result.tree_nodes);
     let filter = filter.trim();
     let filter_lower = filter.to_ascii_lowercase();
-
+    let context = TreeProjectionContext {
+        filter: filter_lower.as_str(),
+        expanded_ids,
+        preview_file_ids: &data.preview_file_ids,
+    };
     let mut rows = Vec::new();
     let mut items = Vec::new();
     let mut visible_summary = TreeCountSummary::default();
-    for node in &result.tree_nodes {
-        if let Some(built) = build_tree_node(
-            node,
-            &filter_lower,
-            expanded_ids,
-            &preview_map,
-            0,
-            true,
-            &mut rows,
-            &mut visible_summary,
-        ) {
-            items.push(built);
+
+    for node in &data.index.roots {
+        if let Some(item) =
+            build_tree_projection_node(node, &context, 0, true, &mut rows, &mut visible_summary)
+        {
+            items.push(item);
         }
     }
 
+    let rows_by_id = rows
+        .iter()
+        .cloned()
+        .map(|row| (row.node_id.to_string(), row))
+        .collect::<HashMap<_, _>>();
     let selected_row_ix = selected_node_id
         .and_then(|selected| rows.iter().position(|row| row.node_id.as_ref() == selected));
 
-    TreePanelModel {
+    TreeRenderState {
         items,
         rows,
+        rows_by_id,
         visible_summary,
-        total_summary,
+        total_summary: TreeCountSummary {
+            folders: data.index.total_folders,
+            files: data.index.total_files,
+        },
         selected_row_ix,
     }
 }
 
-fn build_tree_node(
-    node: &TreeNode,
-    filter: &str,
-    expanded_ids: &BTreeSet<String>,
-    preview_map: &HashMap<&str, u32>,
+pub(super) fn apply_tree_interaction(
+    state: &mut TreePanelState,
+    previous: Option<&TreeInteractionSnapshot>,
+    next: Option<TreeInteractionSnapshot>,
+) -> TreePanelEffect {
+    if previous == next.as_ref() {
+        return TreePanelEffect::None;
+    }
+
+    let Some(snapshot) = next else {
+        state.selected_node_id = None;
+        return TreePanelEffect::None;
+    };
+
+    state.selected_node_id = snapshot.node_id.clone();
+    if snapshot.is_folder {
+        if let Some(node_id) = snapshot.node_id.as_ref() {
+            if snapshot.is_expanded {
+                state.expanded_ids.insert(node_id.clone());
+            } else {
+                state.expanded_ids.remove(node_id);
+            }
+        }
+
+        if previous.and_then(|snapshot| snapshot.node_id.as_ref()) != snapshot.node_id.as_ref() {
+            return TreePanelEffect::RefreshTree;
+        }
+        return TreePanelEffect::None;
+    }
+
+    match snapshot.preview_file_id {
+        Some(file_id) => TreePanelEffect::SwitchToContentAndOpen(file_id),
+        None => TreePanelEffect::None,
+    }
+}
+
+fn build_tree_projection_node(
+    node: &IndexedTreeNode,
+    context: &TreeProjectionContext<'_>,
     depth: usize,
     is_visible: bool,
     rows: &mut Vec<TreeRowViewModel>,
     summary: &mut TreeCountSummary,
 ) -> Option<TreeItem> {
-    let filter_match = filter_node(node, filter);
-    let child_counts = summarize_tree_counts(&node.children);
+    let filter_match = filter_node(node, context.filter);
     let is_expanded = if node.is_folder {
-        if !filter.is_empty() {
+        if !context.filter.is_empty() {
             true
         } else {
-            expanded_ids.contains(node.id.as_str())
+            context.expanded_ids.contains(node.id.as_str())
         }
     } else {
         false
@@ -293,11 +376,9 @@ fn build_tree_node(
     let mut matched_descendants = 0;
     let child_is_visible = is_visible && node.is_folder && is_expanded;
     for child in &node.children {
-        if let Some(item) = build_tree_node(
+        if let Some(item) = build_tree_projection_node(
             child,
-            filter,
-            expanded_ids,
-            preview_map,
+            context,
             depth + 1,
             child_is_visible,
             &mut visible_child_rows,
@@ -308,7 +389,7 @@ fn build_tree_node(
         }
     }
 
-    if filter_match.is_none() && child_items.is_empty() && !filter.is_empty() {
+    if filter_match.is_none() && child_items.is_empty() && !context.filter.is_empty() {
         return None;
     }
 
@@ -333,9 +414,12 @@ fn build_tree_node(
             is_folder: node.is_folder,
             depth,
             extension: extension_for_path(node.relative_path.as_str()).map(SharedString::from),
-            preview_file_id: preview_map.get(node.relative_path.as_str()).copied(),
-            child_file_count: child_counts.files,
-            child_folder_count: child_counts.folders,
+            preview_file_id: context
+                .preview_file_ids
+                .get(node.relative_path.as_str())
+                .copied(),
+            child_file_count: node.stats.descendant_files,
+            child_folder_count: node.stats.descendant_folders,
             icon_kind,
             is_expanded,
             is_filter_match: filter_match.is_some(),
@@ -349,26 +433,11 @@ fn build_tree_node(
     Some(item)
 }
 
-fn preview_file_id_map(preview_files: &[PreviewFileEntry]) -> HashMap<&str, u32> {
+fn preview_file_id_map(preview_files: &[PreviewFileEntry]) -> HashMap<String, u32> {
     preview_files
         .iter()
-        .map(|entry| (entry.display_path.as_str(), entry.id))
+        .map(|entry| (entry.display_path.clone(), entry.id))
         .collect()
-}
-
-fn summarize_tree_counts(nodes: &[TreeNode]) -> TreeCountSummary {
-    let mut summary = TreeCountSummary::default();
-    for node in nodes {
-        if node.is_folder {
-            summary.folders += 1;
-        } else {
-            summary.files += 1;
-        }
-        let child_summary = summarize_tree_counts(&node.children);
-        summary.folders += child_summary.folders;
-        summary.files += child_summary.files;
-    }
-    summary
 }
 
 struct FilterMatch {
@@ -376,7 +445,13 @@ struct FilterMatch {
     range: Range<usize>,
 }
 
-fn filter_node(node: &TreeNode, filter: &str) -> Option<FilterMatch> {
+struct TreeProjectionContext<'a> {
+    filter: &'a str,
+    expanded_ids: &'a BTreeSet<String>,
+    preview_file_ids: &'a HashMap<String, u32>,
+}
+
+fn filter_node(node: &IndexedTreeNode, filter: &str) -> Option<FilterMatch> {
     if filter.is_empty() {
         return None;
     }
@@ -418,11 +493,28 @@ fn icon_kind_for_extension(extension: Option<String>) -> TreeIconKind {
         Some("md" | "mdx" | "txt" | "rtf") => TreeIconKind::Document,
         Some("json" | "lock" | "ini" | "conf" | "config" | "env") => TreeIconKind::Config,
         Some("csv" | "tsv" | "sql") => TreeIconKind::Data,
-        Some("png" | "jpg" | "jpeg" | "gif" | "svg" | "webp" | "ico" | "mp3" | "wav" | "mp4") => {
+        Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "mp4" | "mov" | "mp3" | "wav") => {
             TreeIconKind::Media
         }
         _ => TreeIconKind::Text,
     }
+}
+
+fn build_blacklist_section_items(
+    items: &[String],
+    kind: BlacklistItemKind,
+    filter: &str,
+) -> Vec<BlacklistTagViewModel> {
+    items
+        .iter()
+        .filter(|item| filter.is_empty() || item.to_ascii_lowercase().contains(filter))
+        .map(|item| BlacklistTagViewModel {
+            kind,
+            value: item.clone(),
+            display_label: SharedString::from(item.clone()),
+            deletable: true,
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -431,13 +523,14 @@ mod tests {
     use std::path::PathBuf;
 
     use super::{
-        TreeCountSummary, TreeIconKind, apply_preflight_event, build_preview_table_model,
-        build_tree_panel_model, collect_folder_ids, default_expanded_ids,
+        TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect,
+        apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
+        build_preview_table_model, build_tree_panel_data, project_tree_panel,
     };
-    use crate::domain::{PreflightStats, PreviewFileEntry, ProcessResult, TreeNode};
+    use crate::domain::{Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
     use crate::services::preflight::PreflightEvent;
-    use crate::ui::state::{ProcessState, ProcessUiStatus};
+    use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
 
     #[test]
     fn stale_preflight_event_does_not_override_current_state() {
@@ -469,7 +562,6 @@ mod tests {
     #[test]
     fn preview_table_keeps_selected_row_when_filter_matches() {
         let result = sample_result();
-
         let model = build_preview_table_model(Some(&result), "lib", Some(2));
 
         assert_eq!(model.rows.len(), 1);
@@ -503,79 +595,136 @@ mod tests {
     }
 
     #[test]
-    fn tree_panel_model_links_preview_file_and_icons() {
+    fn blacklist_sections_keep_group_order_and_item_order_without_filter() {
+        let sections = build_blacklist_sections(
+            &["target".into(), "dist".into()],
+            &[".log".into(), ".tmp".into()],
+            "",
+            Language::En,
+        );
+
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title.as_ref(), "Folders");
+        assert_eq!(
+            sections[0]
+                .items
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            vec!["target", "dist"]
+        );
+        assert_eq!(sections[1].title.as_ref(), "Extensions");
+        assert_eq!(
+            sections[1]
+                .items
+                .iter()
+                .map(|item| item.value.as_str())
+                .collect::<Vec<_>>(),
+            vec![".log", ".tmp"]
+        );
+    }
+
+    #[test]
+    fn blacklist_sections_filter_case_insensitively() {
+        let sections = build_blacklist_sections(
+            &["Node_Modules".into(), "target".into()],
+            &[".PNG".into(), ".tmp".into()],
+            "png",
+            Language::En,
+        );
+
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].title.as_ref(), "Extensions");
+        assert_eq!(sections[0].count, 1);
+        assert_eq!(sections[0].items[0].value, ".PNG");
+    }
+
+    #[test]
+    fn blacklist_sections_return_empty_when_filter_matches_nothing() {
+        let sections = build_blacklist_sections(
+            &["target".into()],
+            &[".tmp".into()],
+            "missing",
+            Language::En,
+        );
+
+        assert!(sections.is_empty());
+    }
+
+    #[test]
+    fn tree_panel_projection_links_preview_file_and_icons() {
         let result = sample_result();
-        let expanded = default_expanded_ids(&result.tree_nodes);
+        let data = build_tree_panel_data(Some(&result));
+        let expanded = data
+            .as_ref()
+            .map(|data| data.index.default_expanded_ids.clone())
+            .unwrap_or_default();
 
-        let model = build_tree_panel_model(Some(&result), "", &expanded, Some("src/lib.rs"));
+        let render = project_tree_panel(data.as_ref(), "", &expanded, Some("src/lib.rs"));
 
-        let lib = model
+        let lib = render
             .rows
             .iter()
             .find(|row| row.node_id.as_ref() == "src/lib.rs")
             .expect("lib row");
         assert_eq!(lib.preview_file_id, Some(2));
         assert_eq!(lib.icon_kind, TreeIconKind::Code);
-        assert_eq!(model.selected_row_ix, Some(2));
+        assert_eq!(render.selected_row_ix, Some(2));
     }
 
     #[test]
     fn tree_panel_filter_keeps_ancestor_context_and_counts_visible_nodes() {
         let result = sample_result();
-        let expanded = default_expanded_ids(&result.tree_nodes);
+        let data = build_tree_panel_data(Some(&result));
+        let expanded = data
+            .as_ref()
+            .map(|data| data.index.default_expanded_ids.clone())
+            .unwrap_or_default();
 
-        let model = build_tree_panel_model(Some(&result), "lib", &expanded, None);
+        let render = project_tree_panel(data.as_ref(), "lib", &expanded, None);
 
         assert_eq!(
-            model.visible_summary,
+            render.visible_summary,
             TreeCountSummary {
                 folders: 1,
-                files: 1
+                files: 1,
             }
         );
-        assert_eq!(model.rows.len(), 2);
-        assert_eq!(model.rows[0].node_id.as_ref(), "src");
-        assert_eq!(model.rows[1].node_id.as_ref(), "src/lib.rs");
-        assert_eq!(model.rows[1].match_range, Some(0..3));
+        assert_eq!(render.rows.len(), 2);
+        assert_eq!(render.rows[0].node_id.as_ref(), "src");
+        assert_eq!(render.rows[1].node_id.as_ref(), "src/lib.rs");
+        assert_eq!(render.rows[1].match_range, Some(0..3));
     }
 
     #[test]
     fn folder_summaries_include_nested_children() {
-        let result = sample_result();
-        let expanded = default_expanded_ids(&result.tree_nodes);
+        let result = nested_result();
+        let data = build_tree_panel_data(Some(&result));
+        let expanded = data
+            .as_ref()
+            .map(|data| data.index.default_expanded_ids.clone())
+            .unwrap_or_default();
 
-        let model = build_tree_panel_model(Some(&result), "", &expanded, None);
-        let src = model
+        let render = project_tree_panel(data.as_ref(), "", &expanded, None);
+        let src = render
             .rows
             .iter()
             .find(|row| row.node_id.as_ref() == "src")
             .expect("src row");
 
-        assert_eq!(src.child_folder_count, 0);
+        assert_eq!(src.child_folder_count, 1);
         assert_eq!(src.child_file_count, 2);
     }
 
     #[test]
-    fn collect_expand_state_helpers_cover_folder_ids() {
-        let result = sample_result();
-
-        let default_ids = default_expanded_ids(&result.tree_nodes);
-        let folder_ids = collect_folder_ids(&result.tree_nodes);
-
-        assert!(default_ids.contains("src"));
-        assert!(folder_ids.contains("src"));
-        assert!(!folder_ids.contains("README.md"));
-    }
-
-    #[test]
     fn collapsed_folders_do_not_emit_hidden_descendant_rows() {
-        let result = nested_result();
+        let data = build_tree_panel_data(Some(&nested_result()));
         let expanded = BTreeSet::from(["src".to_string()]);
 
-        let model = build_tree_panel_model(Some(&result), "", &expanded, None);
+        let render = project_tree_panel(data.as_ref(), "", &expanded, None);
 
         assert_eq!(
-            model
+            render
                 .rows
                 .iter()
                 .map(|row| (row.node_id.as_ref(), row.depth))
@@ -588,12 +737,93 @@ mod tests {
             ]
         );
         assert_eq!(
-            model.visible_summary,
+            render.visible_summary,
             TreeCountSummary {
                 folders: 2,
                 files: 2,
             }
         );
+    }
+
+    #[test]
+    fn tree_interaction_folder_selection_refreshes_once_and_updates_expansion() {
+        let mut state = TreePanelState::default();
+        let effect = apply_tree_interaction(
+            &mut state,
+            None,
+            Some(TreeInteractionSnapshot {
+                node_id: Some("src".to_string()),
+                is_folder: true,
+                is_expanded: true,
+                preview_file_id: None,
+            }),
+        );
+
+        assert_eq!(effect, TreePanelEffect::RefreshTree);
+        assert_eq!(state.selected_node_id.as_deref(), Some("src"));
+        assert!(state.expanded_ids.contains("src"));
+
+        let same = apply_tree_interaction(
+            &mut state,
+            Some(&TreeInteractionSnapshot {
+                node_id: Some("src".to_string()),
+                is_folder: true,
+                is_expanded: true,
+                preview_file_id: None,
+            }),
+            Some(TreeInteractionSnapshot {
+                node_id: Some("src".to_string()),
+                is_folder: true,
+                is_expanded: true,
+                preview_file_id: None,
+            }),
+        );
+
+        assert_eq!(same, TreePanelEffect::None);
+    }
+
+    #[test]
+    fn tree_interaction_folder_expansion_change_does_not_force_refresh() {
+        let mut state = TreePanelState {
+            selected_node_id: Some("src".to_string()),
+            expanded_ids: BTreeSet::from(["src".to_string()]),
+        };
+        let effect = apply_tree_interaction(
+            &mut state,
+            Some(&TreeInteractionSnapshot {
+                node_id: Some("src".to_string()),
+                is_folder: true,
+                is_expanded: true,
+                preview_file_id: None,
+            }),
+            Some(TreeInteractionSnapshot {
+                node_id: Some("src".to_string()),
+                is_folder: true,
+                is_expanded: false,
+                preview_file_id: None,
+            }),
+        );
+
+        assert_eq!(effect, TreePanelEffect::None);
+        assert!(!state.expanded_ids.contains("src"));
+    }
+
+    #[test]
+    fn tree_interaction_file_selection_switches_to_preview_once() {
+        let mut state = TreePanelState::default();
+        let effect = apply_tree_interaction(
+            &mut state,
+            None,
+            Some(TreeInteractionSnapshot {
+                node_id: Some("src/lib.rs".to_string()),
+                is_folder: false,
+                is_expanded: false,
+                preview_file_id: Some(2),
+            }),
+        );
+
+        assert_eq!(effect, TreePanelEffect::SwitchToContentAndOpen(2));
+        assert_eq!(state.selected_node_id.as_deref(), Some("src/lib.rs"));
     }
 
     fn sample_result() -> ProcessResult {
@@ -672,9 +902,9 @@ mod tests {
                             relative_path: "src/nested".to_string(),
                             is_folder: true,
                             children: vec![TreeNode {
-                                id: "src/nested/deep.rs".to_string(),
-                                label: "deep.rs".to_string(),
-                                relative_path: "src/nested/deep.rs".to_string(),
+                                id: "src/nested/lib.rs".to_string(),
+                                label: "lib.rs".to_string(),
+                                relative_path: "src/nested/lib.rs".to_string(),
                                 is_folder: false,
                                 children: Vec::new(),
                             }],
@@ -698,7 +928,24 @@ mod tests {
             ],
             merged_content_path: None,
             file_details: Vec::new(),
-            preview_files: Vec::new(),
+            preview_files: vec![
+                PreviewFileEntry {
+                    id: 1,
+                    display_path: "src/main.rs".to_string(),
+                    chars: 10,
+                    tokens: 3,
+                    preview_blob_path: PathBuf::from("a"),
+                    byte_len: 10,
+                },
+                PreviewFileEntry {
+                    id: 2,
+                    display_path: "src/nested/lib.rs".to_string(),
+                    chars: 12,
+                    tokens: 4,
+                    preview_blob_path: PathBuf::from("b"),
+                    byte_len: 12,
+                },
+            ],
             preview_blob_dir: None,
         }
     }

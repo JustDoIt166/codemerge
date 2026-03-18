@@ -7,8 +7,10 @@ use gpui_component::{
     checkbox::Checkbox,
     h_flex,
     input::Input,
+    list::ListItem,
     resizable::h_resizable,
     resizable::resizable_panel,
+    scroll::ScrollableElement,
     tab::Tab,
     tab::TabBar,
     table::Table,
@@ -17,14 +19,14 @@ use gpui_component::{
 };
 
 use super::view::{
-    accent_icon_badge, activity_row, card, empty_box, format_duration, format_tree_summary,
-    panel_viewport, pill_label, process_status_message, process_status_title, render_info_block,
-    render_kv, render_tree_row, section_caption, section_title, selected_file_row, stat_tile,
-    status_banner, tab_icon_badge,
+    activity_row, card, empty_box, format_duration, format_tree_summary, panel_viewport,
+    pill_label, process_status_message, process_status_title, render_blacklist_section,
+    render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
+    section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
 use super::{
-    BlacklistItemKind, NarrowContentTab, PendingConfirmation, SidePanelTab, Workspace,
-    fixed_list_sizes, preview_line_height, workspace_panel_min_height,
+    NarrowContentTab, PendingConfirmation, SidePanelTab, Workspace, fixed_list_sizes,
+    preview_line_height, workspace_panel_min_height,
 };
 use crate::domain::{ProcessStatus, ResultTab};
 use crate::utils::i18n::tr;
@@ -120,7 +122,16 @@ impl Workspace {
             .gitignore_file
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| tr(language, "gitignore_auto_hint").to_string());
+            .unwrap_or_else(|| {
+                if self.state.settings.options.use_gitignore {
+                    tr(language, "gitignore_auto_hint").to_string()
+                } else {
+                    match self.state.settings.language {
+                        crate::domain::Language::Zh => "自动 .gitignore 已停用".to_string(),
+                        crate::domain::Language::En => "Auto .gitignore disabled".to_string(),
+                    }
+                }
+            });
 
         card(cx).size_full().child(
             v_flex()
@@ -538,15 +549,19 @@ impl Workspace {
                             .label(tr(language, "panel_rules")),
                     ),
             )
-            .child(match self.side_panel_tab {
-                SidePanelTab::Results => self.render_results_panel(cx).into_any_element(),
-                SidePanelTab::Rules => self.render_rules_panel(cx).into_any_element(),
-            })
+            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                match self.side_panel_tab {
+                    SidePanelTab::Results => self.render_results_panel(cx).into_any_element(),
+                    SidePanelTab::Rules => self.render_rules_panel(cx).into_any_element(),
+                },
+            ))
     }
 
     pub(super) fn render_results_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.state.settings.language;
-        let selected_tab = if self.state.result.active_tab == ResultTab::Tree {
+        let has_content_result = self.state.has_content_result();
+        let selected_tab = if self.state.result.active_tab == ResultTab::Tree || !has_content_result
+        {
             0
         } else {
             1
@@ -572,6 +587,7 @@ impl Workspace {
                             .child(
                                 Tab::new()
                                     .prefix(tab_icon_badge(IconName::SquareTerminal, true, cx))
+                                    .disabled(!has_content_result)
                                     .label(tr(language, "tab_merged_content")),
                             ),
                     )
@@ -600,7 +616,7 @@ impl Workspace {
                                     .outline()
                                     .icon(IconName::ArrowDown)
                                     .label(tr(language, "download"))
-                                    .disabled(self.state.result.active_tab == ResultTab::Tree)
+                                    .disabled(!has_content_result)
                                     .on_click(cx.listener(Self::download_result)),
                             ),
                     ),
@@ -613,7 +629,18 @@ impl Workspace {
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.state.settings.language;
-        let blacklist_rows = self.build_blacklist_rows(cx);
+        let filter = self
+            .blacklist_filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let blacklist_sections = super::model::build_blacklist_sections(
+            &self.state.settings.folder_blacklist,
+            &self.state.settings.ext_blacklist,
+            filter.as_str(),
+            language,
+        );
 
         v_flex()
             .gap_3()
@@ -671,77 +698,49 @@ impl Workspace {
                             .on_click(cx.listener(Self::export_blacklist)),
                     ),
             )
-            .child(if blacklist_rows.is_empty() {
-                empty_box(
-                    tr(language, "blacklist_empty_title"),
-                    tr(language, "blacklist_empty_hint"),
-                    IconName::Folder,
-                    cx,
-                )
-                .into_any_element()
-            } else {
-                let rows = blacklist_rows.clone();
+            .child(
                 div()
                     .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(px(12.))
                     .bg(cx.theme().secondary.opacity(0.22))
-                    .child(
-                        v_virtual_list(
-                            cx.entity().clone(),
-                            "blacklist-items",
-                            fixed_list_sizes(rows.len(), px(44.)),
-                            move |_, visible_range, _, cx| {
-                                visible_range
-                                    .filter_map(|ix| rows.get(ix).cloned().map(|item| (ix, item)))
-                                    .map(|(ix, item)| {
-                                        let kind = item.kind;
-                                        let value = item.value.clone();
-                                        let (kind_icon, icon_fg, icon_bg) = match item.kind {
-                                            BlacklistItemKind::Folder => (
-                                                IconName::Folder,
-                                                cx.theme().warning,
-                                                cx.theme().warning.opacity(0.16),
-                                            ),
-                                            BlacklistItemKind::Ext => (
-                                                IconName::File,
-                                                cx.theme().accent,
-                                                cx.theme().accent.opacity(0.14),
-                                            ),
-                                        };
-                                        h_flex()
-                                            .justify_between()
-                                            .items_center()
-                                            .px_3()
-                                            .h(px(44.))
-                                            .child(
-                                                h_flex()
-                                                    .gap_2()
-                                                    .items_center()
-                                                    .child(accent_icon_badge(
-                                                        kind_icon, icon_fg, icon_bg,
+                    .child(if blacklist_sections.is_empty() {
+                        empty_box(
+                            tr(language, "blacklist_empty_title"),
+                            tr(language, "blacklist_empty_hint"),
+                            IconName::Folder,
+                            cx,
+                        )
+                        .into_any_element()
+                    } else {
+                        div()
+                            .size_full()
+                            .min_h(px(0.))
+                            .overflow_x_hidden()
+                            .overflow_y_scrollbar()
+                            .p_2()
+                            .child(v_flex().gap_3().children(
+                                blacklist_sections.iter().enumerate().map(
+                                    |(section_ix, section)| {
+                                        let tags = section
+                                            .items
+                                            .iter()
+                                            .enumerate()
+                                            .map(|(ix, item)| {
+                                                let kind = item.kind;
+                                                let value = item.value.clone();
+                                                render_blacklist_tag(
+                                                    item,
+                                                    Button::new((
+                                                        "remove-blacklist",
+                                                        section_ix * 1000 + ix,
                                                     ))
-                                                    .child(pill_label(
-                                                        match item.kind {
-                                                            BlacklistItemKind::Folder => {
-                                                                tr(language, "folder")
-                                                            }
-                                                            BlacklistItemKind::Ext => {
-                                                                tr(language, "extension")
-                                                            }
-                                                        },
-                                                        cx,
-                                                    ))
-                                                    .child(
-                                                        div()
-                                                            .truncate()
-                                                            .child(item.display_label.clone()),
-                                                    ),
-                                            )
-                                            .child(
-                                                Button::new(("remove-blacklist", ix))
-                                                    .outline()
+                                                    .ghost()
+                                                    .compact()
+                                                    .with_size(Size::Small)
                                                     .icon(IconName::Delete)
                                                     .disabled(!item.deletable)
                                                     .on_click(cx.listener(
@@ -753,17 +752,19 @@ impl Workspace {
                                                                 cx,
                                                             );
                                                         },
-                                                    )),
-                                            )
-                                            .into_any_element()
-                                    })
-                                    .collect::<Vec<_>>()
-                            },
-                        )
-                        .p_1(),
-                    )
-                    .into_any_element()
-            })
+                                                    ))
+                                                    .into_any_element(),
+                                                    cx,
+                                                )
+                                            })
+                                            .collect::<Vec<_>>();
+                                        render_blacklist_section(section, tags, cx)
+                                    },
+                                ),
+                            ))
+                            .into_any_element()
+                    }),
+            )
             .child(
                 div()
                     .pt_2()
@@ -808,42 +809,28 @@ impl Workspace {
 
     pub(super) fn render_tree_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.state.settings.language;
-        let tree_filter = self.tree_filter_input.read(cx).value().trim().to_string();
+        let tree_filter = self
+            .tree_panel
+            .filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
         let filter_active = !tree_filter.is_empty();
         let has_result = self.state.result.result.is_some();
-        let has_visible_nodes = self.tree_visible_summary.total() > 0;
+        let has_visible_nodes = !self.tree_panel.render_state.rows.is_empty();
         let view = cx.entity();
-        let tree_view = tree(&self.tree_state, move |ix, entry, selected, _, cx| {
+        let tree_view = tree(&self.tree_panel.state, move |ix, entry, selected, _, cx| {
             view.update(cx, |workspace, cx| {
-                let mut row = workspace
-                    .tree_row_map
+                let Some(mut row) = workspace
+                    .tree_panel
+                    .render_state
+                    .rows_by_id
                     .get(entry.item().id.as_ref())
                     .cloned()
-                    .unwrap_or_else(|| super::model::TreeRowViewModel {
-                        node_id: entry.item().id.clone(),
-                        label: entry.item().label.clone(),
-                        relative_path: entry.item().id.clone(),
-                        is_folder: entry.is_folder(),
-                        depth: entry.depth(),
-                        extension: None,
-                        preview_file_id: None,
-                        child_file_count: 0,
-                        child_folder_count: 0,
-                        icon_kind: if entry.is_folder() {
-                            if entry.is_expanded() {
-                                super::model::TreeIconKind::FolderOpen
-                            } else {
-                                super::model::TreeIconKind::FolderClosed
-                            }
-                        } else {
-                            super::model::TreeIconKind::Text
-                        },
-                        is_expanded: entry.is_expanded(),
-                        is_filter_match: false,
-                        match_range: None,
-                        match_kind: None,
-                        matched_descendants: 0,
-                    });
+                else {
+                    return ListItem::new(ix).child(entry.item().label.clone());
+                };
                 row.is_expanded = entry.is_expanded();
                 if row.is_folder {
                     row.icon_kind = if entry.is_expanded() {
@@ -866,7 +853,7 @@ impl Workspace {
                     .gap_2()
                     .items_center()
                     .child(
-                        Input::new(&self.tree_filter_input)
+                        Input::new(&self.tree_panel.filter_input)
                             .prefix(IconName::Search)
                             .cleanable(true),
                     )
@@ -897,8 +884,8 @@ impl Workspace {
                             .text_sm()
                             .text_color(cx.theme().muted_foreground)
                             .child(format_tree_summary(
-                                self.tree_visible_summary,
-                                self.tree_total_summary,
+                                self.tree_panel.render_state.visible_summary,
+                                self.tree_panel.render_state.total_summary,
                                 language,
                             )),
                     )
@@ -946,6 +933,21 @@ impl Workspace {
         let language = self.state.settings.language;
         let has_result = self.state.result.result.is_some();
         let has_rows = !self.state.result.preview_rows.is_empty();
+        let tree_only = self.state.is_tree_only_result();
+
+        if tree_only {
+            return v_flex()
+                .gap_3()
+                .size_full()
+                .min_h(px(0.))
+                .child(empty_box(
+                    tr(language, "mode_tree_only"),
+                    tr(language, "mode_tree_only_desc"),
+                    IconName::FolderOpen,
+                    cx,
+                ))
+                .into_any_element();
+        }
 
         v_flex()
             .gap_3()
@@ -979,6 +981,7 @@ impl Workspace {
                 .into_any_element()
             })
             .child(self.render_preview(cx))
+            .into_any_element()
     }
 
     pub(super) fn render_preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -986,6 +989,7 @@ impl Workspace {
         let selected_preview = self
             .state
             .workspace
+            .preview_panel
             .selected_preview_file_id
             .and_then(|id| {
                 self.state
@@ -995,7 +999,19 @@ impl Workspace {
                     .find(|row| row.id == id)
             });
 
-        let Some(document) = &self.state.workspace.preview_document else {
+        if let Some(error) = self.state.workspace.preview_panel.preview_error.as_ref() {
+            let preview_failure_title = selected_preview
+                .map(|row| row.display_path.clone())
+                .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+            let title = format!(
+                "{}: {}",
+                tr(language, "status_error"),
+                preview_failure_title
+            );
+            return empty_box(title, error.to_string(), IconName::TriangleAlert, cx);
+        }
+
+        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return empty_box(
                 tr(language, "preview_empty"),
                 tr(language, "preview_empty_hint"),
@@ -1038,10 +1054,13 @@ impl Workspace {
                         v_virtual_list(
                             cx.entity().clone(),
                             "preview-lines",
-                            self.state.workspace.preview_sizes.clone(),
+                            self.state.workspace.preview_panel.preview_sizes.clone(),
                             move |view, visible_range, _, cx| {
-                                view.state.workspace.preview_visible_range = visible_range.clone();
-                                let Some(document) = &view.state.workspace.preview_document else {
+                                view.state.workspace.preview_panel.preview_visible_range =
+                                    visible_range.clone();
+                                let Some(document) =
+                                    &view.state.workspace.preview_panel.preview_document
+                                else {
                                     return Vec::new();
                                 };
                                 let line_count = document.line_count();
@@ -1049,16 +1068,29 @@ impl Workspace {
                                     .filter(|ix| *ix < line_count)
                                     .map(|ix| {
                                         let line = if ix
-                                            >= view.state.workspace.preview_loaded_range.start
-                                            && ix < view.state.workspace.preview_loaded_range.end
+                                            >= view
+                                                .state
+                                                .workspace
+                                                .preview_panel
+                                                .preview_loaded_range
+                                                .start
+                                            && ix
+                                                < view
+                                                    .state
+                                                    .workspace
+                                                    .preview_panel
+                                                    .preview_loaded_range
+                                                    .end
                                         {
                                             view.state
                                                 .workspace
+                                                .preview_panel
                                                 .preview_loaded_lines
                                                 .get(
                                                     ix - view
                                                         .state
                                                         .workspace
+                                                        .preview_panel
                                                         .preview_loaded_range
                                                         .start,
                                                 )

@@ -60,7 +60,7 @@ impl Workspace {
             dirty = true;
         }
 
-        if let Some(rx) = self.state.workspace.preview_rx.take() {
+        if let Some(rx) = self.state.workspace.preview_panel.preview_rx.take() {
             let mut keep = true;
             loop {
                 match rx.try_recv() {
@@ -70,17 +70,17 @@ impl Workspace {
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         keep = false;
-                        self.state.workspace.preview_requested_range = None;
+                        self.state.workspace.preview_panel.preview_requested_range = None;
                         break;
                     }
                 }
             }
             if keep {
-                self.state.workspace.preview_rx = Some(rx);
+                self.state.workspace.preview_panel.preview_rx = Some(rx);
             }
         }
 
-        dirty = self.sync_tree_selection(cx) || dirty;
+        dirty = self.sync_tree_interaction(cx) || dirty;
         dirty = self.refresh_preview_window() || dirty;
         if dirty {
             cx.notify();
@@ -152,18 +152,19 @@ impl Workspace {
                 loaded_range,
                 lines,
             } => {
-                if revision != self.state.workspace.preview_revision
-                    || self.state.workspace.selected_preview_file_id != Some(file_id)
+                if revision != self.state.workspace.preview_panel.preview_revision
+                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
                 {
                     return false;
                 }
                 let line_count = document.line_count().max(1);
-                self.state.workspace.preview_document = Some(document);
-                self.state.workspace.preview_loaded_range = loaded_range;
-                self.state.workspace.preview_loaded_lines =
+                self.state.workspace.preview_panel.preview_document = Some(document);
+                self.state.workspace.preview_panel.preview_error = None;
+                self.state.workspace.preview_panel.preview_loaded_range = loaded_range;
+                self.state.workspace.preview_panel.preview_loaded_lines =
                     lines.into_iter().map(SharedString::from).collect();
-                self.state.workspace.preview_requested_range = None;
-                self.state.workspace.preview_sizes = Rc::new(
+                self.state.workspace.preview_panel.preview_requested_range = None;
+                self.state.workspace.preview_panel.preview_sizes = Rc::new(
                     (0..line_count)
                         .map(|_| size(px(100.), preview_line_height()))
                         .collect::<Vec<_>>(),
@@ -177,55 +178,52 @@ impl Workspace {
                 loaded_range,
                 lines,
             } => {
-                if revision != self.state.workspace.preview_revision
-                    || self.state.workspace.selected_preview_file_id != Some(file_id)
+                if revision != self.state.workspace.preview_panel.preview_revision
+                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
                 {
                     return false;
                 }
-                self.state.workspace.preview_loaded_range = loaded_range;
-                self.state.workspace.preview_loaded_lines =
+                self.state.workspace.preview_panel.preview_error = None;
+                self.state.workspace.preview_panel.preview_loaded_range = loaded_range;
+                self.state.workspace.preview_panel.preview_loaded_lines =
                     lines.into_iter().map(SharedString::from).collect();
-                self.state.workspace.preview_requested_range = None;
+                self.state.workspace.preview_panel.preview_requested_range = None;
                 true
             }
             PreviewEvent::Failed {
-                revision, file_id, ..
+                revision,
+                file_id,
+                error,
             } => {
-                if revision != self.state.workspace.preview_revision
-                    || self.state.workspace.selected_preview_file_id != Some(file_id)
+                if revision != self.state.workspace.preview_panel.preview_revision
+                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
                 {
                     return false;
                 }
-                self.state.workspace.preview_requested_range = None;
-                self.state.workspace.preview_loaded_range = 0..0;
-                self.state.workspace.preview_loaded_lines.clear();
+                self.state.workspace.preview_panel.preview_error = Some(error.to_string());
+                self.state.workspace.preview_panel.preview_requested_range = None;
+                self.state.workspace.preview_panel.preview_loaded_range = 0..0;
+                self.state
+                    .workspace
+                    .preview_panel
+                    .preview_loaded_lines
+                    .clear();
                 true
             }
         }
     }
 
     fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
-        if let Some(prev_dir) = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .and_then(|result| result.preview_blob_dir.as_ref())
-        {
-            let _ = crate::utils::temp_file::cleanup_preview_dir(prev_dir);
-        }
+        self.cleanup_current_result_artifacts();
         self.state.result.result = Some(result);
         self.state.result.active_tab = ResultTab::Tree;
-        self.side_panel_tab = super::SidePanelTab::Results;
-        let expanded_ids = self
-            .state
-            .result
-            .result
-            .as_ref()
-            .map(|result| model::default_expanded_ids(&result.tree_nodes))
-            .unwrap_or_default();
+        self.tree_panel.data = model::build_tree_panel_data(self.state.result.result.as_ref());
+        self.tree_panel.last_interaction = None;
+        self.tree_panel.render_state = model::TreeRenderState::default();
         self.state.workspace.reset_tree();
-        self.state.workspace.tree_expanded_ids = expanded_ids;
+        if let Some(data) = self.tree_panel.data.as_ref() {
+            self.state.workspace.tree_panel.expanded_ids = data.index.default_expanded_ids.clone();
+        }
         self.sync_tree(cx);
         self.sync_preview_table(cx);
     }
@@ -235,45 +233,36 @@ impl Workspace {
     }
 
     pub(super) fn sync_tree_with_mode(&mut self, mode: TreeExpansionMode, cx: &mut Context<Self>) {
-        if let Some(result) = self.state.result.result.as_ref() {
+        if let Some(data) = self.tree_panel.data.as_ref() {
             match mode {
                 TreeExpansionMode::Default => {}
                 TreeExpansionMode::ExpandAll => {
-                    self.state.workspace.tree_expanded_ids =
-                        model::collect_folder_ids(&result.tree_nodes);
+                    self.state.workspace.tree_panel.expanded_ids = data.index.folder_ids.clone();
                 }
                 TreeExpansionMode::CollapseAll => {
-                    self.state.workspace.tree_expanded_ids.clear();
+                    self.state.workspace.tree_panel.expanded_ids.clear();
                 }
             }
         }
 
         let filter = self
-            .tree_filter_input
+            .tree_panel
+            .filter_input
             .read(cx)
             .value()
             .trim()
             .to_ascii_lowercase();
-        let tree_model = model::build_tree_panel_model(
-            self.state.result.result.as_ref(),
+        let render_state = model::project_tree_panel(
+            self.tree_panel.data.as_ref(),
             filter.as_str(),
-            &self.state.workspace.tree_expanded_ids,
-            self.state.workspace.selected_tree_node_id.as_deref(),
+            &self.state.workspace.tree_panel.expanded_ids,
+            self.state.workspace.tree_panel.selected_node_id.as_deref(),
         );
-        let tree_row_map = tree_model
-            .rows
-            .into_iter()
-            .map(|row| (row.node_id.to_string(), row))
-            .collect();
-        let tree_total_summary = tree_model.total_summary;
-        let tree_visible_summary = tree_model.visible_summary;
-        self.tree_state.update(cx, |state, tree_cx| {
-            state.set_items(tree_model.items, tree_cx);
-            state.set_selected_index(tree_model.selected_row_ix, tree_cx);
+        self.tree_panel.state.update(cx, |state, tree_cx| {
+            state.set_items(render_state.items.clone(), tree_cx);
+            state.set_selected_index(render_state.selected_row_ix, tree_cx);
         });
-        self.tree_row_map = tree_row_map;
-        self.tree_total_summary = tree_total_summary;
-        self.tree_visible_summary = tree_visible_summary;
+        self.tree_panel.render_state = render_state;
     }
 
     pub(super) fn sync_preview_table(&mut self, cx: &mut Context<Self>) {
@@ -286,7 +275,7 @@ impl Workspace {
         let table_model = model::build_preview_table_model(
             self.state.result.result.as_ref(),
             filter.as_str(),
-            self.state.workspace.selected_preview_file_id,
+            self.state.workspace.preview_panel.selected_preview_file_id,
         );
         self.state.result.preview_rows = table_model.rows.clone();
         self.preview_table.update(cx, |table, cx| {
@@ -308,7 +297,10 @@ impl Workspace {
         });
 
         match table_model.next_selected_file_id {
-            Some(file_id) => self.load_preview(file_id, cx),
+            Some(file_id) => {
+                let _ =
+                    self.apply_tree_panel_effect(model::TreePanelEffect::OpenPreview(file_id), cx);
+            }
             None => self.clear_preview_state(),
         }
     }
@@ -319,8 +311,8 @@ impl Workspace {
             self.state.process.ui_status = ProcessUiStatus::Preflight;
             self.state.process.last_error = None;
         }
-        self.state.process.preflight_rx =
-            Some(crate::services::preflight::start(PreflightRequest {
+        self.state.process.preflight_rx = Some(crate::services::preflight::start_with_options(
+            PreflightRequest {
                 revision: self.state.process.preflight_revision,
                 selected_folder: self.state.selection.selected_folder.clone(),
                 selected_files: self
@@ -330,77 +322,71 @@ impl Workspace {
                     .iter()
                     .map(|f| f.path.clone())
                     .collect(),
-                folder_blacklist: self.state.settings.folder_blacklist.clone(),
+                folder_blacklist: self.state.effective_folder_blacklist(),
                 ext_blacklist: self.state.settings.ext_blacklist.clone(),
-            }));
+            },
+            crate::processor::walker::WalkerOptions {
+                use_gitignore: self.state.settings.options.use_gitignore,
+                ignore_git: self.state.settings.options.ignore_git,
+            },
+        ));
     }
 
     pub(super) fn clear_preview_state(&mut self) {
         self.state.workspace.reset_preview();
     }
 
-    fn sync_tree_selection(&mut self, cx: &mut Context<Self>) -> bool {
-        let selected_entry = self.tree_state.read(cx).selected_entry().cloned();
-        let selected_entry_state = selected_entry
-            .as_ref()
-            .map(|entry| (entry.is_folder(), entry.is_expanded()));
-        let selected_row = selected_entry
-            .as_ref()
-            .and_then(|entry| self.tree_row_map.get(entry.item().id.as_ref()))
-            .cloned();
-        let selected_node_id = selected_row.as_ref().map(|row| row.node_id.to_string());
+    fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        let next = self.current_tree_interaction_snapshot(cx);
+        let effect = model::apply_tree_interaction(
+            &mut self.state.workspace.tree_panel,
+            self.tree_panel.last_interaction.as_ref(),
+            next.clone(),
+        );
+        self.tree_panel.last_interaction = next;
+        self.apply_tree_panel_effect(effect, cx)
+    }
 
-        if self.state.workspace.selected_tree_node_id == selected_node_id {
-            if let Some(row) = selected_row
-                && row.is_folder
-            {
-                let is_expanded = selected_entry_state
-                    .map(|(_, expanded)| expanded)
-                    .unwrap_or(row.is_expanded);
-                if is_expanded {
-                    self.state
-                        .workspace
-                        .tree_expanded_ids
-                        .insert(row.node_id.to_string());
-                } else {
-                    self.state
-                        .workspace
-                        .tree_expanded_ids
-                        .remove(row.node_id.as_ref());
-                }
+    fn current_tree_interaction_snapshot(
+        &self,
+        cx: &Context<Self>,
+    ) -> Option<model::TreeInteractionSnapshot> {
+        let selected_entry = self.tree_panel.state.read(cx).selected_entry().cloned()?;
+        let selected_row = self
+            .tree_panel
+            .render_state
+            .rows_by_id
+            .get(selected_entry.item().id.as_ref());
+
+        Some(model::TreeInteractionSnapshot {
+            node_id: Some(selected_entry.item().id.as_ref().to_string()),
+            is_folder: selected_entry.is_folder(),
+            is_expanded: selected_entry.is_expanded(),
+            preview_file_id: selected_row.and_then(|row| row.preview_file_id),
+        })
+    }
+
+    fn apply_tree_panel_effect(
+        &mut self,
+        effect: model::TreePanelEffect,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        match effect {
+            model::TreePanelEffect::None => false,
+            model::TreePanelEffect::RefreshTree => {
+                self.sync_tree(cx);
+                true
             }
-            return false;
-        }
-
-        self.state.workspace.selected_tree_node_id = selected_node_id;
-        let Some(row) = selected_row else {
-            return true;
-        };
-
-        if row.is_folder {
-            let is_expanded = selected_entry_state
-                .map(|(_, expanded)| expanded)
-                .unwrap_or(row.is_expanded);
-            if is_expanded {
-                self.state
-                    .workspace
-                    .tree_expanded_ids
-                    .insert(row.node_id.to_string());
-            } else {
-                self.state
-                    .workspace
-                    .tree_expanded_ids
-                    .remove(row.node_id.as_ref());
+            model::TreePanelEffect::OpenPreview(file_id) => {
+                self.load_preview(file_id, cx);
+                true
             }
-            self.sync_tree(cx);
-            return true;
+            model::TreePanelEffect::SwitchToContentAndOpen(file_id) => {
+                self.state.result.active_tab = ResultTab::Content;
+                self.load_preview(file_id, cx);
+                true
+            }
         }
-
-        if let Some(file_id) = row.preview_file_id {
-            self.state.result.active_tab = ResultTab::Content;
-            self.load_preview(file_id, cx);
-        }
-        true
     }
 
     fn padded_preview_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
@@ -413,10 +399,10 @@ impl Workspace {
     }
 
     fn request_preview_range(&mut self, range: Range<usize>) -> bool {
-        let Some(document) = &self.state.workspace.preview_document else {
+        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return false;
         };
-        let Some(file_id) = self.state.workspace.selected_preview_file_id else {
+        let Some(file_id) = self.state.workspace.preview_panel.selected_preview_file_id else {
             return false;
         };
 
@@ -424,29 +410,42 @@ impl Workspace {
         if padded.start >= padded.end {
             return false;
         }
-        if self.state.workspace.preview_loaded_range.start <= padded.start
-            && self.state.workspace.preview_loaded_range.end >= padded.end
+        if self
+            .state
+            .workspace
+            .preview_panel
+            .preview_loaded_range
+            .start
+            <= padded.start
+            && self.state.workspace.preview_panel.preview_loaded_range.end >= padded.end
         {
             return false;
         }
-        if self.state.workspace.preview_requested_range.as_ref() == Some(&padded)
-            || self.state.workspace.preview_rx.is_some()
+        if self
+            .state
+            .workspace
+            .preview_panel
+            .preview_requested_range
+            .as_ref()
+            == Some(&padded)
+            || self.state.workspace.preview_panel.preview_rx.is_some()
         {
             return false;
         }
 
-        self.state.workspace.preview_requested_range = Some(padded.clone());
-        self.state.workspace.preview_rx = Some(start_preview(PreviewRequest::LoadRange {
-            revision: self.state.workspace.preview_revision,
-            file_id,
-            document: document.clone(),
-            range: padded,
-        }));
+        self.state.workspace.preview_panel.preview_requested_range = Some(padded.clone());
+        self.state.workspace.preview_panel.preview_rx =
+            Some(start_preview(PreviewRequest::LoadRange {
+                revision: self.state.workspace.preview_panel.preview_revision,
+                file_id,
+                document: document.clone(),
+                range: padded,
+            }));
         true
     }
 
     fn refresh_preview_window(&mut self) -> bool {
-        let Some(document) = &self.state.workspace.preview_document else {
+        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return false;
         };
         let line_count = document.line_count();
@@ -454,16 +453,31 @@ impl Workspace {
             return false;
         }
 
-        let visible = if self.state.workspace.preview_visible_range.start
-            < self.state.workspace.preview_visible_range.end
+        let visible = if self
+            .state
+            .workspace
+            .preview_panel
+            .preview_visible_range
+            .start
+            < self.state.workspace.preview_panel.preview_visible_range.end
         {
-            self.state.workspace.preview_visible_range.clone()
+            self.state
+                .workspace
+                .preview_panel
+                .preview_visible_range
+                .clone()
         } else {
             0..line_count.min(1)
         };
 
-        if self.state.workspace.preview_loaded_range.start <= visible.start
-            && self.state.workspace.preview_loaded_range.end >= visible.end
+        if self
+            .state
+            .workspace
+            .preview_panel
+            .preview_loaded_range
+            .start
+            <= visible.start
+            && self.state.workspace.preview_panel.preview_loaded_range.end >= visible.end
         {
             return false;
         }
@@ -472,9 +486,14 @@ impl Workspace {
     }
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
-        if self.state.workspace.selected_preview_file_id == Some(file_id)
-            && (self.state.workspace.preview_document.is_some()
-                || self.state.workspace.preview_rx.is_some())
+        if self.state.workspace.preview_panel.selected_preview_file_id == Some(file_id)
+            && (self
+                .state
+                .workspace
+                .preview_panel
+                .preview_document
+                .is_some()
+                || self.state.workspace.preview_panel.preview_rx.is_some())
         {
             return;
         }
@@ -486,20 +505,26 @@ impl Workspace {
         }) else {
             return;
         };
-        self.state.workspace.preview_revision += 1;
-        self.state.workspace.selected_preview_file_id = Some(file_id);
-        self.state.workspace.preview_rx = Some(start_preview(PreviewRequest::Open {
-            revision: self.state.workspace.preview_revision,
+        self.state.workspace.preview_panel.preview_revision += 1;
+        self.state.workspace.preview_panel.selected_preview_file_id = Some(file_id);
+        self.state.workspace.preview_panel.preview_error = None;
+        self.state.workspace.preview_panel.preview_rx = Some(start_preview(PreviewRequest::Open {
+            revision: self.state.workspace.preview_panel.preview_revision,
             file_id,
             path: entry.preview_blob_path.clone(),
             initial_range: 0..200,
         }));
-        self.state.workspace.preview_requested_range = Some(0..200);
-        self.state.workspace.preview_document = None;
-        self.state.workspace.preview_loaded_range = 0..0;
-        self.state.workspace.preview_loaded_lines.clear();
-        self.state.workspace.preview_visible_range = 0..0;
-        self.state.workspace.preview_sizes = Rc::new(vec![size(px(100.), preview_line_height())]);
+        self.state.workspace.preview_panel.preview_requested_range = Some(0..200);
+        self.state.workspace.preview_panel.preview_document = None;
+        self.state.workspace.preview_panel.preview_loaded_range = 0..0;
+        self.state
+            .workspace
+            .preview_panel
+            .preview_loaded_lines
+            .clear();
+        self.state.workspace.preview_panel.preview_visible_range = 0..0;
+        self.state.workspace.preview_panel.preview_sizes =
+            Rc::new(vec![size(px(100.), preview_line_height())]);
         self.preview_scroll_handle.scroll_to_top_of_item(0);
         cx.notify();
     }
