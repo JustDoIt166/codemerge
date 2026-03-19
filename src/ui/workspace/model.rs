@@ -73,6 +73,7 @@ pub(super) struct TreeRowViewModel {
     pub match_range: Option<Range<usize>>,
     pub match_kind: Option<FilterMatchKind>,
     pub matched_descendants: usize,
+    pub guide_continuations: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -275,16 +276,30 @@ pub(super) fn project_tree_panel(
         expanded_ids,
         preview_file_ids: &data.preview_file_ids,
     };
-    let mut rows = Vec::new();
-    let mut items = Vec::new();
-    let mut visible_summary = TreeCountSummary::default();
+    let mut projected_roots = Vec::new();
 
     for node in &data.index.roots {
-        if let Some(item) =
-            build_tree_projection_node(node, &context, 0, true, &mut rows, &mut visible_summary)
-        {
-            items.push(item);
+        if let Some(projected) = build_tree_projection_node(node, &context) {
+            projected_roots.push(projected);
         }
+    }
+
+    let items = projected_roots
+        .iter()
+        .map(ProjectedTreeNode::to_tree_item)
+        .collect::<Vec<_>>();
+    let mut rows = Vec::new();
+    let mut visible_summary = TreeCountSummary::default();
+    let last_root_ix = projected_roots.len().saturating_sub(1);
+    for (ix, node) in projected_roots.iter().enumerate() {
+        append_visible_tree_rows(
+            node,
+            0,
+            &[],
+            ix < last_root_ix,
+            &mut rows,
+            &mut visible_summary,
+        );
     }
 
     let rows_by_id = rows
@@ -347,11 +362,7 @@ pub(super) fn apply_tree_interaction(
 fn build_tree_projection_node(
     node: &IndexedTreeNode,
     context: &TreeProjectionContext<'_>,
-    depth: usize,
-    is_visible: bool,
-    rows: &mut Vec<TreeRowViewModel>,
-    summary: &mut TreeCountSummary,
-) -> Option<TreeItem> {
+) -> Option<ProjectedTreeNode> {
     let filter_match = filter_node(node, context.filter);
     let is_expanded = if node.is_folder {
         if !context.filter.is_empty() {
@@ -371,66 +382,37 @@ fn build_tree_projection_node(
     } else {
         icon_kind_for_extension(extension_for_path(node.relative_path.as_str()))
     };
-    let mut child_items = Vec::new();
-    let mut visible_child_rows = Vec::new();
-    let mut matched_descendants = 0;
-    let child_is_visible = is_visible && node.is_folder && is_expanded;
+    let mut children = Vec::new();
     for child in &node.children {
-        if let Some(item) = build_tree_projection_node(
-            child,
-            context,
-            depth + 1,
-            child_is_visible,
-            &mut visible_child_rows,
-            summary,
-        ) {
-            matched_descendants += 1;
-            child_items.push(item);
+        if let Some(projected) = build_tree_projection_node(child, context) {
+            children.push(projected);
         }
     }
 
-    if filter_match.is_none() && child_items.is_empty() && !context.filter.is_empty() {
+    if filter_match.is_none() && children.is_empty() && !context.filter.is_empty() {
         return None;
     }
 
-    let item = if node.is_folder {
-        TreeItem::new(node.id.clone(), node.label.clone())
-            .expanded(is_expanded)
-            .children(child_items)
-    } else {
-        TreeItem::new(node.id.clone(), node.label.clone())
-    };
-
-    if is_visible {
-        if node.is_folder {
-            summary.folders += 1;
-        } else {
-            summary.files += 1;
-        }
-        rows.push(TreeRowViewModel {
-            node_id: SharedString::from(node.id.clone()),
-            label: SharedString::from(node.label.clone()),
-            relative_path: SharedString::from(node.relative_path.clone()),
-            is_folder: node.is_folder,
-            depth,
-            extension: extension_for_path(node.relative_path.as_str()).map(SharedString::from),
-            preview_file_id: context
-                .preview_file_ids
-                .get(node.relative_path.as_str())
-                .copied(),
-            child_file_count: node.stats.descendant_files,
-            child_folder_count: node.stats.descendant_folders,
-            icon_kind,
-            is_expanded,
-            is_filter_match: filter_match.is_some(),
-            match_range: filter_match.as_ref().map(|matched| matched.range.clone()),
-            match_kind: filter_match.as_ref().map(|matched| matched.kind),
-            matched_descendants,
-        });
-        rows.extend(visible_child_rows);
-    }
-
-    Some(item)
+    Some(ProjectedTreeNode {
+        node_id: node.id.clone(),
+        label: node.label.clone(),
+        relative_path: node.relative_path.clone(),
+        is_folder: node.is_folder,
+        extension: extension_for_path(node.relative_path.as_str()),
+        preview_file_id: context
+            .preview_file_ids
+            .get(node.relative_path.as_str())
+            .copied(),
+        child_file_count: node.stats.descendant_files,
+        child_folder_count: node.stats.descendant_folders,
+        icon_kind,
+        is_expanded,
+        is_filter_match: filter_match.is_some(),
+        match_range: filter_match.as_ref().map(|matched| matched.range.clone()),
+        match_kind: filter_match.as_ref().map(|matched| matched.kind),
+        matched_descendants: children.len(),
+        children,
+    })
 }
 
 fn preview_file_id_map(preview_files: &[PreviewFileEntry]) -> HashMap<String, u32> {
@@ -449,6 +431,97 @@ struct TreeProjectionContext<'a> {
     filter: &'a str,
     expanded_ids: &'a BTreeSet<String>,
     preview_file_ids: &'a HashMap<String, u32>,
+}
+
+#[derive(Clone, Debug)]
+struct ProjectedTreeNode {
+    node_id: String,
+    label: String,
+    relative_path: String,
+    is_folder: bool,
+    extension: Option<String>,
+    preview_file_id: Option<u32>,
+    child_file_count: usize,
+    child_folder_count: usize,
+    icon_kind: TreeIconKind,
+    is_expanded: bool,
+    is_filter_match: bool,
+    match_range: Option<Range<usize>>,
+    match_kind: Option<FilterMatchKind>,
+    matched_descendants: usize,
+    children: Vec<ProjectedTreeNode>,
+}
+
+impl ProjectedTreeNode {
+    fn to_tree_item(&self) -> TreeItem {
+        if self.is_folder {
+            TreeItem::new(self.node_id.clone(), self.label.clone())
+                .expanded(self.is_expanded)
+                .children(
+                    self.children
+                        .iter()
+                        .map(ProjectedTreeNode::to_tree_item)
+                        .collect::<Vec<_>>(),
+                )
+        } else {
+            TreeItem::new(self.node_id.clone(), self.label.clone())
+        }
+    }
+}
+
+fn append_visible_tree_rows(
+    node: &ProjectedTreeNode,
+    depth: usize,
+    ancestor_guides: &[bool],
+    has_next_sibling: bool,
+    rows: &mut Vec<TreeRowViewModel>,
+    summary: &mut TreeCountSummary,
+) {
+    if node.is_folder {
+        summary.folders += 1;
+    } else {
+        summary.files += 1;
+    }
+
+    let mut guide_continuations = ancestor_guides.to_vec();
+    if depth > 0 {
+        guide_continuations.push(has_next_sibling);
+    }
+
+    rows.push(TreeRowViewModel {
+        node_id: SharedString::from(node.node_id.clone()),
+        label: SharedString::from(node.label.clone()),
+        relative_path: SharedString::from(node.relative_path.clone()),
+        is_folder: node.is_folder,
+        depth,
+        extension: node.extension.clone().map(SharedString::from),
+        preview_file_id: node.preview_file_id,
+        child_file_count: node.child_file_count,
+        child_folder_count: node.child_folder_count,
+        icon_kind: node.icon_kind,
+        is_expanded: node.is_expanded,
+        is_filter_match: node.is_filter_match,
+        match_range: node.match_range.clone(),
+        match_kind: node.match_kind,
+        matched_descendants: node.matched_descendants,
+        guide_continuations: guide_continuations.clone(),
+    });
+
+    if !(node.is_folder && node.is_expanded) {
+        return;
+    }
+
+    let last_child_ix = node.children.len().saturating_sub(1);
+    for (ix, child) in node.children.iter().enumerate() {
+        append_visible_tree_rows(
+            child,
+            depth + 1,
+            &guide_continuations,
+            ix < last_child_ix,
+            rows,
+            summary,
+        );
+    }
 }
 
 fn filter_node(node: &IndexedTreeNode, filter: &str) -> Option<FilterMatch> {
@@ -711,9 +784,27 @@ mod tests {
             .iter()
             .find(|row| row.node_id.as_ref() == "src")
             .expect("src row");
+        let nested = render
+            .rows
+            .iter()
+            .find(|row| row.node_id.as_ref() == "src/nested")
+            .expect("nested row");
+        let nested_file = render
+            .rows
+            .iter()
+            .find(|row| row.node_id.as_ref() == "src/nested/lib.rs")
+            .expect("nested file row");
+        let main = render
+            .rows
+            .iter()
+            .find(|row| row.node_id.as_ref() == "src/main.rs")
+            .expect("main row");
 
         assert_eq!(src.child_folder_count, 1);
         assert_eq!(src.child_file_count, 2);
+        assert_eq!(nested.guide_continuations, vec![true]);
+        assert_eq!(nested_file.guide_continuations, vec![true, false]);
+        assert_eq!(main.guide_continuations, vec![false]);
     }
 
     #[test]
@@ -743,6 +834,8 @@ mod tests {
                 files: 2,
             }
         );
+        assert_eq!(render.rows[1].guide_continuations, vec![true]);
+        assert_eq!(render.rows[2].guide_continuations, vec![false]);
     }
 
     #[test]

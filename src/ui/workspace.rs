@@ -2,6 +2,7 @@ mod actions;
 mod background;
 mod model;
 mod panels;
+mod tree_palette;
 mod view;
 
 use std::rc::Rc;

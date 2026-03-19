@@ -14,6 +14,7 @@ use super::model::{
     BlacklistSectionViewModel, BlacklistTagViewModel, FilterMatchKind, TreeCountSummary,
     TreeRowViewModel,
 };
+use super::tree_palette::{ResolvedTreeRowPalette, TreeRowPalette};
 use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
@@ -25,22 +26,14 @@ pub(super) fn render_tree_row(
     language: Language,
     cx: &App,
 ) -> ListItem {
-    let chevron = if row.is_folder {
-        if row.is_expanded {
-            IconName::ChevronDown
-        } else {
-            IconName::ChevronRight
-        }
+    let chevron = row.is_folder.then_some(if row.is_expanded {
+        IconName::ChevronDown
     } else {
-        IconName::Dash
-    };
-    let guide_color = if selected {
-        cx.theme().primary.opacity(0.35)
-    } else {
-        cx.theme().border.opacity(0.65)
-    };
-    let (icon_bg, icon_fg) = tree_icon_palette(row, selected, cx);
+        IconName::ChevronRight
+    });
     let badge = tree_filter_badge(row, language);
+    let palette = TreeRowPalette::new(selected, row.icon_kind, row.is_filter_match, row.match_kind)
+        .resolve(cx.theme());
 
     ListItem::new(ix)
         .w_full()
@@ -51,41 +44,22 @@ pub(super) fn render_tree_row(
                 .w_full()
                 .items_center()
                 .gap_2()
-                .children((0..row.depth).map(|_| {
-                    div()
-                        .flex()
-                        .w(px(12.))
-                        .h(px(28.))
-                        .items_center()
-                        .justify_center()
-                        .child(div().w(px(1.)).h_full().bg(guide_color))
-                        .into_any_element()
-                }))
+                .children(render_tree_guides(row, &palette))
                 .child(
                     div()
                         .flex()
                         .w(px(14.))
                         .items_center()
                         .justify_center()
-                        .text_color(if row.is_folder {
-                            icon_fg
-                        } else {
-                            cx.theme().muted_foreground.opacity(0.45)
-                        })
-                        .child(chevron),
+                        .text_color(palette.chevron_fg)
+                        .when_some(chevron, |this, chevron| this.child(chevron)),
                 )
                 .child(
                     div()
-                        .w(px(3.))
-                        .h(px(22.))
+                        .w(px(2.))
+                        .h(px(18.))
                         .rounded(px(999.))
-                        .bg(if selected {
-                            cx.theme().primary
-                        } else if row.is_folder && row.is_expanded {
-                            cx.theme().border
-                        } else {
-                            cx.theme().transparent
-                        }),
+                        .bg(palette.selection_bar_bg),
                 )
                 .child(
                     div()
@@ -95,11 +69,11 @@ pub(super) fn render_tree_row(
                         .rounded(px(8.))
                         .items_center()
                         .justify_center()
-                        .bg(icon_bg)
+                        .bg(palette.icon_bg)
                         .child(
                             row.icon_kind
                                 .icon()
-                                .text_color(icon_fg)
+                                .text_color(palette.icon_fg)
                                 .with_size(Size::Small),
                         ),
                 )
@@ -116,8 +90,7 @@ pub(super) fn render_tree_row(
                                     row.label.as_ref(),
                                     row.match_kind,
                                     row.match_range.as_ref(),
-                                    selected,
-                                    cx,
+                                    &palette,
                                 ))
                                 .when_some(badge, |this, badge| {
                                     this.child(
@@ -126,16 +99,8 @@ pub(super) fn render_tree_row(
                                             .px_2()
                                             .py(px(1.))
                                             .rounded(px(999.))
-                                            .bg(if selected {
-                                                cx.theme().primary_foreground.opacity(0.15)
-                                            } else {
-                                                cx.theme().accent.opacity(0.12)
-                                            })
-                                            .text_color(if selected {
-                                                cx.theme().primary_foreground
-                                            } else {
-                                                cx.theme().accent
-                                            })
+                                            .bg(palette.badge_bg)
+                                            .text_color(palette.badge_fg)
                                             .child(badge),
                                     )
                                 }),
@@ -149,11 +114,7 @@ pub(super) fn render_tree_row(
                                     div()
                                         .min_w(px(0.))
                                         .text_xs()
-                                        .text_color(if selected {
-                                            cx.theme().primary_foreground.opacity(0.8)
-                                        } else {
-                                            cx.theme().muted_foreground
-                                        })
+                                        .text_color(palette.secondary_fg)
                                         .truncate()
                                         .child(
                                             if matches!(row.match_kind, Some(FilterMatchKind::Path))
@@ -173,16 +134,8 @@ pub(super) fn render_tree_row(
                                             .px_2()
                                             .py(px(1.))
                                             .rounded(px(999.))
-                                            .bg(if selected {
-                                                cx.theme().primary_foreground.opacity(0.12)
-                                            } else {
-                                                cx.theme().secondary
-                                            })
-                                            .text_color(if selected {
-                                                cx.theme().primary_foreground
-                                            } else {
-                                                cx.theme().muted_foreground
-                                            })
+                                            .bg(palette.extension_bg)
+                                            .text_color(palette.extension_fg)
                                             .child(
                                                 row.extension
                                                     .clone()
@@ -193,6 +146,85 @@ pub(super) fn render_tree_row(
                         ),
                 ),
         )
+}
+
+fn render_tree_guides(row: &TreeRowViewModel, palette: &ResolvedTreeRowPalette) -> Vec<AnyElement> {
+    let last_ix = row.guide_continuations.len().saturating_sub(1);
+    row.guide_continuations
+        .iter()
+        .enumerate()
+        .map(|(depth, continues)| {
+            if depth == last_ix {
+                render_branch_guide(depth, *continues, palette)
+            } else {
+                render_ancestor_guide(depth, *continues, palette)
+            }
+        })
+        .collect()
+}
+
+fn render_ancestor_guide(
+    depth: usize,
+    continues: bool,
+    palette: &ResolvedTreeRowPalette,
+) -> AnyElement {
+    let color = palette.guide_color(depth);
+    div()
+        .flex()
+        .w(px(10.))
+        .h(px(28.))
+        .items_center()
+        .justify_center()
+        .child(if continues {
+            render_vertical_guide_line(px(28.), color)
+        } else {
+            div().w(px(1.)).h(px(28.)).into_any_element()
+        })
+        .into_any_element()
+}
+
+fn render_branch_guide(
+    depth: usize,
+    continues: bool,
+    palette: &ResolvedTreeRowPalette,
+) -> AnyElement {
+    let color = palette.guide_color(depth);
+    div()
+        .flex()
+        .w(px(10.))
+        .h(px(28.))
+        .items_center()
+        .justify_center()
+        .child(
+            v_flex()
+                .w(px(10.))
+                .h_full()
+                .items_center()
+                .justify_center()
+                .child(render_vertical_guide_line(px(13.), color))
+                .child(
+                    h_flex()
+                        .w(px(10.))
+                        .h(px(1.))
+                        .items_center()
+                        .child(div().w(px(4.)).h(px(1.)))
+                        .child(render_horizontal_guide_line(px(6.), color)),
+                )
+                .child(if continues {
+                    render_vertical_guide_line(px(14.), color)
+                } else {
+                    div().w(px(1.)).h(px(14.)).into_any_element()
+                }),
+        )
+        .into_any_element()
+}
+
+fn render_vertical_guide_line(length: gpui::Pixels, color: Hsla) -> AnyElement {
+    div().w(px(1.)).h(length).bg(color).into_any_element()
+}
+
+fn render_horizontal_guide_line(length: gpui::Pixels, color: Hsla) -> AnyElement {
+    div().w(length).h(px(1.)).bg(color).into_any_element()
 }
 
 fn tree_secondary_label(row: &TreeRowViewModel, language: Language) -> String {
@@ -231,49 +263,15 @@ fn tree_filter_badge(row: &TreeRowViewModel, language: Language) -> Option<Strin
     ))
 }
 
-fn tree_icon_palette(row: &TreeRowViewModel, selected: bool, cx: &App) -> (Hsla, Hsla) {
-    if selected {
-        return (
-            cx.theme().primary_foreground.opacity(0.18),
-            cx.theme().primary_foreground,
-        );
-    }
-
-    match row.icon_kind {
-        super::model::TreeIconKind::FolderOpen => {
-            (cx.theme().primary.opacity(0.16), cx.theme().primary)
-        }
-        super::model::TreeIconKind::FolderClosed => {
-            (cx.theme().warning.opacity(0.16), cx.theme().warning)
-        }
-        super::model::TreeIconKind::Code => (cx.theme().accent.opacity(0.16), cx.theme().accent),
-        super::model::TreeIconKind::Document => {
-            (cx.theme().primary.opacity(0.12), cx.theme().primary)
-        }
-        super::model::TreeIconKind::Config => {
-            (cx.theme().warning.opacity(0.14), cx.theme().warning)
-        }
-        super::model::TreeIconKind::Data => (cx.theme().accent.opacity(0.12), cx.theme().accent),
-        super::model::TreeIconKind::Media => (cx.theme().danger.opacity(0.12), cx.theme().danger),
-        super::model::TreeIconKind::Text => (cx.theme().secondary, cx.theme().muted_foreground),
-    }
-}
-
 fn render_match_label(
     text: &str,
     match_kind: Option<FilterMatchKind>,
     match_range: Option<&std::ops::Range<usize>>,
-    selected: bool,
-    cx: &App,
+    palette: &ResolvedTreeRowPalette,
 ) -> AnyElement {
-    let text_color = if selected {
-        cx.theme().primary_foreground
-    } else {
-        cx.theme().foreground
-    };
     let base = div()
         .font_semibold()
-        .text_color(text_color)
+        .text_color(palette.label_fg)
         .truncate()
         .whitespace_nowrap();
 
@@ -298,7 +296,7 @@ fn render_match_label(
         .child(
             div()
                 .font_semibold()
-                .text_color(text_color)
+                .text_color(palette.label_fg)
                 .truncate()
                 .child(prefix.to_string()),
         )
@@ -307,22 +305,14 @@ fn render_match_label(
                 .font_semibold()
                 .px_1()
                 .rounded(px(4.))
-                .bg(if selected {
-                    cx.theme().primary_foreground.opacity(0.18)
-                } else {
-                    cx.theme().primary.opacity(0.14)
-                })
-                .text_color(if selected {
-                    cx.theme().primary_foreground
-                } else {
-                    cx.theme().primary
-                })
+                .bg(palette.match_bg)
+                .text_color(palette.match_fg)
                 .child(matched.to_string()),
         )
         .child(
             div()
                 .font_semibold()
-                .text_color(text_color)
+                .text_color(palette.label_fg)
                 .truncate()
                 .child(suffix.to_string()),
         )
