@@ -138,6 +138,29 @@ pub(super) struct TreePanelController {
     last_interaction: Option<model::TreeInteractionSnapshot>,
 }
 
+struct RulesPanelController {
+    revision: u64,
+    cache: RulesPanelCache,
+}
+
+struct RulesPanelCache {
+    revision: u64,
+    language: Language,
+    filter: String,
+    sections: Rc<Vec<model::BlacklistSectionViewModel>>,
+}
+
+impl Default for RulesPanelCache {
+    fn default() -> Self {
+        Self {
+            revision: u64::MAX,
+            language: Language::Zh,
+            filter: String::new(),
+            sections: Rc::default(),
+        }
+    }
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
@@ -147,6 +170,7 @@ pub struct Workspace {
     preview_filter_input: Entity<InputState>,
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
+    rules_panel: RulesPanelController,
     side_panel_tab: SidePanelTab,
     narrow_content_tab: NarrowContentTab,
     pending_confirmation: Option<PendingConfirmation>,
@@ -207,6 +231,10 @@ impl Workspace {
             preview_filter_input,
             blacklist_filter_input,
             blacklist_add_input,
+            rules_panel: RulesPanelController {
+                revision: 0,
+                cache: RulesPanelCache::default(),
+            },
             side_panel_tab: SidePanelTab::Results,
             narrow_content_tab: NarrowContentTab::Status,
             pending_confirmation: None,
@@ -254,13 +282,6 @@ impl Workspace {
         self.state.process.preflight_rx.is_some()
             || self.state.process.process_handle.is_some()
             || self.state.workspace.preview_panel.preview_rx.is_some()
-            || (self.state.result.active_tab == crate::domain::ResultTab::Content
-                && self
-                    .state
-                    .workspace
-                    .preview_panel
-                    .preview_document
-                    .is_some())
     }
 
     fn has_inputs(&self) -> bool {
@@ -274,6 +295,37 @@ impl Workspace {
 
     fn clear_pending_confirmation(&mut self) {
         self.pending_confirmation = None;
+    }
+
+    pub(super) fn invalidate_rules_panel_cache(&mut self) {
+        self.rules_panel.revision = self.rules_panel.revision.wrapping_add(1);
+    }
+
+    pub(super) fn refresh_rules_panel_cache(&mut self, cx: &Context<Self>) {
+        let language = self.state.settings.language;
+        let filter = self
+            .blacklist_filter_input
+            .read(cx)
+            .value()
+            .trim()
+            .to_string();
+        let cache = &mut self.rules_panel.cache;
+        if cache.revision == self.rules_panel.revision
+            && cache.language == language
+            && cache.filter == filter
+        {
+            return;
+        }
+
+        cache.sections = Rc::new(model::build_blacklist_sections(
+            &self.state.settings.folder_blacklist,
+            &self.state.settings.ext_blacklist,
+            filter.as_str(),
+            language,
+        ));
+        cache.filter = filter;
+        cache.language = language;
+        cache.revision = self.rules_panel.revision;
     }
 
     pub(super) fn cleanup_result_artifacts(result: &ProcessResult) {

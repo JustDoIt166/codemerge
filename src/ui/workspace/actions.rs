@@ -127,6 +127,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
+            self.invalidate_rules_panel_cache();
             cx.notify();
         }
     }
@@ -152,6 +153,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.state.settings.language = self.state.settings.language.toggle();
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.sync_localized_inputs(window, cx);
         self.push_notice(
@@ -274,6 +276,7 @@ impl Workspace {
                             this.state.settings.folder_blacklist.push(rule);
                         }
                     }
+                    this.invalidate_rules_panel_cache();
                     this.persist_settings_async(cx);
                     this.refresh_preflight(cx);
                     Self::notify_active_window(
@@ -476,6 +479,7 @@ impl Workspace {
         }
         self.blacklist_add_input
             .update(cx, |state, cx| state.set_value("", window, cx));
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.push_notice(
             NotificationType::Success,
@@ -575,6 +579,7 @@ impl Workspace {
                             this.state.settings.folder_blacklist.push(line.to_string());
                         }
                     }
+                    this.invalidate_rules_panel_cache();
                     this.persist_settings_async(cx);
                     this.refresh_preflight(cx);
                     Self::notify_active_window(
@@ -612,6 +617,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         self.state.settings.folder_blacklist = crate::domain::default_folder_blacklist();
         self.state.settings.ext_blacklist = crate::domain::default_ext_blacklist();
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(
@@ -643,6 +649,7 @@ impl Workspace {
         self.clear_pending_confirmation();
         self.state.settings.folder_blacklist.clear();
         self.state.settings.ext_blacklist.clear();
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(
@@ -705,6 +712,7 @@ impl Workspace {
                 .folder_blacklist
                 .retain(|item| item != ".git");
         }
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         cx.notify();
@@ -850,6 +858,7 @@ impl Workspace {
                 .ext_blacklist
                 .retain(|item| item != &value),
         }
+        self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(

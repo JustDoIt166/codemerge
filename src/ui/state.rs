@@ -201,8 +201,13 @@ impl PreviewPanelState {
         self.preview_chunks.clear();
     }
 
-    pub fn set_visible_range(&mut self, range: Range<usize>) {
+    pub fn update_visible_range(&mut self, range: Range<usize>) -> bool {
+        if self.preview_last_visible_range == range {
+            return false;
+        }
+
         self.preview_last_visible_range = range;
+        true
     }
 
     pub fn store_chunk(&mut self, range: Range<usize>, lines: Vec<SharedString>) {
@@ -483,7 +488,7 @@ mod tests {
     #[test]
     fn preview_panel_prunes_far_chunks_and_keeps_nearby_data() {
         let mut state = PreviewPanelState::default();
-        state.set_visible_range(220..260);
+        assert!(state.update_visible_range(220..260));
         state.store_chunk(0..50, (0..50).map(|ix| format!("a-{ix}").into()).collect());
         state.store_chunk(
             100..150,
@@ -517,5 +522,14 @@ mod tests {
                 .iter()
                 .any(|chunk| chunk.range == (250..300))
         );
+    }
+
+    #[test]
+    fn preview_panel_ignores_duplicate_visible_ranges() {
+        let mut state = PreviewPanelState::default();
+
+        assert!(state.update_visible_range(10..20));
+        assert!(!state.update_visible_range(10..20));
+        assert!(state.update_visible_range(11..21));
     }
 }

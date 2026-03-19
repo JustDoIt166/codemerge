@@ -80,7 +80,6 @@ impl Workspace {
             }
         }
 
-        dirty = self.refresh_preview_window(cx) || dirty;
         if dirty {
             cx.notify();
         }
@@ -90,15 +89,6 @@ impl Workspace {
             || self.state.workspace.preview_panel.preview_rx.is_some()
         {
             Some(Duration::from_millis(16))
-        } else if self.state.result.active_tab == ResultTab::Content
-            && self
-                .state
-                .workspace
-                .preview_panel
-                .preview_document
-                .is_some()
-        {
-            Some(Duration::from_millis(33))
         } else {
             None
         };
@@ -466,7 +456,11 @@ impl Workspace {
         true
     }
 
-    fn refresh_preview_window(&mut self, cx: &mut Context<Self>) -> bool {
+    pub(super) fn sync_preview_visible_range(
+        &mut self,
+        visible: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         let Some(document) = &self.state.workspace.preview_panel.preview_document else {
             return false;
         };
@@ -475,30 +469,21 @@ impl Workspace {
             return false;
         }
 
-        let visible = {
-            let scroll_state = self.preview_scroll_handle.0.borrow();
-            let scroll_handle = &scroll_state.base_handle;
-            if scroll_handle.bounds().size.height > gpui::Pixels::ZERO {
-                let start = scroll_handle.top_item().min(line_count.saturating_sub(1));
-                let end = scroll_handle
-                    .bottom_item()
-                    .saturating_add(1)
-                    .min(line_count);
-                start..end.max(start + 1).min(line_count)
-            } else {
-                0..line_count.min(1)
-            }
-        };
-        self.state
-            .workspace
-            .preview_panel
-            .set_visible_range(visible.clone());
-
-        if self
+        let start = visible.start.min(line_count.saturating_sub(1));
+        let end = visible.end.max(start + 1).min(line_count);
+        let visible = start..end;
+        let changed = self
             .state
             .workspace
             .preview_panel
-            .has_loaded_range(&visible)
+            .update_visible_range(visible.clone());
+
+        if !changed
+            || self
+                .state
+                .workspace
+                .preview_panel
+                .has_loaded_range(&visible)
         {
             return false;
         }

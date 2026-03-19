@@ -633,18 +633,8 @@ impl Workspace {
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.state.settings.language;
-        let filter = self
-            .blacklist_filter_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let blacklist_sections = super::model::build_blacklist_sections(
-            &self.state.settings.folder_blacklist,
-            &self.state.settings.ext_blacklist,
-            filter.as_str(),
-            language,
-        );
+        self.refresh_rules_panel_cache(cx);
+        let blacklist_sections = self.rules_panel.cache.sections.clone();
 
         v_flex()
             .gap_3()
@@ -823,9 +813,10 @@ impl Workspace {
         let filter_active = !tree_filter.is_empty();
         let has_result = self.state.result.result.is_some();
         let has_visible_nodes = !self.tree_panel.render_state.rows.is_empty();
-        let rows_by_id = Rc::new(self.tree_panel.render_state.rows_by_id.clone());
+        let view = cx.entity();
         let tree_view = tree(&self.tree_panel.state, move |ix, entry, selected, _, cx| {
-            let Some(mut row) = rows_by_id.get(entry.item().id.as_ref()).cloned() else {
+            let workspace = view.read(cx);
+            let Some(mut row) = workspace.tree_panel.render_state.rows.get(ix).cloned() else {
                 return ListItem::new(ix).child(entry.item().label.clone());
             };
             row.is_expanded = entry.is_expanded();
@@ -1050,16 +1041,15 @@ impl Workspace {
                     .rounded(cx.theme().radius)
                     .child(
                         uniform_list("preview-lines", line_count, move |visible_range, _, app| {
+                            view.update(app, |workspace, cx| {
+                                workspace.sync_preview_visible_range(visible_range.clone(), cx);
+                            });
                             let workspace = view.read(app);
+                            let preview_panel = &workspace.state.workspace.preview_panel;
                             visible_range
                                 .filter(|ix| *ix < line_count)
                                 .map(|ix| {
-                                    let line = workspace
-                                        .state
-                                        .workspace
-                                        .preview_panel
-                                        .line_at(ix)
-                                        .unwrap_or_default();
+                                    let line = preview_panel.line_at(ix).unwrap_or_default();
                                     h_flex()
                                         .gap_3()
                                         .px_3()
