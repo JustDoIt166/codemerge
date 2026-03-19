@@ -879,14 +879,8 @@ impl Workspace {
             );
             return;
         };
-        let extension = match self.state.settings.options.output_format {
-            crate::domain::OutputFormat::Xml => "xml",
-            crate::domain::OutputFormat::Markdown => "md",
-            crate::domain::OutputFormat::PlainText => "txt",
-            crate::domain::OutputFormat::Default => "txt",
-        };
         let source_path = path.clone();
-        let suggested_name = format!("codemerge-output.{extension}");
+        let suggested_name = result.suggested_result_name.clone();
         let language = self.state.settings.language;
         let _ = window;
         cx.spawn(async move |this, cx| {

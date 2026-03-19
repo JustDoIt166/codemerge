@@ -20,6 +20,7 @@ use crate::processor::walker::{
 use crate::services::runtime::RUNTIME;
 use crate::services::tree::build_tree_nodes;
 use crate::utils::i18n::tr;
+use crate::utils::path::suggested_merge_result_name;
 use crate::utils::temp_file;
 
 #[derive(Debug)]
@@ -130,6 +131,10 @@ async fn run_process_with_walker(
 ) -> Result<ProcessResult, AppError> {
     let lang = request.language;
     let tree_nodes = build_tree_nodes(&walker.candidates);
+    let suggested_result_name = suggested_merge_result_name(
+        request.selected_folder.as_deref(),
+        request.options.output_format,
+    );
     let mut stats = ProcessingStats {
         skipped_files: walker.skipped,
         ..ProcessingStats::default()
@@ -141,6 +146,7 @@ async fn run_process_with_walker(
             tree_string: walker.tree,
             tree_nodes,
             merged_content_path: None,
+            suggested_result_name,
             file_details: Vec::new(),
             preview_files: Vec::new(),
             preview_blob_dir: None,
@@ -264,6 +270,7 @@ async fn run_process_with_walker(
         tree_string: walker.tree,
         tree_nodes,
         merged_content_path: Some(result_path),
+        suggested_result_name,
         file_details,
         preview_files,
         preview_blob_dir: Some(preview_dir),

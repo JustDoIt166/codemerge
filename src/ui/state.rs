@@ -360,6 +360,7 @@ mod tests {
             tree_string: String::new(),
             tree_nodes: Vec::new(),
             merged_content_path: Some(PathBuf::from("merged.txt")),
+            suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: vec![PreviewFileEntry {
                 id: 1,
@@ -448,6 +449,7 @@ mod tests {
             tree_string: String::new(),
             tree_nodes: Vec::new(),
             merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: Vec::new(),
             preview_blob_dir: None,

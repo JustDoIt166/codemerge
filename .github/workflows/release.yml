@@ -76,6 +76,13 @@ jobs:
       - name: Install ImageMagick
         run: choco install imagemagick -y --no-progress
 
+      - name: Generate Windows app icon
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          magick assets/fonts/logo.svg -background none -define icon:auto-resize=16,24,32,48,64,128,256 assets/app.ico
+
       - name: Build binary
         run: cargo build --release --locked
 

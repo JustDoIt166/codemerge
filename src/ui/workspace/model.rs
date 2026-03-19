@@ -649,6 +649,7 @@ mod tests {
             tree_string: String::new(),
             tree_nodes: Vec::new(),
             merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".to_string(),
             file_details: Vec::new(),
             preview_files: vec![PreviewFileEntry {
                 id: 7,
@@ -955,6 +956,7 @@ mod tests {
                 },
             ],
             merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".to_string(),
             file_details: Vec::new(),
             preview_files: vec![
                 PreviewFileEntry {
@@ -1020,6 +1022,7 @@ mod tests {
                 },
             ],
             merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".to_string(),
             file_details: Vec::new(),
             preview_files: vec![
                 PreviewFileEntry {
