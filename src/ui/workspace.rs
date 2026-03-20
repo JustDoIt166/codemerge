@@ -8,9 +8,9 @@ mod view;
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement, ParentElement,
-    Pixels, Render, SharedString, Styled, Subscription, Task, Timer, UniformListScrollHandle,
-    Window, px, size,
+    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
+    ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task, Timer,
+    UniformListScrollHandle, Window, px, size,
 };
 use gpui_component::{
     WindowExt as _,
@@ -161,6 +161,20 @@ impl Default for RulesPanelCache {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WorkspacePanelKind {
+    Input,
+    Status,
+    Right,
+    CompactContent,
+}
+
+struct WorkspacePanelView {
+    workspace: Entity<Workspace>,
+    kind: WorkspacePanelKind,
+    _subscriptions: Vec<Subscription>,
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
@@ -171,11 +185,16 @@ pub struct Workspace {
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
+    input_panel_view: Entity<WorkspacePanelView>,
+    status_panel_view: Entity<WorkspacePanelView>,
+    right_panel_view: Entity<WorkspacePanelView>,
+    compact_content_view: Entity<WorkspacePanelView>,
     side_panel_tab: SidePanelTab,
     narrow_content_tab: NarrowContentTab,
     pending_confirmation: Option<PendingConfirmation>,
     poll_task: Option<Task<()>>,
     poll_task_running: bool,
+    poll_idle_streak: u8,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -200,6 +219,23 @@ impl Workspace {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table =
             cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
+        let workspace_entity = cx.entity();
+        let input_panel_view = cx.new(|cx| {
+            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Input, cx)
+        });
+        let status_panel_view = cx.new(|cx| {
+            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Status, cx)
+        });
+        let right_panel_view = cx.new(|cx| {
+            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Right, cx)
+        });
+        let compact_content_view = cx.new(|cx| {
+            WorkspacePanelView::new(
+                workspace_entity.clone(),
+                WorkspacePanelKind::CompactContent,
+                cx,
+            )
+        });
         let subscriptions = vec![
             cx.subscribe_in(&tree_filter_input, window, Self::on_tree_filter_event),
             cx.subscribe_in(&preview_filter_input, window, Self::on_preview_filter_event),
@@ -235,11 +271,16 @@ impl Workspace {
                 revision: 0,
                 cache: RulesPanelCache::default(),
             },
+            input_panel_view,
+            status_panel_view,
+            right_panel_view,
+            compact_content_view,
             side_panel_tab: SidePanelTab::Results,
             narrow_content_tab: NarrowContentTab::Status,
             pending_confirmation: None,
             poll_task: None,
             poll_task_running: false,
+            poll_idle_streak: 0,
             _subscriptions: subscriptions,
         };
         if matches!(
@@ -364,6 +405,45 @@ impl Workspace {
         if !self.is_processing() && self.state.process.ui_status == ProcessUiStatus::Idle {
             self.state.process.processing_current_file = tr(language, "status_ready").to_string();
         }
+    }
+}
+
+impl WorkspacePanelView {
+    fn new(workspace: Entity<Workspace>, kind: WorkspacePanelKind, cx: &mut Context<Self>) -> Self {
+        let subscriptions = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
+        Self {
+            workspace,
+            kind,
+            _subscriptions: subscriptions,
+        }
+    }
+
+    fn render_workspace_panel(
+        &mut self,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        self.workspace
+            .update(cx, |workspace, workspace_cx| match self.kind {
+                WorkspacePanelKind::Input => workspace
+                    .render_input_panel(workspace_cx)
+                    .into_any_element(),
+                WorkspacePanelKind::Status => workspace
+                    .render_status_panel(workspace_cx)
+                    .into_any_element(),
+                WorkspacePanelKind::Right => workspace
+                    .render_right_panel(workspace_cx)
+                    .into_any_element(),
+                WorkspacePanelKind::CompactContent => workspace
+                    .render_compact_content_panel(workspace_cx)
+                    .into_any_element(),
+            })
+    }
+}
+
+impl Render for WorkspacePanelView {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_workspace_panel(window, cx)
     }
 }
 

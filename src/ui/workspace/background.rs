@@ -16,6 +16,7 @@ use crate::utils::i18n::tr;
 impl Workspace {
     pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
         let mut dirty = false;
+        let mut received_events = false;
 
         if let Some(rx) = self.state.process.preflight_rx.take() {
             let mut keep = true;
@@ -24,6 +25,7 @@ impl Workspace {
                     Ok(event) => {
                         self.apply_preflight_event(event);
                         dirty = true;
+                        received_events = true;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -52,6 +54,7 @@ impl Workspace {
             }
             for event in events {
                 dirty = true;
+                received_events = true;
                 finish_processing = self.apply_process_event(event, cx) || finish_processing;
             }
         }
@@ -65,6 +68,7 @@ impl Workspace {
             loop {
                 match rx.try_recv() {
                     Ok(event) => {
+                        received_events = true;
                         dirty = self.apply_preview_event(event) || dirty;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -84,11 +88,22 @@ impl Workspace {
             cx.notify();
         }
 
-        let next_delay = if self.state.process.preflight_rx.is_some()
+        let active = self.state.process.preflight_rx.is_some()
             || self.state.process.process_handle.is_some()
-            || self.state.workspace.preview_panel.preview_rx.is_some()
-        {
-            Some(Duration::from_millis(16))
+            || self.state.workspace.preview_panel.preview_rx.is_some();
+        if active {
+            self.poll_idle_streak = if received_events {
+                0
+            } else {
+                self.poll_idle_streak.saturating_add(1)
+            };
+        }
+        let next_delay = if active {
+            Some(match self.poll_idle_streak {
+                0..=1 => Duration::from_millis(16),
+                2..=5 => Duration::from_millis(33),
+                _ => Duration::from_millis(66),
+            })
         } else {
             None
         };
@@ -96,6 +111,7 @@ impl Workspace {
         if next_delay.is_none() {
             self.poll_task_running = false;
             self.poll_task = None;
+            self.poll_idle_streak = 0;
         }
 
         next_delay
@@ -405,17 +421,22 @@ impl Workspace {
         }
     }
 
-    fn padded_preview_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
+    fn preview_request_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
         if line_count == 0 {
             return 0..0;
         }
+        let bucket = crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES;
         let start = range.start.min(line_count.saturating_sub(1));
         let end = range.end.max(start + 1).min(line_count);
-        let visible_len = end.saturating_sub(start).max(1);
-        let preload_before = visible_len.max(64);
-        let preload_after = visible_len.saturating_mul(2).max(128);
+        let bucket_start = (start / bucket) * bucket;
+        let bucket_end = end
+            .saturating_sub(1)
+            .checked_div(bucket)
+            .map(|ix| (ix + 1) * bucket)
+            .unwrap_or(bucket)
+            .min(line_count);
 
-        start.saturating_sub(preload_before)..(end + preload_after).min(line_count)
+        bucket_start.saturating_sub(bucket)..(bucket_end + bucket * 2).min(line_count)
     }
 
     fn request_preview_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> bool {
@@ -426,7 +447,7 @@ impl Workspace {
             return false;
         };
 
-        let padded = self.padded_preview_range(range, document.line_count());
+        let padded = self.preview_request_range(range, document.line_count());
         if padded.start >= padded.end {
             return false;
         }
@@ -476,14 +497,14 @@ impl Workspace {
             .state
             .workspace
             .preview_panel
-            .update_visible_range(visible.clone());
+            .update_visible_range(visible.clone(), line_count);
 
         if !changed
             || self
                 .state
                 .workspace
                 .preview_panel
-                .has_loaded_range(&visible)
+                .has_loaded_range(&self.preview_request_range(visible.clone(), line_count))
         {
             return false;
         }
@@ -518,9 +539,10 @@ impl Workspace {
             revision: self.state.workspace.preview_panel.preview_revision,
             file_id,
             path: entry.preview_blob_path.clone(),
-            initial_range: 0..200,
+            initial_range: 0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2,
         }));
-        self.state.workspace.preview_panel.preview_requested_range = Some(0..200);
+        self.state.workspace.preview_panel.preview_requested_range =
+            Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.workspace.preview_panel.preview_document = None;
         self.state
             .workspace

@@ -196,17 +196,19 @@ pub struct PreviewPanelState {
 
 impl PreviewPanelState {
     const MAX_CHUNKS: usize = 3;
+    pub const VISIBLE_BUCKET_LINES: usize = 192;
 
     pub fn clear_loaded_chunks(&mut self) {
         self.preview_chunks.clear();
     }
 
-    pub fn update_visible_range(&mut self, range: Range<usize>) -> bool {
-        if self.preview_last_visible_range == range {
+    pub fn update_visible_range(&mut self, range: Range<usize>, line_count: usize) -> bool {
+        let bucketed = bucketize_range(range, Self::VISIBLE_BUCKET_LINES, line_count);
+        if self.preview_last_visible_range == bucketed {
             return false;
         }
 
-        self.preview_last_visible_range = range;
+        self.preview_last_visible_range = bucketed;
         true
     }
 
@@ -307,6 +309,23 @@ impl WorkspaceState {
 
 fn range_center(range: &Range<usize>) -> usize {
     range.start + (range.end.saturating_sub(range.start) / 2)
+}
+
+fn bucketize_range(range: Range<usize>, bucket_lines: usize, line_count: usize) -> Range<usize> {
+    if line_count == 0 || bucket_lines == 0 {
+        return 0..0;
+    }
+
+    let start = range.start.min(line_count.saturating_sub(1));
+    let end = range.end.max(start + 1).min(line_count);
+    let bucket_start = (start / bucket_lines) * bucket_lines;
+    let bucket_end = end
+        .saturating_sub(1)
+        .checked_div(bucket_lines)
+        .map(|bucket| (bucket + 1) * bucket_lines)
+        .unwrap_or(bucket_lines)
+        .min(line_count);
+    bucket_start..bucket_end.max(bucket_start + 1).min(line_count)
 }
 
 #[cfg(test)]
@@ -488,7 +507,7 @@ mod tests {
     #[test]
     fn preview_panel_prunes_far_chunks_and_keeps_nearby_data() {
         let mut state = PreviewPanelState::default();
-        assert!(state.update_visible_range(220..260));
+        assert!(state.update_visible_range(220..260, 400));
         state.store_chunk(0..50, (0..50).map(|ix| format!("a-{ix}").into()).collect());
         state.store_chunk(
             100..150,
@@ -528,8 +547,9 @@ mod tests {
     fn preview_panel_ignores_duplicate_visible_ranges() {
         let mut state = PreviewPanelState::default();
 
-        assert!(state.update_visible_range(10..20));
-        assert!(!state.update_visible_range(10..20));
-        assert!(state.update_visible_range(11..21));
+        assert!(state.update_visible_range(10..20, 500));
+        assert!(!state.update_visible_range(10..20, 500));
+        assert!(!state.update_visible_range(11..21, 500));
+        assert!(state.update_visible_range(220..260, 500));
     }
 }

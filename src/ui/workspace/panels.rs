@@ -1011,8 +1011,6 @@ impl Workspace {
             .map(|row| row.display_path.clone())
             .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
         let line_count = document.line_count();
-        let view = cx.entity();
-
         v_flex()
             .gap_2()
             .flex_1()
@@ -1040,32 +1038,43 @@ impl Workspace {
                     .border_color(cx.theme().border)
                     .rounded(cx.theme().radius)
                     .child(
-                        uniform_list("preview-lines", line_count, move |visible_range, _, app| {
-                            view.update(app, |workspace, cx| {
-                                workspace.sync_preview_visible_range(visible_range.clone(), cx);
-                            });
-                            let workspace = view.read(app);
-                            let preview_panel = &workspace.state.workspace.preview_panel;
-                            visible_range
-                                .filter(|ix| *ix < line_count)
-                                .map(|ix| {
-                                    let line = preview_panel.line_at(ix).unwrap_or_default();
-                                    h_flex()
-                                        .gap_3()
-                                        .px_3()
-                                        .h(preview_line_height())
-                                        .font_family(app.theme().mono_font_family.clone())
-                                        .child(
-                                            div()
-                                                .w(px(64.))
-                                                .text_right()
-                                                .text_color(app.theme().muted_foreground)
-                                                .child((ix + 1).to_string()),
-                                        )
-                                        .child(div().flex_1().child(line))
-                                })
-                                .collect()
-                        })
+                        uniform_list(
+                            "preview-lines",
+                            line_count,
+                            cx.processor(
+                                move |workspace,
+                                      visible_range: std::ops::Range<usize>,
+                                      _,
+                                      app_cx| {
+                                    workspace
+                                        .sync_preview_visible_range(visible_range.clone(), app_cx);
+                                    let preview_panel = &workspace.state.workspace.preview_panel;
+                                    let muted = app_cx.theme().muted_foreground;
+                                    let mono = app_cx.theme().mono_font_family.clone();
+
+                                    visible_range
+                                        .filter(|ix| *ix < line_count)
+                                        .map(|ix| {
+                                            let line =
+                                                preview_panel.line_at(ix).unwrap_or_default();
+                                            h_flex()
+                                                .gap_3()
+                                                .px_3()
+                                                .h(preview_line_height())
+                                                .font_family(mono.clone())
+                                                .child(
+                                                    div()
+                                                        .w(px(64.))
+                                                        .text_right()
+                                                        .text_color(muted)
+                                                        .child((ix + 1).to_string()),
+                                                )
+                                                .child(div().flex_1().child(line))
+                                        })
+                                        .collect()
+                                },
+                            ),
+                        )
                         .track_scroll(self.preview_scroll_handle.clone())
                         .with_sizing_behavior(ListSizingBehavior::Auto)
                         .p_2(),
@@ -1119,7 +1128,7 @@ impl Workspace {
     pub(super) fn render_main_content(
         &mut self,
         window: &mut Window,
-        cx: &mut Context<Self>,
+        _cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let is_narrow = window.bounds().size.width < px(1320.);
         let panel_min_height = workspace_panel_min_height(is_narrow);
@@ -1131,12 +1140,12 @@ impl Workspace {
                         .size(px(340.))
                         .size_range(px(280.)..px(420.))
                         .child(panel_viewport(
-                            self.render_input_panel(cx).into_any_element(),
+                            self.input_panel_view.clone().into_any_element(),
                             panel_min_height,
                         )),
                 )
                 .child(resizable_panel().child(panel_viewport(
-                    self.render_compact_content_panel(cx).into_any_element(),
+                    self.compact_content_view.clone().into_any_element(),
                     panel_min_height,
                 )))
         } else {
@@ -1146,7 +1155,7 @@ impl Workspace {
                         .size(px(340.))
                         .size_range(px(280.)..px(460.))
                         .child(panel_viewport(
-                            self.render_input_panel(cx).into_any_element(),
+                            self.input_panel_view.clone().into_any_element(),
                             panel_min_height,
                         )),
                 )
@@ -1155,12 +1164,12 @@ impl Workspace {
                         .size(px(360.))
                         .size_range(px(300.)..px(520.))
                         .child(panel_viewport(
-                            self.render_status_panel(cx).into_any_element(),
+                            self.status_panel_view.clone().into_any_element(),
                             panel_min_height,
                         )),
                 )
                 .child(resizable_panel().child(panel_frame(
-                    self.render_right_panel(cx).into_any_element(),
+                    self.right_panel_view.clone().into_any_element(),
                     panel_min_height,
                 )))
         }
