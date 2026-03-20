@@ -35,6 +35,15 @@ jobs:
             libxcb-shape0-dev \
             libxcb-xfixes0-dev
 
+      - name: Verify tracked assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f assets/app.ico
+          test -f assets/fonts/logo.svg
+          test -d assets/icons
+          test -n "$(find assets/icons -maxdepth 1 -type f | head -n1)"
+
       - name: Build binary
         run: cargo build --release --locked
 
@@ -74,15 +83,15 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
-      - name: Install ImageMagick
-        run: choco install imagemagick -y --no-progress
-
-      - name: Generate Windows app icon
+      - name: Verify tracked assets
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          New-Item -ItemType Directory -Force -Path assets | Out-Null
-          magick assets/fonts/logo.svg -background none -define icon:auto-resize=16,24,32,48,64,128,256 assets/app.ico
+          if (-not (Test-Path "assets/app.ico")) { throw "Missing tracked asset: assets/app.ico" }
+          if (-not (Test-Path "assets/fonts/logo.svg")) { throw "Missing tracked asset: assets/fonts/logo.svg" }
+          if (-not (Test-Path "assets/icons")) { throw "Missing tracked asset directory: assets/icons" }
+          $iconCount = @(Get-ChildItem "assets/icons" -File).Count
+          if ($iconCount -eq 0) { throw "Missing tracked icon files under assets/icons" }
 
       - name: Build binary
         run: cargo build --release --locked
@@ -97,7 +106,7 @@ jobs:
           $version = $env:GITHUB_REF_NAME -replace '^v', ''
           New-Item -ItemType Directory -Force -Path dist | Out-Null
 
-          magick assets/fonts/logo.svg -background none -define icon:auto-resize=16,24,32,48,64,128,256 dist/codemerge.ico
+          Copy-Item "assets/app.ico" "dist/codemerge.ico" -Force
 
           Compress-Archive -Path target/release/codemerge.exe -DestinationPath "dist/codemerge-$version-windows-amd64.zip" -Force
 

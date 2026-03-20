@@ -8,7 +8,10 @@ fn main() {
         PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR must exist"));
     let ico_path = manifest_dir.join("assets/app.ico");
     if !ico_path.exists() {
-        panic!("missing Windows icon asset: {}", ico_path.display());
+        panic!(
+            "missing tracked Windows icon asset: {}. Restore the repository assets before building.",
+            ico_path.display()
+        );
     }
 
     let mut res = winres::WindowsResource::new();

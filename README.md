@@ -68,7 +68,8 @@ cargo test --locked
 - CI 位于 `.github/workflows/ci.yml`
 - Release workflow 位于 `.github/workflows/release.yml`
 - Linux 产物包含 `.deb`
-- Windows 发布链路依赖 ImageMagick 在构建前生成 `assets/app.ico`，用于嵌入可执行文件与安装包图标
+- `assets/` 属于源码资源目录，必须随仓库一起提交；运行时 SVG 图标与 Windows `assets/app.ico` 都从这里读取
+- Windows 构建直接复用仓库内的 `assets/app.ico`，用于嵌入可执行文件与安装包图标
 
 ## 已知限制
 - `.gitignore` 的否定规则 `!` 目前不支持
