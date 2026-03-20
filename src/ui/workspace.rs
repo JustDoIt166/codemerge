@@ -22,11 +22,11 @@ use gpui_component::{
 
 use crate::domain::{Language, PreviewRowViewModel};
 use crate::services::settings::{self, ConfigLoadIssue};
-use crate::ui::models::{ProcessModel, SettingsModel};
+use crate::ui::models::{ProcessModel, SettingsModel, WorkspaceUiModel};
 use crate::ui::preview_model::PreviewModel;
 use crate::ui::result_model::ResultModel;
 use crate::ui::selection_model::SelectionModel;
-use crate::ui::state::{AppState, ProcessUiStatus};
+use crate::ui::state::{AppState, ProcessUiStatus, WorkspaceUiState};
 use crate::utils::i18n::tr;
 
 pub(super) fn preview_line_height() -> Pixels {
@@ -45,25 +45,6 @@ pub(super) fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<
 pub(crate) enum BlacklistItemKind {
     Folder,
     Ext,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum SidePanelTab {
-    Results,
-    Rules,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum NarrowContentTab {
-    Status,
-    Results,
-}
-
-#[derive(Clone, Copy, PartialEq, Eq)]
-pub(super) enum PendingConfirmation {
-    ClearInputs,
-    ResetBlacklist,
-    ClearBlacklist,
 }
 
 pub(super) struct PreviewTableDelegate {
@@ -206,6 +187,7 @@ struct ResultArtifacts {
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
+    ui: Entity<WorkspaceUiModel>,
     selection: Entity<SelectionModel>,
     settings: Entity<SettingsModel>,
     process: Entity<ProcessModel>,
@@ -225,9 +207,6 @@ pub struct Workspace {
     results_panel_view: Entity<ResultsPanelView>,
     right_panel_view: Entity<WorkspacePanelView>,
     compact_content_view: Entity<WorkspacePanelView>,
-    side_panel_tab: SidePanelTab,
-    narrow_content_tab: NarrowContentTab,
-    pending_confirmation: Option<PendingConfirmation>,
     poll_task: Option<Task<()>>,
     poll_task_running: bool,
     poll_idle_streak: u8,
@@ -256,6 +235,7 @@ impl Workspace {
         let preview_table =
             cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
         let settings_model = cx.new(|_| SettingsModel::from_config(cfg.clone()));
+        let ui_model = cx.new(|_| WorkspaceUiModel::new());
         let selection_model = cx.new(|_| SelectionModel::new());
         let process_model =
             cx.new(|_| ProcessModel::new(tr(cfg.language, "status_ready").to_string()));
@@ -266,16 +246,25 @@ impl Workspace {
             InputPanelView::new(
                 workspace_entity.clone(),
                 settings_model.clone(),
+                ui_model.clone(),
                 selection_model.clone(),
                 cx,
             )
         });
-        let status_panel_view =
-            cx.new(|cx| StatusPanelView::new(workspace_entity.clone(), process_model.clone(), cx));
+        let status_panel_view = cx.new(|cx| {
+            StatusPanelView::new(
+                workspace_entity.clone(),
+                process_model.clone(),
+                result_model.clone(),
+                settings_model.clone(),
+                cx,
+            )
+        });
         let rules_panel_view = cx.new(|cx| {
             RulesPanelView::new(
                 workspace_entity.clone(),
                 settings_model.clone(),
+                ui_model.clone(),
                 blacklist_filter_input.clone(),
                 cx,
             )
@@ -285,16 +274,26 @@ impl Workspace {
                 workspace_entity.clone(),
                 result_model.clone(),
                 preview_model.clone(),
+                settings_model.clone(),
+                tree_state.clone(),
                 preview_filter_input.clone(),
                 cx,
             )
         });
         let right_panel_view = cx.new(|cx| {
-            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Right, cx)
+            WorkspacePanelView::new(
+                workspace_entity.clone(),
+                ui_model.clone(),
+                settings_model.clone(),
+                WorkspacePanelKind::Right,
+                cx,
+            )
         });
         let compact_content_view = cx.new(|cx| {
             WorkspacePanelView::new(
                 workspace_entity.clone(),
+                ui_model.clone(),
+                settings_model.clone(),
                 WorkspacePanelKind::CompactContent,
                 cx,
             )
@@ -309,15 +308,13 @@ impl Workspace {
             ),
             cx.subscribe_in(&preview_table, window, Self::on_preview_table_event),
             cx.observe(&tree_state, |this, _, cx| {
-                let dirty = this.sync_tree_interaction(cx);
-                if dirty {
-                    cx.notify();
-                }
+                let _ = this.sync_tree_interaction(cx);
             }),
         ];
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
+            ui: ui_model,
             selection: selection_model,
             settings: settings_model,
             process: process_model,
@@ -346,9 +343,6 @@ impl Workspace {
             results_panel_view,
             right_panel_view,
             compact_content_view,
-            side_panel_tab: SidePanelTab::Results,
-            narrow_content_tab: NarrowContentTab::Status,
-            pending_confirmation: None,
             poll_task: None,
             poll_task_running: false,
             poll_idle_streak: 0,
@@ -405,8 +399,18 @@ impl Workspace {
         self.process.read(cx).is_processing()
     }
 
-    fn clear_pending_confirmation(&mut self) {
-        self.pending_confirmation = None;
+    fn clear_pending_confirmation(&mut self, cx: &mut Context<Self>) -> bool {
+        self.ui.update(cx, |ui, ui_cx| {
+            let changed = ui.clear_pending_confirmation();
+            if changed {
+                ui_cx.notify();
+            }
+            changed
+        })
+    }
+
+    pub(super) fn ui_state(&self, cx: &App) -> WorkspaceUiState {
+        self.ui.read(cx).state()
     }
 
     pub(super) fn selection_snapshot(&self, cx: &App) -> crate::ui::state::SelectionState {
@@ -513,8 +517,17 @@ impl Workspace {
 }
 
 impl WorkspacePanelView {
-    fn new(workspace: Entity<Workspace>, kind: WorkspacePanelKind, cx: &mut Context<Self>) -> Self {
-        let subscriptions = vec![cx.observe(&workspace, |_, _, cx| cx.notify())];
+    fn new(
+        workspace: Entity<Workspace>,
+        ui: Entity<WorkspaceUiModel>,
+        settings: Entity<SettingsModel>,
+        kind: WorkspacePanelKind,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&ui, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+        ];
         Self {
             workspace,
             kind,
@@ -543,11 +556,13 @@ impl InputPanelView {
     fn new(
         workspace: Entity<Workspace>,
         settings: Entity<SettingsModel>,
+        ui: Entity<WorkspaceUiModel>,
         selection: Entity<SelectionModel>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
             cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&ui, |_, _, cx| cx.notify()),
             cx.observe(&selection, |_, _, cx| cx.notify()),
         ];
         Self {
@@ -561,9 +576,15 @@ impl StatusPanelView {
     fn new(
         workspace: Entity<Workspace>,
         process: Entity<ProcessModel>,
+        result: Entity<ResultModel>,
+        settings: Entity<SettingsModel>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![cx.observe(&process, |_, _, cx| cx.notify())];
+        let subscriptions = vec![
+            cx.observe(&process, |_, _, cx| cx.notify()),
+            cx.observe(&result, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+        ];
         Self {
             workspace,
             _subscriptions: subscriptions,
@@ -575,13 +596,14 @@ impl RulesPanelView {
     fn new(
         workspace: Entity<Workspace>,
         settings: Entity<SettingsModel>,
+        ui: Entity<WorkspaceUiModel>,
         blacklist_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
             cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&ui, |_, _, cx| cx.notify()),
             cx.observe(&blacklist_filter_input, |_, _, cx| cx.notify()),
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
         ];
         Self {
             workspace,
@@ -595,14 +617,17 @@ impl ResultsPanelView {
         workspace: Entity<Workspace>,
         result: Entity<ResultModel>,
         preview: Entity<PreviewModel>,
+        settings: Entity<SettingsModel>,
+        tree_state: Entity<TreeState>,
         preview_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
             cx.observe(&result, |_, _, cx| cx.notify()),
             cx.observe(&preview, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&tree_state, |_, _, cx| cx.notify()),
             cx.observe(&preview_filter_input, |_, _, cx| cx.notify()),
-            cx.observe(&workspace, |_, _, cx| cx.notify()),
         ];
         Self {
             workspace,

@@ -8,13 +8,11 @@ use gpui_component::{
 
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
-use super::{
-    BlacklistItemKind, NarrowContentTab, PendingConfirmation, PreviewTableDelegate, SidePanelTab,
-    Workspace,
-};
+use super::{BlacklistItemKind, PreviewTableDelegate, Workspace};
 use crate::domain::{FileEntry, ResultTab};
 use crate::services::preview::load_text;
 use crate::services::process::ProcessRequest;
+use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
 use crate::utils::path::filename;
 
@@ -63,7 +61,6 @@ impl Workspace {
             selection_cx.notify();
         });
         self.refresh_preflight(cx);
-        cx.notify();
     }
 
     pub(super) fn apply_selected_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
@@ -72,7 +69,6 @@ impl Workspace {
             selection_cx.notify();
         });
         self.refresh_preflight(cx);
-        cx.notify();
     }
 
     pub(super) fn apply_selected_gitignore(
@@ -84,7 +80,6 @@ impl Workspace {
             selection.set_gitignore_file(path);
             selection_cx.notify();
         });
-        cx.notify();
     }
 
     pub(super) fn on_preview_filter_event(
@@ -117,11 +112,10 @@ impl Workspace {
         _: &Entity<InputState>,
         event: &InputEvent,
         _: &mut Window,
-        cx: &mut Context<Self>,
+        _: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
             self.invalidate_rules_panel_cache();
-            cx.notify();
         }
     }
 
@@ -282,7 +276,6 @@ impl Workspace {
                         NotificationType::Success,
                         tr(language, "blacklist_saved"),
                     );
-                    cx.notify();
                 }
                 Err(err) => Self::notify_active_window(
                     cx,
@@ -300,18 +293,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_confirmation != Some(PendingConfirmation::ClearInputs) {
-            self.pending_confirmation = Some(PendingConfirmation::ClearInputs);
+        if self.ui.update(cx, |ui, ui_cx| {
+            let changed = ui.set_pending_confirmation(PendingConfirmation::ClearInputs);
+            if changed {
+                ui_cx.notify();
+            }
+            changed
+        }) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_clear_notice"),
                 window,
                 cx,
             );
-            cx.notify();
             return;
         }
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         if let Some(handle) = self.process.read(cx).state().process_handle.as_ref() {
             handle.cancel.cancel();
         }
@@ -357,7 +354,6 @@ impl Workspace {
             window,
             cx,
         );
-        cx.notify();
     }
 
     pub(super) fn start_process(
@@ -388,7 +384,7 @@ impl Workspace {
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.last_interaction = None;
         self.clear_preview_state(cx);
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.sync_tree(cx);
         self.sync_preview_table(cx);
         let settings = self.settings_snapshot(cx);
@@ -416,7 +412,6 @@ impl Workspace {
             window,
             cx,
         );
-        cx.notify();
     }
 
     pub(super) fn cancel_process(
@@ -437,7 +432,6 @@ impl Workspace {
                 cx,
             );
         }
-        cx.notify();
     }
 
     pub(super) fn add_folder_blacklist(
@@ -446,7 +440,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         let added = self.consume_blacklist_input(false, window, cx);
         if added > 0 {
             self.refresh_preflight(cx);
@@ -459,7 +453,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         let added = self.consume_blacklist_input(true, window, cx);
         if added > 0 {
             self.refresh_preflight(cx);
@@ -562,7 +556,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
             let path = rfd::AsyncFileDialog::new()
@@ -591,7 +585,6 @@ impl Workspace {
                         NotificationType::Success,
                         tr(language, "blacklist_imported"),
                     );
-                    cx.notify();
                 }
                 Err(err) => {
                     Self::notify_active_window(cx, NotificationType::Error, err.to_string())
@@ -607,18 +600,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_confirmation != Some(PendingConfirmation::ResetBlacklist) {
-            self.pending_confirmation = Some(PendingConfirmation::ResetBlacklist);
+        if self.ui.update(cx, |ui, ui_cx| {
+            let changed = ui.set_pending_confirmation(PendingConfirmation::ResetBlacklist);
+            if changed {
+                ui_cx.notify();
+            }
+            changed
+        }) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_reset_notice"),
                 window,
                 cx,
             );
-            cx.notify();
             return;
         }
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.reset_blacklist();
             settings_cx.notify();
@@ -632,7 +629,6 @@ impl Workspace {
             window,
             cx,
         );
-        cx.notify();
     }
 
     pub(super) fn clear_blacklist(
@@ -641,18 +637,22 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.pending_confirmation != Some(PendingConfirmation::ClearBlacklist) {
-            self.pending_confirmation = Some(PendingConfirmation::ClearBlacklist);
+        if self.ui.update(cx, |ui, ui_cx| {
+            let changed = ui.set_pending_confirmation(PendingConfirmation::ClearBlacklist);
+            if changed {
+                ui_cx.notify();
+            }
+            changed
+        }) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_clear_notice"),
                 window,
                 cx,
             );
-            cx.notify();
             return;
         }
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.clear_blacklist();
             settings_cx.notify();
@@ -666,7 +666,6 @@ impl Workspace {
             window,
             cx,
         );
-        cx.notify();
     }
 
     pub(super) fn toggle_compress(
@@ -675,13 +674,12 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.set_compress(*checked);
             settings_cx.notify();
         });
         self.persist_settings_async(cx);
-        cx.notify();
     }
 
     pub(super) fn toggle_use_gitignore(
@@ -690,14 +688,13 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.set_use_gitignore(*checked);
             settings_cx.notify();
         });
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
-        cx.notify();
     }
 
     pub(super) fn toggle_ignore_git(
@@ -706,7 +703,7 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.set_ignore_git(*checked);
             settings_cx.notify();
@@ -714,16 +711,14 @@ impl Workspace {
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
-        cx.notify();
     }
 
     pub(super) fn toggle_dedupe(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.selection.update(cx, |selection, selection_cx| {
             selection.set_dedupe_exact_path(*checked);
             selection_cx.notify();
         });
-        cx.notify();
     }
 
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
@@ -732,7 +727,6 @@ impl Workspace {
                 result.set_active_tab(ResultTab::Tree);
                 result_cx.notify();
             });
-            cx.notify();
             return;
         }
         let active_tab = if *ix == 0 {
@@ -747,7 +741,6 @@ impl Workspace {
         if active_tab == ResultTab::Content {
             self.ensure_background_polling(cx);
         }
-        cx.notify();
     }
 
     pub(super) fn set_side_panel_tab(
@@ -756,12 +749,16 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.side_panel_tab = if *ix == 0 {
+        let tab = if *ix == 0 {
             SidePanelTab::Results
         } else {
             SidePanelTab::Rules
         };
-        cx.notify();
+        self.ui.update(cx, |ui, ui_cx| {
+            if ui.set_side_panel_tab(tab) {
+                ui_cx.notify();
+            }
+        });
     }
 
     pub(super) fn set_narrow_content_tab(
@@ -770,12 +767,16 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.narrow_content_tab = if *ix == 0 {
+        let tab = if *ix == 0 {
             NarrowContentTab::Status
         } else {
             NarrowContentTab::Results
         };
-        cx.notify();
+        self.ui.update(cx, |ui, ui_cx| {
+            if ui.set_narrow_content_tab(tab) {
+                ui_cx.notify();
+            }
+        });
     }
 
     pub(super) fn expand_tree(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
@@ -851,7 +852,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.clear_pending_confirmation();
+        self.clear_pending_confirmation(cx);
         self.settings.update(cx, |settings, settings_cx| {
             settings.remove_blacklist_item(kind, &value);
             settings_cx.notify();
@@ -865,7 +866,6 @@ impl Workspace {
             window,
             cx,
         );
-        cx.notify();
     }
 
     pub(super) fn download_result(

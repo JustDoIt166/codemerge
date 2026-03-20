@@ -26,11 +26,9 @@ use super::view::{
     render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
     section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
-use super::{
-    NarrowContentTab, PendingConfirmation, SidePanelTab, Workspace, fixed_list_sizes,
-    preview_line_height, workspace_panel_min_height,
-};
+use super::{Workspace, fixed_list_sizes, preview_line_height, workspace_panel_min_height};
 use crate::domain::{ProcessStatus, ResultTab};
+use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
 
 impl Workspace {
@@ -110,6 +108,7 @@ impl Workspace {
     pub(super) fn render_input_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
+        let ui_state = self.ui_state(cx);
         let language = settings.language;
         let has_inputs = self.has_inputs(cx);
         let selected_files = Rc::new(selection.selected_files.clone());
@@ -311,7 +310,7 @@ impl Workspace {
                                         .danger()
                                         .icon(IconName::Delete)
                                         .label(
-                                            if self.pending_confirmation
+                                            if ui_state.pending_confirmation
                                                 == Some(PendingConfirmation::ClearInputs)
                                             {
                                                 tr(language, "confirm_clear_inputs")
@@ -521,7 +520,8 @@ impl Workspace {
 
     fn render_right_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
-        let selected_index = if self.side_panel_tab == SidePanelTab::Results {
+        let ui_state = self.ui_state(cx);
+        let selected_index = if ui_state.side_panel_tab == SidePanelTab::Results {
             0
         } else {
             1
@@ -547,7 +547,7 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
-                match self.side_panel_tab {
+                match ui_state.side_panel_tab {
                     SidePanelTab::Results => self.results_panel_view.clone().into_any_element(),
                     SidePanelTab::Rules => self.rules_panel_view.clone().into_any_element(),
                 },
@@ -628,6 +628,7 @@ impl Workspace {
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
+        let ui_state = self.ui_state(cx);
         self.refresh_rules_panel_cache(cx);
         let blacklist_sections = self.rules_panel.cache.sections.clone();
 
@@ -767,7 +768,7 @@ impl Workspace {
                                     .outline()
                                     .icon(IconName::Undo2)
                                     .label(
-                                        if self.pending_confirmation
+                                        if ui_state.pending_confirmation
                                             == Some(PendingConfirmation::ResetBlacklist)
                                         {
                                             tr(language, "confirm_reset_blacklist")
@@ -782,7 +783,7 @@ impl Workspace {
                                     .danger()
                                     .icon(IconName::Delete)
                                     .label(
-                                        if self.pending_confirmation
+                                        if ui_state.pending_confirmation
                                             == Some(PendingConfirmation::ClearBlacklist)
                                         {
                                             tr(language, "confirm_clear_blacklist")
@@ -1076,7 +1077,8 @@ impl Workspace {
         &mut self,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let selected_index = if self.narrow_content_tab == NarrowContentTab::Status {
+        let ui_state = self.ui_state(cx);
+        let selected_index = if ui_state.narrow_content_tab == NarrowContentTab::Status {
             0
         } else {
             1
@@ -1103,7 +1105,7 @@ impl Workspace {
                         ),
                 )
                 .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
-                    match self.narrow_content_tab {
+                    match ui_state.narrow_content_tab {
                         NarrowContentTab::Status => {
                             self.status_panel_view.clone().into_any_element()
                         }

@@ -14,7 +14,6 @@ use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
     pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
-        let mut workspace_dirty = false;
         let mut received_events = false;
 
         if let Some(rx) = self
@@ -61,8 +60,7 @@ impl Workspace {
         let mut finish_processing = disconnected;
         for event in events {
             received_events = true;
-            let (event_workspace_dirty, event_finished) = self.apply_process_event(event, cx);
-            workspace_dirty = event_workspace_dirty || workspace_dirty;
+            let (_, event_finished) = self.apply_process_event(event, cx);
             finish_processing = event_finished || finish_processing;
         }
         if finish_processing {
@@ -79,7 +77,7 @@ impl Workspace {
                 match rx.try_recv() {
                     Ok(event) => {
                         received_events = true;
-                        workspace_dirty = self.apply_preview_event(event, cx) || workspace_dirty;
+                        self.apply_preview_event(event, cx);
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
@@ -96,10 +94,6 @@ impl Workspace {
                 self.preview
                     .update(cx, |preview, _| preview.set_preview_rx(Some(rx)));
             }
-        }
-
-        if workspace_dirty {
-            cx.notify();
         }
 
         let active = self.needs_background_polling(cx);
@@ -156,7 +150,7 @@ impl Workspace {
         }
     }
 
-    fn apply_preview_event(&mut self, event: PreviewEvent, cx: &mut Context<Self>) -> bool {
+    fn apply_preview_event(&mut self, event: PreviewEvent, cx: &mut Context<Self>) {
         let effect = self.preview.update(cx, |preview, preview_cx| {
             let effect = preview.apply_event(event);
             preview_cx.notify();
@@ -166,7 +160,6 @@ impl Workspace {
             self.preview_scroll_handle
                 .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
-        !matches!(effect, PreviewEventEffect::Ignored)
     }
 
     fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
@@ -485,6 +478,5 @@ impl Workspace {
         self.preview_scroll_handle
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.ensure_background_polling(cx);
-        cx.notify();
     }
 }

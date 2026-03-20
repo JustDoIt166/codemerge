@@ -1,7 +1,10 @@
 use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult};
 use crate::services::preflight::PreflightEvent;
 use crate::services::process::{ProcessEvent, ProcessHandle};
-use crate::ui::state::{ProcessState, ProcessUiStatus, SelectionState, SettingsState};
+use crate::ui::state::{
+    NarrowContentTab, PendingConfirmation, ProcessState, ProcessUiStatus, SelectionState,
+    SettingsState, SidePanelTab, WorkspaceUiState,
+};
 use crate::utils::i18n::tr;
 
 pub struct SettingsModel {
@@ -150,6 +153,46 @@ impl SettingsModel {
 
 pub struct ProcessModel {
     state: ProcessState,
+}
+
+pub struct WorkspaceUiModel {
+    state: WorkspaceUiState,
+}
+
+impl WorkspaceUiModel {
+    pub fn new() -> Self {
+        Self {
+            state: WorkspaceUiState::default(),
+        }
+    }
+
+    pub fn state(&self) -> WorkspaceUiState {
+        self.state
+    }
+
+    pub fn clear_pending_confirmation(&mut self) -> bool {
+        let changed = self.state.pending_confirmation.is_some();
+        self.state.pending_confirmation = None;
+        changed
+    }
+
+    pub fn set_pending_confirmation(&mut self, pending_confirmation: PendingConfirmation) -> bool {
+        let changed = self.state.pending_confirmation != Some(pending_confirmation);
+        self.state.pending_confirmation = Some(pending_confirmation);
+        changed
+    }
+
+    pub fn set_side_panel_tab(&mut self, tab: SidePanelTab) -> bool {
+        let changed = self.state.side_panel_tab != tab;
+        self.state.side_panel_tab = tab;
+        changed
+    }
+
+    pub fn set_narrow_content_tab(&mut self, tab: NarrowContentTab) -> bool {
+        let changed = self.state.narrow_content_tab != tab;
+        self.state.narrow_content_tab = tab;
+        changed
+    }
 }
 
 impl ProcessModel {
@@ -310,14 +353,14 @@ pub enum ProcessEventEffect {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessEventEffect, ProcessModel, SettingsModel};
+    use super::{ProcessEventEffect, ProcessModel, SettingsModel, WorkspaceUiModel};
     use crate::domain::{
         AppConfigV1, Language, OutputFormat, ProcessResult, ProcessStatus, ProcessingMode,
         ProcessingOptions,
     };
     use crate::processor::stats::ProcessingStats;
     use crate::services::process::ProcessEvent;
-    use crate::ui::state::SelectionState;
+    use crate::ui::state::{NarrowContentTab, PendingConfirmation, SelectionState, SidePanelTab};
 
     #[test]
     fn effective_folder_blacklist_respects_use_gitignore() {
@@ -428,5 +471,26 @@ mod tests {
         assert!(matches!(effect, ProcessEventEffect::Continue));
         assert_eq!(process.state().processing_skipped, 1);
         assert_eq!(process.state().processing_records.len(), 1);
+    }
+
+    #[test]
+    fn workspace_ui_model_skips_noop_tab_updates() {
+        let mut model = WorkspaceUiModel::new();
+        assert!(!model.set_side_panel_tab(SidePanelTab::Results));
+        assert!(model.set_side_panel_tab(SidePanelTab::Rules));
+        assert!(!model.set_side_panel_tab(SidePanelTab::Rules));
+        assert!(!model.set_narrow_content_tab(NarrowContentTab::Status));
+        assert!(model.set_narrow_content_tab(NarrowContentTab::Results));
+        assert!(!model.set_narrow_content_tab(NarrowContentTab::Results));
+    }
+
+    #[test]
+    fn workspace_ui_model_tracks_pending_confirmation_changes() {
+        let mut model = WorkspaceUiModel::new();
+
+        assert!(model.set_pending_confirmation(PendingConfirmation::ClearInputs));
+        assert!(!model.set_pending_confirmation(PendingConfirmation::ClearInputs));
+        assert!(model.clear_pending_confirmation());
+        assert!(!model.clear_pending_confirmation());
     }
 }

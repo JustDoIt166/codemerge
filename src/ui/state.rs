@@ -26,6 +26,34 @@ pub enum ProcessUiStatus {
     Error,
 }
 
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum SidePanelTab {
+    #[default]
+    Results,
+    Rules,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub enum NarrowContentTab {
+    #[default]
+    Status,
+    Results,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum PendingConfirmation {
+    ClearInputs,
+    ResetBlacklist,
+    ClearBlacklist,
+}
+
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub struct WorkspaceUiState {
+    pub side_panel_tab: SidePanelTab,
+    pub narrow_content_tab: NarrowContentTab,
+    pub pending_confirmation: Option<PendingConfirmation>,
+}
+
 impl AppState {
     pub fn from_config(_config: AppConfigV1, _status_ready: String) -> Self {
         Self {
