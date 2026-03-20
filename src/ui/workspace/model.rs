@@ -82,7 +82,6 @@ pub(super) struct TreeRenderState {
     pub rows: Vec<TreeRowViewModel>,
     pub rows_by_id: HashMap<String, TreeRowViewModel>,
     pub visible_summary: TreeCountSummary,
-    pub total_summary: TreeCountSummary,
     pub selected_row_ix: Option<usize>,
 }
 
@@ -103,9 +102,15 @@ pub(super) struct TreeInteractionSnapshot {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(super) enum TreePanelEffect {
     None,
-    RefreshTree,
+    RefreshVisibleTree,
     OpenPreview(u32),
     SwitchToContentAndOpen(u32),
+}
+
+#[derive(Clone, Debug, Default)]
+pub(super) struct TreeProjectionState {
+    pub roots: Vec<TreeProjectionNode>,
+    pub total_summary: TreeCountSummary,
 }
 
 pub(super) struct PreviewTableModel {
@@ -260,44 +265,62 @@ pub(super) fn build_tree_panel_data(result: Option<&ProcessResult>) -> Option<Tr
     })
 }
 
-pub(super) fn project_tree_panel(
+pub(super) fn build_tree_projection(
     data: Option<&TreePanelData>,
     filter: &str,
-    expanded_ids: &BTreeSet<String>,
-    selected_node_id: Option<&str>,
-) -> TreeRenderState {
+) -> TreeProjectionState {
     let Some(data) = data else {
-        return TreeRenderState::default();
+        return TreeProjectionState::default();
     };
 
     let filter = filter.trim();
     let filter_lower = filter.to_ascii_lowercase();
     let context = TreeProjectionContext {
         filter: filter_lower.as_str(),
-        expanded_ids,
         preview_file_ids: &data.preview_file_ids,
     };
-    let mut projected_roots = Vec::new();
+    let mut roots = Vec::new();
 
     for node in &data.index.roots {
         if let Some(projected) = build_tree_projection_node(node, &context) {
-            projected_roots.push(projected);
+            roots.push(projected);
         }
     }
 
-    let items = projected_roots
+    TreeProjectionState {
+        roots,
+        total_summary: TreeCountSummary {
+            folders: data.index.total_folders,
+            files: data.index.total_files,
+        },
+    }
+}
+
+pub(super) fn build_tree_render_state(
+    projection: &TreeProjectionState,
+    filter_active: bool,
+    expanded_ids: &BTreeSet<String>,
+    selected_node_id: Option<&str>,
+) -> TreeRenderState {
+    let visible_context = VisibleTreeContext {
+        filter_active,
+        expanded_ids,
+    };
+    let items = projection
+        .roots
         .iter()
-        .map(ProjectedTreeNode::to_tree_item)
+        .map(|node| node.to_tree_item(&visible_context))
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
     let mut visible_summary = TreeCountSummary::default();
-    let last_root_ix = projected_roots.len().saturating_sub(1);
-    for (ix, node) in projected_roots.iter().enumerate() {
+    let last_root_ix = projection.roots.len().saturating_sub(1);
+    for (ix, node) in projection.roots.iter().enumerate() {
         append_visible_tree_rows(
             node,
             0,
             &[],
             ix < last_root_ix,
+            &visible_context,
             &mut rows,
             &mut visible_summary,
         );
@@ -316,10 +339,6 @@ pub(super) fn project_tree_panel(
         rows,
         rows_by_id,
         visible_summary,
-        total_summary: TreeCountSummary {
-            folders: data.index.total_folders,
-            files: data.index.total_files,
-        },
         selected_row_ix,
     }
 }
@@ -349,9 +368,9 @@ pub(super) fn apply_tree_interaction(
         }
 
         if previous.and_then(|snapshot| snapshot.node_id.as_ref()) != snapshot.node_id.as_ref() {
-            return TreePanelEffect::RefreshTree;
+            return TreePanelEffect::RefreshVisibleTree;
         }
-        return TreePanelEffect::None;
+        return TreePanelEffect::RefreshVisibleTree;
     }
 
     match snapshot.preview_file_id {
@@ -363,26 +382,8 @@ pub(super) fn apply_tree_interaction(
 fn build_tree_projection_node(
     node: &IndexedTreeNode,
     context: &TreeProjectionContext<'_>,
-) -> Option<ProjectedTreeNode> {
+) -> Option<TreeProjectionNode> {
     let filter_match = filter_node(node, context.filter);
-    let is_expanded = if node.is_folder {
-        if !context.filter.is_empty() {
-            true
-        } else {
-            context.expanded_ids.contains(node.id.as_str())
-        }
-    } else {
-        false
-    };
-    let icon_kind = if node.is_folder {
-        if is_expanded {
-            TreeIconKind::FolderOpen
-        } else {
-            TreeIconKind::FolderClosed
-        }
-    } else {
-        icon_kind_for_extension(extension_for_path(node.relative_path.as_str()))
-    };
     let mut children = Vec::new();
     for child in &node.children {
         if let Some(projected) = build_tree_projection_node(child, context) {
@@ -394,7 +395,7 @@ fn build_tree_projection_node(
         return None;
     }
 
-    Some(ProjectedTreeNode {
+    Some(TreeProjectionNode {
         node_id: node.id.clone(),
         label: node.label.clone(),
         relative_path: node.relative_path.clone(),
@@ -406,8 +407,6 @@ fn build_tree_projection_node(
             .copied(),
         child_file_count: node.stats.descendant_files,
         child_folder_count: node.stats.descendant_folders,
-        icon_kind,
-        is_expanded,
         is_filter_match: filter_match.is_some(),
         match_range: filter_match.as_ref().map(|matched| matched.range.clone()),
         match_kind: filter_match.as_ref().map(|matched| matched.kind),
@@ -428,14 +427,18 @@ struct FilterMatch {
     range: Range<usize>,
 }
 
+struct VisibleTreeContext<'a> {
+    filter_active: bool,
+    expanded_ids: &'a BTreeSet<String>,
+}
+
 struct TreeProjectionContext<'a> {
     filter: &'a str,
-    expanded_ids: &'a BTreeSet<String>,
     preview_file_ids: &'a HashMap<String, u32>,
 }
 
 #[derive(Clone, Debug)]
-struct ProjectedTreeNode {
+pub(super) struct TreeProjectionNode {
     node_id: String,
     label: String,
     relative_path: String,
@@ -444,40 +447,57 @@ struct ProjectedTreeNode {
     preview_file_id: Option<u32>,
     child_file_count: usize,
     child_folder_count: usize,
-    icon_kind: TreeIconKind,
-    is_expanded: bool,
     is_filter_match: bool,
     match_range: Option<Range<usize>>,
     match_kind: Option<FilterMatchKind>,
     matched_descendants: usize,
-    children: Vec<ProjectedTreeNode>,
+    children: Vec<TreeProjectionNode>,
 }
 
-impl ProjectedTreeNode {
-    fn to_tree_item(&self) -> TreeItem {
+impl TreeProjectionNode {
+    fn to_tree_item(&self, context: &VisibleTreeContext<'_>) -> TreeItem {
         if self.is_folder {
             TreeItem::new(self.node_id.clone(), self.label.clone())
-                .expanded(self.is_expanded)
+                .expanded(self.is_expanded(context))
                 .children(
                     self.children
                         .iter()
-                        .map(ProjectedTreeNode::to_tree_item)
+                        .map(|child| child.to_tree_item(context))
                         .collect::<Vec<_>>(),
                 )
         } else {
             TreeItem::new(self.node_id.clone(), self.label.clone())
         }
     }
+
+    fn is_expanded(&self, context: &VisibleTreeContext<'_>) -> bool {
+        self.is_folder
+            && (context.filter_active || context.expanded_ids.contains(self.node_id.as_str()))
+    }
+
+    fn icon_kind(&self, context: &VisibleTreeContext<'_>) -> TreeIconKind {
+        if self.is_folder {
+            if self.is_expanded(context) {
+                TreeIconKind::FolderOpen
+            } else {
+                TreeIconKind::FolderClosed
+            }
+        } else {
+            icon_kind_for_extension(self.extension.clone())
+        }
+    }
 }
 
 fn append_visible_tree_rows(
-    node: &ProjectedTreeNode,
+    node: &TreeProjectionNode,
     depth: usize,
     ancestor_guides: &[bool],
     has_next_sibling: bool,
+    context: &VisibleTreeContext<'_>,
     rows: &mut Vec<TreeRowViewModel>,
     summary: &mut TreeCountSummary,
 ) {
+    let is_expanded = node.is_expanded(context);
     if node.is_folder {
         summary.folders += 1;
     } else {
@@ -499,8 +519,8 @@ fn append_visible_tree_rows(
         preview_file_id: node.preview_file_id,
         child_file_count: node.child_file_count,
         child_folder_count: node.child_folder_count,
-        icon_kind: node.icon_kind,
-        is_expanded: node.is_expanded,
+        icon_kind: node.icon_kind(context),
+        is_expanded,
         is_filter_match: node.is_filter_match,
         match_range: node.match_range.clone(),
         match_kind: node.match_kind,
@@ -508,7 +528,7 @@ fn append_visible_tree_rows(
         guide_continuations: guide_continuations.clone(),
     });
 
-    if !(node.is_folder && node.is_expanded) {
+    if !(node.is_folder && is_expanded) {
         return;
     }
 
@@ -519,6 +539,7 @@ fn append_visible_tree_rows(
             depth + 1,
             &guide_continuations,
             ix < last_child_ix,
+            context,
             rows,
             summary,
         );
@@ -599,7 +620,8 @@ mod tests {
     use super::{
         TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect,
         apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
-        build_preview_table_model, build_tree_panel_data, project_tree_panel,
+        build_preview_table_model, build_tree_panel_data, build_tree_projection,
+        build_tree_render_state,
     };
     use crate::domain::{Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
@@ -735,7 +757,8 @@ mod tests {
             .map(|data| data.index.default_expanded_ids.clone())
             .unwrap_or_default();
 
-        let render = project_tree_panel(data.as_ref(), "", &expanded, Some("src/lib.rs"));
+        let projection = build_tree_projection(data.as_ref(), "");
+        let render = build_tree_render_state(&projection, false, &expanded, Some("src/lib.rs"));
 
         let lib = render
             .rows
@@ -756,7 +779,8 @@ mod tests {
             .map(|data| data.index.default_expanded_ids.clone())
             .unwrap_or_default();
 
-        let render = project_tree_panel(data.as_ref(), "lib", &expanded, None);
+        let projection = build_tree_projection(data.as_ref(), "lib");
+        let render = build_tree_render_state(&projection, true, &expanded, None);
 
         assert_eq!(
             render.visible_summary,
@@ -780,7 +804,8 @@ mod tests {
             .map(|data| data.index.default_expanded_ids.clone())
             .unwrap_or_default();
 
-        let render = project_tree_panel(data.as_ref(), "", &expanded, None);
+        let projection = build_tree_projection(data.as_ref(), "");
+        let render = build_tree_render_state(&projection, false, &expanded, None);
         let src = render
             .rows
             .iter()
@@ -814,7 +839,8 @@ mod tests {
         let data = build_tree_panel_data(Some(&nested_result()));
         let expanded = BTreeSet::from(["src".to_string()]);
 
-        let render = project_tree_panel(data.as_ref(), "", &expanded, None);
+        let projection = build_tree_projection(data.as_ref(), "");
+        let render = build_tree_render_state(&projection, false, &expanded, None);
 
         assert_eq!(
             render
@@ -854,7 +880,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(effect, TreePanelEffect::RefreshTree);
+        assert_eq!(effect, TreePanelEffect::RefreshVisibleTree);
         assert_eq!(state.selected_node_id.as_deref(), Some("src"));
         assert!(state.expanded_ids.contains("src"));
 
@@ -878,7 +904,7 @@ mod tests {
     }
 
     #[test]
-    fn tree_interaction_folder_expansion_change_does_not_force_refresh() {
+    fn tree_interaction_folder_expansion_change_refreshes_visible_rows() {
         let mut state = TreePanelState {
             selected_node_id: Some("src".to_string()),
             expanded_ids: BTreeSet::from(["src".to_string()]),
@@ -899,7 +925,7 @@ mod tests {
             }),
         );
 
-        assert_eq!(effect, TreePanelEffect::None);
+        assert_eq!(effect, TreePanelEffect::RefreshVisibleTree);
         assert!(!state.expanded_ids.contains("src"));
     }
 

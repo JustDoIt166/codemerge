@@ -343,7 +343,10 @@ impl Workspace {
             state.set_selected_index(None, tree_cx);
         });
         self.tree_panel.data = None;
+        self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.total_summary = model::TreeCountSummary::default();
+        self.tree_panel.last_filter.clear();
         self.tree_panel.last_interaction = None;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
@@ -381,7 +384,10 @@ impl Workspace {
         });
         self.state.workspace.reset_tree();
         self.tree_panel.data = None;
+        self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.total_summary = model::TreeCountSummary::default();
+        self.tree_panel.last_filter.clear();
         self.tree_panel.last_interaction = None;
         self.clear_preview_state(cx);
         self.clear_pending_confirmation(cx);

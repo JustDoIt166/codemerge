@@ -141,6 +141,7 @@ pub struct PreviewChunk {
     pub lines: Vec<SharedString>,
 }
 
+#[derive(Default)]
 pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
     pub preview_revision: u64,
@@ -148,8 +149,8 @@ pub struct PreviewPanelState {
     pub preview_requested_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
     pub preview_error: Option<String>,
-    pub preview_last_visible_range: Range<usize>,
     pub preview_chunks: Vec<PreviewChunk>,
+    pub preview_chunk_line_index: Vec<Option<usize>>,
 }
 
 impl PreviewPanelState {
@@ -158,16 +159,7 @@ impl PreviewPanelState {
 
     pub fn clear_loaded_chunks(&mut self) {
         self.preview_chunks.clear();
-    }
-
-    pub fn update_visible_range(&mut self, range: Range<usize>, line_count: usize) -> bool {
-        let bucketed = bucketize_range(range, Self::VISIBLE_BUCKET_LINES, line_count);
-        if self.preview_last_visible_range == bucketed {
-            return false;
-        }
-
-        self.preview_last_visible_range = bucketed;
-        true
+        self.preview_chunk_line_index.clear();
     }
 
     pub fn store_chunk(&mut self, range: Range<usize>, lines: Vec<SharedString>) {
@@ -182,14 +174,8 @@ impl PreviewPanelState {
             lines,
         });
         self.preview_chunks.sort_by_key(|chunk| chunk.range.start);
-
-        let focus = if self.preview_last_visible_range.start < self.preview_last_visible_range.end {
-            self.preview_last_visible_range.clone()
-        } else {
-            range
-        };
         while self.preview_chunks.len() > Self::MAX_CHUNKS {
-            let focus_center = range_center(&focus);
+            let focus_center = range_center(&range);
             let prune_ix = self
                 .preview_chunks
                 .iter()
@@ -199,6 +185,7 @@ impl PreviewPanelState {
                 .unwrap_or(0);
             self.preview_chunks.remove(prune_ix);
         }
+        self.rebuild_chunk_line_index();
     }
 
     pub fn has_loaded_range(&self, range: &Range<usize>) -> bool {
@@ -224,27 +211,29 @@ impl PreviewPanelState {
     }
 
     pub fn line_at(&self, ix: usize) -> Option<SharedString> {
-        self.preview_chunks.iter().find_map(|chunk| {
-            if ix < chunk.range.start || ix >= chunk.range.end {
-                return None;
-            }
-
-            chunk.lines.get(ix - chunk.range.start).cloned()
-        })
+        let chunk_ix = self.preview_chunk_line_index.get(ix).and_then(|ix| *ix)?;
+        let chunk = self.preview_chunks.get(chunk_ix)?;
+        chunk.lines.get(ix.checked_sub(chunk.range.start)?).cloned()
     }
-}
 
-impl Default for PreviewPanelState {
-    fn default() -> Self {
-        Self {
-            selected_preview_file_id: None,
-            preview_revision: 0,
-            preview_rx: None,
-            preview_requested_range: None,
-            preview_document: None,
-            preview_error: None,
-            preview_last_visible_range: 0..0,
-            preview_chunks: Vec::new(),
+    fn rebuild_chunk_line_index(&mut self) {
+        let line_count = self
+            .preview_document
+            .as_ref()
+            .map(PreviewDocument::line_count)
+            .unwrap_or_else(|| {
+                self.preview_chunks
+                    .iter()
+                    .map(|chunk| chunk.range.end)
+                    .max()
+                    .unwrap_or(0)
+            });
+        self.preview_chunk_line_index = vec![None; line_count];
+        for (chunk_ix, chunk) in self.preview_chunks.iter().enumerate() {
+            let end = chunk.range.end.min(self.preview_chunk_line_index.len());
+            for line_ix in chunk.range.start..end {
+                self.preview_chunk_line_index[line_ix] = Some(chunk_ix);
+            }
         }
     }
 }
@@ -262,23 +251,6 @@ impl WorkspaceState {
 
 fn range_center(range: &Range<usize>) -> usize {
     range.start + (range.end.saturating_sub(range.start) / 2)
-}
-
-fn bucketize_range(range: Range<usize>, bucket_lines: usize, line_count: usize) -> Range<usize> {
-    if line_count == 0 || bucket_lines == 0 {
-        return 0..0;
-    }
-
-    let start = range.start.min(line_count.saturating_sub(1));
-    let end = range.end.max(start + 1).min(line_count);
-    let bucket_start = (start / bucket_lines) * bucket_lines;
-    let bucket_end = end
-        .saturating_sub(1)
-        .checked_div(bucket_lines)
-        .map(|bucket| (bucket + 1) * bucket_lines)
-        .unwrap_or(bucket_lines)
-        .min(line_count);
-    bucket_start..bucket_end.max(bucket_start + 1).min(line_count)
 }
 
 #[cfg(test)]
@@ -332,7 +304,6 @@ mod tests {
     #[test]
     fn preview_panel_prunes_far_chunks_and_keeps_nearby_data() {
         let mut state = PreviewPanelState::default();
-        assert!(state.update_visible_range(220..260, 400));
         state.store_chunk(0..50, (0..50).map(|ix| format!("a-{ix}").into()).collect());
         state.store_chunk(
             100..150,
@@ -369,12 +340,24 @@ mod tests {
     }
 
     #[test]
-    fn preview_panel_ignores_duplicate_visible_ranges() {
+    fn preview_panel_line_index_tracks_loaded_chunks() {
         let mut state = PreviewPanelState::default();
+        state.store_chunk(
+            200..250,
+            (200..250).map(|ix| format!("c-{ix}").into()).collect(),
+        );
+        state.store_chunk(
+            250..300,
+            (250..300).map(|ix| format!("d-{ix}").into()).collect(),
+        );
 
-        assert!(state.update_visible_range(10..20, 500));
-        assert!(!state.update_visible_range(10..20, 500));
-        assert!(!state.update_visible_range(11..21, 500));
-        assert!(state.update_visible_range(220..260, 500));
+        assert_eq!(
+            state.line_at(220).map(|line| line.to_string()),
+            Some("c-220".into())
+        );
+        assert_eq!(
+            state.line_at(275).map(|line| line.to_string()),
+            Some("d-275".into())
+        );
     }
 }

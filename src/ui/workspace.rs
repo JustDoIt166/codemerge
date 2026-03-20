@@ -119,7 +119,10 @@ pub(super) struct TreePanelController {
     state: Entity<TreeState>,
     filter_input: Entity<InputState>,
     data: Option<model::TreePanelData>,
+    projection: model::TreeProjectionState,
     render_state: model::TreeRenderState,
+    total_summary: model::TreeCountSummary,
+    last_filter: String,
     last_interaction: Option<model::TreeInteractionSnapshot>,
 }
 
@@ -178,6 +181,21 @@ struct ResultsPanelView {
     _subscriptions: Vec<Subscription>,
 }
 
+struct TreePaneView {
+    workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct PreviewPaneView {
+    workspace: Entity<Workspace>,
+    preview: Entity<PreviewModel>,
+    result: Entity<ResultModel>,
+    settings: Entity<SettingsModel>,
+    scroll_handle: UniformListScrollHandle,
+    last_visible_bucket: std::ops::Range<usize>,
+    _subscriptions: Vec<Subscription>,
+}
+
 #[derive(Clone, Default)]
 struct ResultArtifacts {
     merged_content_path: Option<std::path::PathBuf>,
@@ -194,7 +212,6 @@ pub struct Workspace {
     result: Entity<ResultModel>,
     preview: Entity<PreviewModel>,
     result_artifacts: ResultArtifacts,
-    preview_scroll_handle: UniformListScrollHandle,
     tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
@@ -205,6 +222,8 @@ pub struct Workspace {
     status_panel_view: Entity<StatusPanelView>,
     rules_panel_view: Entity<RulesPanelView>,
     results_panel_view: Entity<ResultsPanelView>,
+    tree_pane_view: Entity<TreePaneView>,
+    preview_pane_view: Entity<PreviewPaneView>,
     right_panel_view: Entity<WorkspacePanelView>,
     compact_content_view: Entity<WorkspacePanelView>,
     poll_task: Option<Task<()>>,
@@ -273,10 +292,27 @@ impl Workspace {
             ResultsPanelView::new(
                 workspace_entity.clone(),
                 result_model.clone(),
-                preview_model.clone(),
+                settings_model.clone(),
+                preview_filter_input.clone(),
+                cx,
+            )
+        });
+        let tree_pane_view = cx.new(|cx| {
+            TreePaneView::new(
+                workspace_entity.clone(),
+                result_model.clone(),
                 settings_model.clone(),
                 tree_state.clone(),
-                preview_filter_input.clone(),
+                tree_filter_input.clone(),
+                cx,
+            )
+        });
+        let preview_pane_view = cx.new(|cx| {
+            PreviewPaneView::new(
+                workspace_entity.clone(),
+                preview_model.clone(),
+                result_model.clone(),
+                settings_model.clone(),
                 cx,
             )
         });
@@ -321,12 +357,14 @@ impl Workspace {
             result: result_model,
             preview: preview_model,
             result_artifacts: ResultArtifacts::default(),
-            preview_scroll_handle: UniformListScrollHandle::new(),
             tree_panel: TreePanelController {
                 state: tree_state,
                 filter_input: tree_filter_input,
                 data: None,
+                projection: model::TreeProjectionState::default(),
                 render_state: model::TreeRenderState::default(),
+                total_summary: model::TreeCountSummary::default(),
+                last_filter: String::new(),
                 last_interaction: None,
             },
             preview_table,
@@ -341,6 +379,8 @@ impl Workspace {
             status_panel_view,
             rules_panel_view,
             results_panel_view,
+            tree_pane_view,
+            preview_pane_view,
             right_panel_view,
             compact_content_view,
             poll_task: None,
@@ -616,21 +656,64 @@ impl ResultsPanelView {
     fn new(
         workspace: Entity<Workspace>,
         result: Entity<ResultModel>,
-        preview: Entity<PreviewModel>,
         settings: Entity<SettingsModel>,
-        tree_state: Entity<TreeState>,
         preview_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
             cx.observe(&result, |_, _, cx| cx.notify()),
-            cx.observe(&preview, |_, _, cx| cx.notify()),
             cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&tree_state, |_, _, cx| cx.notify()),
             cx.observe(&preview_filter_input, |_, _, cx| cx.notify()),
         ];
         Self {
             workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl TreePaneView {
+    fn new(
+        workspace: Entity<Workspace>,
+        result: Entity<ResultModel>,
+        settings: Entity<SettingsModel>,
+        tree_state: Entity<TreeState>,
+        tree_filter_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&result, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&tree_state, |_, _, cx| cx.notify()),
+            cx.observe(&tree_filter_input, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl PreviewPaneView {
+    fn new(
+        workspace: Entity<Workspace>,
+        preview: Entity<PreviewModel>,
+        result: Entity<ResultModel>,
+        settings: Entity<SettingsModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&preview, |_, _, cx| cx.notify()),
+            cx.observe(&result, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            workspace,
+            preview,
+            result,
+            settings,
+            scroll_handle: UniformListScrollHandle::new(),
+            last_visible_bucket: 0..0,
             _subscriptions: subscriptions,
         }
     }
@@ -679,6 +762,18 @@ impl Render for ResultsPanelView {
                 .render_results_panel(workspace_cx)
                 .into_any_element()
         })
+    }
+}
+
+impl Render for TreePaneView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_tree_pane(cx)
+    }
+}
+
+impl Render for PreviewPaneView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_preview_pane(cx)
     }
 }
 

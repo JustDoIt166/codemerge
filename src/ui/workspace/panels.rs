@@ -1,7 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div, px, uniform_list,
+    App, Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div, px,
+    uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable, Icon, IconName, Sizable, Size, StyledExt as _,
@@ -26,7 +27,10 @@ use super::view::{
     render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
     section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
-use super::{Workspace, fixed_list_sizes, preview_line_height, workspace_panel_min_height};
+use super::{
+    PreviewPaneView, TreePaneView, Workspace, fixed_list_sizes, preview_line_height,
+    workspace_panel_min_height,
+};
 use crate::domain::{ProcessStatus, ResultTab};
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
@@ -620,7 +624,7 @@ impl Workspace {
             )
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
                 match result_state.active_tab {
-                    ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
+                    ResultTab::Tree => self.tree_pane_view.clone().into_any_element(),
                     ResultTab::Content => self.render_content_panel(cx).into_any_element(),
                 },
             ))
@@ -797,121 +801,6 @@ impl Workspace {
             )
     }
 
-    pub(super) fn render_tree_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.language(cx);
-        let tree_filter = self
-            .tree_panel
-            .filter_input
-            .read(cx)
-            .value()
-            .trim()
-            .to_string();
-        let filter_active = !tree_filter.is_empty();
-        let has_result = self.result.read(cx).state().result.is_some();
-        let has_visible_nodes = !self.tree_panel.render_state.rows.is_empty();
-        let view = cx.entity();
-        let tree_view = tree(&self.tree_panel.state, move |ix, entry, selected, _, cx| {
-            let workspace = view.read(cx);
-            let Some(mut row) = workspace.tree_panel.render_state.rows.get(ix).cloned() else {
-                return ListItem::new(ix).child(entry.item().label.clone());
-            };
-            row.is_expanded = entry.is_expanded();
-            if row.is_folder {
-                row.icon_kind = if entry.is_expanded() {
-                    super::model::TreeIconKind::FolderOpen
-                } else {
-                    super::model::TreeIconKind::FolderClosed
-                };
-            }
-            render_tree_row(ix, &row, selected, language, cx)
-        })
-        .h_full();
-
-        v_flex()
-            .gap_3()
-            .size_full()
-            .min_h(px(0.))
-            .child(
-                h_flex()
-                    .gap_2()
-                    .items_center()
-                    .child(
-                        Input::new(&self.tree_panel.filter_input)
-                            .prefix(IconName::Search)
-                            .cleanable(true),
-                    )
-                    .child(
-                        Button::new("tree-expand")
-                            .outline()
-                            .icon(IconName::ChevronDown)
-                            .label(tr(language, "tree_expand_all"))
-                            .disabled(!has_result || filter_active)
-                            .on_click(cx.listener(Self::expand_tree)),
-                    )
-                    .child(
-                        Button::new("tree-collapse")
-                            .outline()
-                            .icon(IconName::ChevronRight)
-                            .label(tr(language, "tree_collapse_all"))
-                            .disabled(!has_result || filter_active)
-                            .on_click(cx.listener(Self::collapse_tree)),
-                    ),
-            )
-            .child(
-                h_flex()
-                    .justify_between()
-                    .items_center()
-                    .px_1()
-                    .child(
-                        div()
-                            .text_sm()
-                            .text_color(cx.theme().muted_foreground)
-                            .child(format_tree_summary(
-                                self.tree_panel.render_state.visible_summary,
-                                self.tree_panel.render_state.total_summary,
-                                language,
-                            )),
-                    )
-                    .child(pill_label(
-                        if filter_active {
-                            tr(language, "tree_filter_active")
-                        } else {
-                            tr(language, "tree_filter_idle")
-                        },
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(14.))
-                    .bg(cx.theme().secondary.opacity(0.35))
-                    .p_2()
-                    .child(if has_visible_nodes {
-                        tree_view.into_any_element()
-                    } else {
-                        empty_box(
-                            if has_result {
-                                tr(language, "tree_no_match")
-                            } else {
-                                tr(language, "tree_empty")
-                            },
-                            if has_result && filter_active {
-                                tr(language, "tree_no_match_hint")
-                            } else {
-                                tr(language, "tree_empty_hint")
-                            },
-                            IconName::FolderOpen,
-                            cx,
-                        )
-                        .into_any_element()
-                    }),
-            )
-    }
-
     pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
         let result_state = self.result.read(cx).state().clone();
@@ -964,113 +853,8 @@ impl Workspace {
                 )
                 .into_any_element()
             })
-            .child(self.render_preview(cx))
+            .child(self.preview_pane_view.clone())
             .into_any_element()
-    }
-
-    pub(super) fn render_preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.language(cx);
-        let result_state = self.result.read(cx).state().clone();
-        let preview_state = self.preview.read(cx).state();
-        let selected_preview = self
-            .preview
-            .read(cx)
-            .selected_preview_file_id()
-            .and_then(|id| result_state.preview_rows.iter().find(|row| row.id == id));
-
-        if let Some(error) = preview_state.preview_error.as_ref() {
-            let preview_failure_title = selected_preview
-                .map(|row| row.display_path.clone())
-                .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
-            let title = format!(
-                "{}: {}",
-                tr(language, "status_error"),
-                preview_failure_title
-            );
-            return empty_box(title, error.to_string(), IconName::TriangleAlert, cx);
-        }
-
-        let Some(document) = &preview_state.preview_document else {
-            return empty_box(
-                tr(language, "preview_empty"),
-                tr(language, "preview_empty_hint"),
-                IconName::File,
-                cx,
-            );
-        };
-
-        let file_path = selected_preview
-            .map(|row| row.display_path.clone())
-            .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
-        let line_count = document.line_count();
-        v_flex()
-            .gap_2()
-            .flex_1()
-            .min_h(px(0.))
-            .child(render_kv(tr(language, "table_path"), file_path, cx))
-            .child(
-                h_flex()
-                    .gap_3()
-                    .child(render_kv(
-                        tr(language, "line_count"),
-                        document.line_count().to_string(),
-                        cx,
-                    ))
-                    .child(render_kv(
-                        tr(language, "byte_size"),
-                        document.byte_len().to_string(),
-                        cx,
-                    )),
-            )
-            .child(
-                div()
-                    .relative()
-                    .flex_1()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .child(
-                        uniform_list(
-                            "preview-lines",
-                            line_count,
-                            cx.processor(
-                                move |workspace,
-                                      visible_range: std::ops::Range<usize>,
-                                      _,
-                                      app_cx| {
-                                    workspace
-                                        .sync_preview_visible_range(visible_range.clone(), app_cx);
-                                    let preview = workspace.preview.read(app_cx);
-                                    let muted = app_cx.theme().muted_foreground;
-                                    let mono = app_cx.theme().mono_font_family.clone();
-
-                                    visible_range
-                                        .filter(|ix| *ix < line_count)
-                                        .map(|ix| {
-                                            let line = preview.line_at(ix).unwrap_or_default();
-                                            h_flex()
-                                                .gap_3()
-                                                .px_3()
-                                                .h(preview_line_height())
-                                                .font_family(mono.clone())
-                                                .child(
-                                                    div()
-                                                        .w(px(64.))
-                                                        .text_right()
-                                                        .text_color(muted)
-                                                        .child((ix + 1).to_string()),
-                                                )
-                                                .child(div().flex_1().child(line))
-                                        })
-                                        .collect()
-                                },
-                            ),
-                        )
-                        .track_scroll(self.preview_scroll_handle.clone())
-                        .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .p_2(),
-                    ),
-            )
     }
 
     pub(super) fn render_compact_content_panel(
@@ -1166,4 +950,331 @@ impl Workspace {
                 )))
         }
     }
+}
+
+impl TreePaneView {
+    pub(super) fn render_tree_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let workspace = self.workspace.clone();
+        let (
+            language,
+            filter_input,
+            tree_filter,
+            has_visible_nodes,
+            visible_summary,
+            total_summary,
+            tree_state,
+        ) = {
+            let workspace_ref = workspace.read(cx);
+            let language = workspace_ref.language(cx);
+            let filter_input = workspace_ref.tree_panel.filter_input.clone();
+            let tree_filter = filter_input.read(cx).value().trim().to_string();
+            let has_visible_nodes = !workspace_ref.tree_panel.render_state.rows.is_empty();
+            let visible_summary = workspace_ref.tree_panel.render_state.visible_summary;
+            let total_summary = workspace_ref.tree_panel.total_summary;
+            let tree_state = workspace_ref.tree_panel.state.clone();
+            (
+                language,
+                filter_input,
+                tree_filter,
+                has_visible_nodes,
+                visible_summary,
+                total_summary,
+                tree_state,
+            )
+        };
+        let has_result = self.result_has_tree(cx);
+        let filter_active = !tree_filter.is_empty();
+
+        let row_workspace = workspace.clone();
+        let expand_workspace = workspace.clone();
+        let collapse_workspace = workspace.clone();
+        let tree_view = tree(&tree_state, move |ix, entry, selected, _, cx| {
+            let workspace = row_workspace.read(cx);
+            let Some(mut row) = workspace.tree_panel.render_state.rows.get(ix).cloned() else {
+                return ListItem::new(ix).child(entry.item().label.clone());
+            };
+            row.is_expanded = entry.is_expanded();
+            if row.is_folder {
+                row.icon_kind = if entry.is_expanded() {
+                    super::model::TreeIconKind::FolderOpen
+                } else {
+                    super::model::TreeIconKind::FolderClosed
+                };
+            }
+            render_tree_row(ix, &row, selected, language, cx)
+        })
+        .h_full();
+
+        v_flex()
+            .gap_3()
+            .size_full()
+            .min_h(px(0.))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        Input::new(&filter_input)
+                            .prefix(IconName::Search)
+                            .cleanable(true),
+                    )
+                    .child(
+                        Button::new("tree-expand")
+                            .outline()
+                            .icon(IconName::ChevronDown)
+                            .label(tr(language, "tree_expand_all"))
+                            .disabled(!has_result || filter_active)
+                            .on_click(cx.listener(move |_, event, window, cx| {
+                                expand_workspace.update(cx, |workspace, cx| {
+                                    workspace.expand_tree(event, window, cx);
+                                });
+                            })),
+                    )
+                    .child(
+                        Button::new("tree-collapse")
+                            .outline()
+                            .icon(IconName::ChevronRight)
+                            .label(tr(language, "tree_collapse_all"))
+                            .disabled(!has_result || filter_active)
+                            .on_click(cx.listener(move |_, event, window, cx| {
+                                collapse_workspace.update(cx, |workspace, cx| {
+                                    workspace.collapse_tree(event, window, cx);
+                                });
+                            })),
+                    ),
+            )
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .px_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format_tree_summary(
+                                visible_summary,
+                                total_summary,
+                                language,
+                            )),
+                    )
+                    .child(pill_label(
+                        if filter_active {
+                            tr(language, "tree_filter_active")
+                        } else {
+                            tr(language, "tree_filter_idle")
+                        },
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(14.))
+                    .bg(cx.theme().secondary.opacity(0.35))
+                    .p_2()
+                    .child(if has_visible_nodes {
+                        tree_view.into_any_element()
+                    } else {
+                        empty_box(
+                            if has_result {
+                                tr(language, "tree_no_match")
+                            } else {
+                                tr(language, "tree_empty")
+                            },
+                            if has_result && filter_active {
+                                tr(language, "tree_no_match_hint")
+                            } else {
+                                tr(language, "tree_empty_hint")
+                            },
+                            IconName::FolderOpen,
+                            cx,
+                        )
+                        .into_any_element()
+                    }),
+            )
+    }
+
+    fn result_has_tree(&self, cx: &App) -> bool {
+        self.workspace
+            .read(cx)
+            .result
+            .read(cx)
+            .state()
+            .result
+            .is_some()
+    }
+}
+
+impl PreviewPaneView {
+    pub(super) fn scroll_to_top(&mut self) {
+        self.scroll_handle
+            .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
+        self.last_visible_bucket = 0..0;
+    }
+
+    pub(super) fn render_preview_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.settings.read(cx).language();
+        let result_state = self.result.read(cx).state().clone();
+        let preview = self.preview.read(cx);
+        let preview_state = preview.state();
+        let selected_preview = preview
+            .selected_preview_file_id()
+            .and_then(|id| result_state.preview_rows.iter().find(|row| row.id == id));
+
+        if let Some(error) = preview_state.preview_error.as_ref() {
+            let preview_failure_title = selected_preview
+                .map(|row| row.display_path.clone())
+                .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+            let title = format!(
+                "{}: {}",
+                tr(language, "status_error"),
+                preview_failure_title
+            );
+            return empty_box(title, error.to_string(), IconName::TriangleAlert, cx);
+        }
+
+        let Some(document) = preview_state.preview_document.as_ref() else {
+            self.last_visible_bucket = 0..0;
+            return empty_box(
+                tr(language, "preview_empty"),
+                tr(language, "preview_empty_hint"),
+                IconName::File,
+                cx,
+            );
+        };
+
+        let file_path = selected_preview
+            .map(|row| row.display_path.clone())
+            .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+        let line_count = document.line_count();
+
+        v_flex()
+            .gap_2()
+            .flex_1()
+            .min_h(px(0.))
+            .child(render_kv(tr(language, "table_path"), file_path, cx))
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(render_kv(
+                        tr(language, "line_count"),
+                        document.line_count().to_string(),
+                        cx,
+                    ))
+                    .child(render_kv(
+                        tr(language, "byte_size"),
+                        document.byte_len().to_string(),
+                        cx,
+                    )),
+            )
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(cx.theme().radius)
+                    .child(
+                        uniform_list(
+                            "preview-lines",
+                            line_count,
+                            cx.processor(
+                                move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
+                                    view.sync_visible_range(visible_range.clone(), app_cx);
+                                    let preview = view.preview.read(app_cx);
+                                    let muted = app_cx.theme().muted_foreground;
+                                    let mono = app_cx.theme().mono_font_family.clone();
+
+                                    visible_range
+                                        .filter(|ix| *ix < line_count)
+                                        .map(|ix| {
+                                            let line = preview.line_at(ix).unwrap_or_default();
+                                            h_flex()
+                                                .gap_3()
+                                                .px_3()
+                                                .h(preview_line_height())
+                                                .font_family(mono.clone())
+                                                .child(
+                                                    div()
+                                                        .w(px(64.))
+                                                        .text_right()
+                                                        .text_color(muted)
+                                                        .child((ix + 1).to_string()),
+                                                )
+                                                .child(div().flex_1().child(line))
+                                        })
+                                        .collect()
+                                },
+                            ),
+                        )
+                        .track_scroll(self.scroll_handle.clone())
+                        .with_sizing_behavior(ListSizingBehavior::Auto)
+                        .p_2(),
+                    ),
+            )
+    }
+
+    fn sync_visible_range(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
+        let (line_count, already_loaded) = {
+            let preview = self.preview.read(cx);
+            let preview_state = preview.state();
+            let Some(document) = &preview_state.preview_document else {
+                self.last_visible_bucket = 0..0;
+                return;
+            };
+            let line_count = document.line_count();
+            let bucketed = bucket_visible_range(
+                visible.clone(),
+                crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES,
+                line_count,
+            );
+            let already_loaded = preview_state.has_loaded_range(&bucketed);
+            (line_count, already_loaded)
+        };
+        if line_count == 0 {
+            self.last_visible_bucket = 0..0;
+            return;
+        }
+
+        let bucketed = bucket_visible_range(
+            visible,
+            crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES,
+            line_count,
+        );
+        if self.last_visible_bucket == bucketed {
+            return;
+        }
+        self.last_visible_bucket = bucketed.clone();
+        if already_loaded {
+            return;
+        }
+
+        self.workspace.update(cx, |workspace, cx| {
+            workspace.request_preview_range(bucketed, cx);
+        });
+    }
+}
+
+fn bucket_visible_range(
+    visible: std::ops::Range<usize>,
+    bucket_lines: usize,
+    line_count: usize,
+) -> std::ops::Range<usize> {
+    if line_count == 0 || bucket_lines == 0 {
+        return 0..0;
+    }
+    let start = visible.start.min(line_count.saturating_sub(1));
+    let end = visible.end.max(start + 1).min(line_count);
+    let bucket_start = (start / bucket_lines) * bucket_lines;
+    let bucket_end = end
+        .saturating_sub(1)
+        .checked_div(bucket_lines)
+        .map(|bucket| (bucket + 1) * bucket_lines)
+        .unwrap_or(bucket_lines)
+        .min(line_count);
+    bucket_start..bucket_end.max(bucket_start + 1).min(line_count)
 }

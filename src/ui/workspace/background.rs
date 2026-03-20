@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use gpui::{Context, ScrollStrategy};
+use gpui::Context;
 
 use super::view::TreeExpansionMode;
 use super::{Workspace, model};
@@ -73,22 +73,28 @@ impl Workspace {
             .update(cx, |preview, _| preview.take_preview_rx())
         {
             let mut keep = true;
+            let mut events = Vec::new();
             loop {
                 match rx.try_recv() {
                     Ok(event) => {
                         received_events = true;
-                        self.apply_preview_event(event, cx);
+                        events.push(event);
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         keep = false;
-                        self.preview.update(cx, |preview, preview_cx| {
-                            preview.clear_request();
-                            preview_cx.notify();
-                        });
                         break;
                     }
                 }
+            }
+            if !events.is_empty() {
+                self.apply_preview_events(events, cx);
+            }
+            if !keep {
+                self.preview.update(cx, |preview, preview_cx| {
+                    preview.clear_request();
+                    preview_cx.notify();
+                });
             }
             if keep {
                 self.preview
@@ -150,15 +156,16 @@ impl Workspace {
         }
     }
 
-    fn apply_preview_event(&mut self, event: PreviewEvent, cx: &mut Context<Self>) {
+    fn apply_preview_events(&mut self, events: Vec<PreviewEvent>, cx: &mut Context<Self>) {
         let effect = self.preview.update(cx, |preview, preview_cx| {
-            let effect = preview.apply_event(event);
+            let effect = preview.apply_events(events);
             preview_cx.notify();
             effect
         });
         if matches!(effect, PreviewEventEffect::ScrollTop) {
-            self.preview_scroll_handle
-                .scroll_to_item_strict(0, ScrollStrategy::Top);
+            self.preview_pane_view.update(cx, |view, _| {
+                view.scroll_to_top();
+            });
         }
     }
 
@@ -178,8 +185,11 @@ impl Workspace {
         });
         let result = self.result.read(cx);
         self.tree_panel.data = model::build_tree_panel_data(result.state().result.as_ref());
+        self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.last_interaction = None;
         self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.total_summary = model::TreeCountSummary::default();
+        self.tree_panel.last_filter.clear();
         self.state.workspace.reset_tree();
         if let Some(data) = self.tree_panel.data.as_ref() {
             self.state.workspace.tree_panel.expanded_ids = data.index.default_expanded_ids.clone();
@@ -212,9 +222,16 @@ impl Workspace {
             .value()
             .trim()
             .to_ascii_lowercase();
-        let render_state = model::project_tree_panel(
-            self.tree_panel.data.as_ref(),
-            filter.as_str(),
+        let filter_changed = self.tree_panel.last_filter != filter;
+        if filter_changed || self.tree_panel.projection.roots.is_empty() {
+            self.tree_panel.projection =
+                model::build_tree_projection(self.tree_panel.data.as_ref(), filter.as_str());
+            self.tree_panel.total_summary = self.tree_panel.projection.total_summary;
+            self.tree_panel.last_filter = filter.clone();
+        }
+        let render_state = model::build_tree_render_state(
+            &self.tree_panel.projection,
+            !filter.is_empty(),
             &self.state.workspace.tree_panel.expanded_ids,
             self.state.workspace.tree_panel.selected_node_id.as_deref(),
         );
@@ -351,7 +368,7 @@ impl Workspace {
     ) -> bool {
         match effect {
             model::TreePanelEffect::None => false,
-            model::TreePanelEffect::RefreshTree => {
+            model::TreePanelEffect::RefreshVisibleTree => {
                 self.sync_tree(cx);
                 true
             }
@@ -370,25 +387,11 @@ impl Workspace {
         }
     }
 
-    fn preview_request_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
-        if line_count == 0 {
-            return 0..0;
-        }
-        let bucket = crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES;
-        let start = range.start.min(line_count.saturating_sub(1));
-        let end = range.end.max(start + 1).min(line_count);
-        let bucket_start = (start / bucket) * bucket;
-        let bucket_end = end
-            .saturating_sub(1)
-            .checked_div(bucket)
-            .map(|ix| (ix + 1) * bucket)
-            .unwrap_or(bucket)
-            .min(line_count);
-
-        bucket_start.saturating_sub(bucket)..(bucket_end + bucket * 2).min(line_count)
-    }
-
-    fn request_preview_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> bool {
+    pub(super) fn request_preview_range(
+        &mut self,
+        range: Range<usize>,
+        cx: &mut Context<Self>,
+    ) -> bool {
         if self.preview.read(cx).preview_document().is_none() {
             return false;
         }
@@ -410,38 +413,6 @@ impl Workspace {
         });
         self.ensure_background_polling(cx);
         true
-    }
-
-    pub(super) fn sync_preview_visible_range(
-        &mut self,
-        visible: Range<usize>,
-        cx: &mut Context<Self>,
-    ) -> bool {
-        let preview_state = self.preview.read(cx).state();
-        let Some(document) = &preview_state.preview_document else {
-            return false;
-        };
-        let line_count = document.line_count();
-        if line_count == 0 {
-            return false;
-        }
-
-        let start = visible.start.min(line_count.saturating_sub(1));
-        let end = visible.end.max(start + 1).min(line_count);
-        let visible = start..end;
-        let request_range = self.preview_request_range(visible.clone(), line_count);
-        let already_loaded = preview_state.has_loaded_range(&request_range);
-        let changed = self.preview.update(cx, |preview, _| {
-            preview
-                .state_mut()
-                .update_visible_range(visible.clone(), line_count)
-        });
-
-        if !changed || already_loaded {
-            return false;
-        }
-
-        self.request_preview_range(visible, cx)
     }
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
@@ -475,8 +446,9 @@ impl Workspace {
         self.preview.update(cx, |preview, _| {
             preview.set_preview_rx(Some(start_preview(request)));
         });
-        self.preview_scroll_handle
-            .scroll_to_item_strict(0, ScrollStrategy::Top);
+        self.preview_pane_view.update(cx, |view, _| {
+            view.scroll_to_top();
+        });
         self.ensure_background_polling(cx);
     }
 }

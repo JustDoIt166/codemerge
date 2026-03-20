@@ -22,10 +22,6 @@ impl PreviewModel {
         &self.state
     }
 
-    pub fn state_mut(&mut self) -> &mut PreviewPanelState {
-        &mut self.state
-    }
-
     pub fn clear(&mut self) {
         self.state = PreviewPanelState::default();
     }
@@ -93,6 +89,26 @@ impl PreviewModel {
         }
     }
 
+    pub fn apply_events<I>(&mut self, events: I) -> PreviewEventEffect
+    where
+        I: IntoIterator<Item = PreviewEvent>,
+    {
+        let mut effect = PreviewEventEffect::Ignored;
+        for event in events {
+            let next = self.apply_event(event);
+            effect = match (effect, next) {
+                (PreviewEventEffect::ScrollTop, _) | (_, PreviewEventEffect::ScrollTop) => {
+                    PreviewEventEffect::ScrollTop
+                }
+                (PreviewEventEffect::Updated, _) | (_, PreviewEventEffect::Updated) => {
+                    PreviewEventEffect::Updated
+                }
+                _ => PreviewEventEffect::Ignored,
+            };
+        }
+        effect
+    }
+
     pub fn clear_request(&mut self) {
         self.state.preview_requested_range = None;
     }
@@ -108,7 +124,6 @@ impl PreviewModel {
         self.state.preview_requested_range =
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.preview_document = None;
-        self.state.preview_last_visible_range = 0..0;
         self.state.clear_loaded_chunks();
 
         PreviewRequest::Open {
