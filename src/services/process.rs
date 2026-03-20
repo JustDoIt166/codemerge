@@ -66,7 +66,7 @@ pub fn start(request: ProcessRequest) -> ProcessHandle {
             Ok(result) => {
                 let _ = tx.send(ProcessEvent::Completed(result));
             }
-            Err(err) if thread_cancel.is_cancelled() => {
+            Err(_) if thread_cancel.is_cancelled() => {
                 let _ = tx.send(ProcessEvent::Cancelled);
             }
             Err(err) => {

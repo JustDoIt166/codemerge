@@ -36,6 +36,7 @@ cargo run
 ```
 
 Windows 是主要运行目标。Linux CI 维持编译和测试兼容。
+Ubuntu/Debian 构建需额外安装 `libxkbcommon-x11-dev`，否则 `gpui` 在链接阶段会报缺少 `-lxkbcommon-x11`。
 
 ## 质量门禁
 ```bash
