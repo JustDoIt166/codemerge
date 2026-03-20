@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Hsla, IntoElement, ParentElement, SharedString, Styled, Window, div, hsla,
-    prelude::FluentBuilder as _, px,
+    AnyElement, App, Div, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
+    StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable, Size, StyledExt as _, WindowExt as _, h_flex,
@@ -9,7 +9,6 @@ use gpui_component::{
 };
 
 use super::BlacklistItemKind;
-use super::Workspace;
 use super::model::{
     BlacklistSectionViewModel, BlacklistTagViewModel, FilterMatchKind, TreeCountSummary,
     TreeRowViewModel,
@@ -18,6 +17,142 @@ use super::tree_palette::{ResolvedTreeRowPalette, TreeRowPalette};
 use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
+
+#[derive(IntoElement)]
+pub(super) struct Card {
+    base: Div,
+    style: StyleRefinement,
+}
+
+impl Card {
+    fn new() -> Self {
+        Self {
+            base: div(),
+            style: StyleRefinement::default(),
+        }
+    }
+}
+
+impl Styled for Card {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl ParentElement for Card {
+    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
+        self.base.extend(elements);
+    }
+}
+
+impl RenderOnce for Card {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base
+            .size_full()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .p_4()
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().background)
+            .rounded(cx.theme().radius)
+            .refine_style(&self.style)
+    }
+}
+
+#[derive(IntoElement)]
+struct SectionTitle {
+    base: Div,
+    style: StyleRefinement,
+    title: SharedString,
+    icon: IconName,
+}
+
+impl SectionTitle {
+    fn new(title: impl Into<SharedString>, icon: IconName) -> Self {
+        Self {
+            base: div(),
+            style: StyleRefinement::default(),
+            title: title.into(),
+            icon,
+        }
+    }
+}
+
+impl Styled for SectionTitle {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for SectionTitle {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        h_flex()
+            .gap_2()
+            .items_center()
+            .child(accent_icon_badge(
+                self.icon,
+                cx.theme().primary,
+                cx.theme().primary.opacity(0.14),
+            ))
+            .child(
+                self.base
+                    .font_semibold()
+                    .text_color(cx.theme().foreground)
+                    .child(self.title)
+                    .refine_style(&self.style),
+            )
+    }
+}
+
+#[derive(IntoElement)]
+struct StatTile {
+    base: Div,
+    style: StyleRefinement,
+    label: SharedString,
+    value: SharedString,
+}
+
+impl StatTile {
+    fn new(label: impl Into<SharedString>, value: impl Into<SharedString>) -> Self {
+        Self {
+            base: div(),
+            style: StyleRefinement::default(),
+            label: label.into(),
+            value: value.into(),
+        }
+    }
+}
+
+impl Styled for StatTile {
+    fn style(&mut self) -> &mut StyleRefinement {
+        &mut self.style
+    }
+}
+
+impl RenderOnce for StatTile {
+    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
+        self.base
+            .flex_1()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .bg(cx.theme().secondary)
+            .border_1()
+            .border_color(cx.theme().border)
+            .refine_style(&self.style)
+            .child(
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(self.label),
+                    )
+                    .child(div().text_lg().font_semibold().child(self.value)),
+            )
+    }
+}
 
 pub(super) fn render_tree_row(
     ix: usize,
@@ -351,16 +486,9 @@ pub(super) fn format_tree_summary(
     )
 }
 
-pub(super) fn card(cx: &App) -> gpui::Div {
-    div()
-        .size_full()
-        .min_h(px(0.))
-        .overflow_hidden()
-        .p_4()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().background)
-        .rounded(cx.theme().radius)
+pub(super) fn card(cx: &App) -> Card {
+    let _ = cx;
+    Card::new()
 }
 
 pub(super) fn panel_viewport(content: AnyElement, min_height: gpui::Pixels) -> gpui::Div {
@@ -385,21 +513,8 @@ pub(super) fn panel_frame(content: AnyElement, min_height: gpui::Pixels) -> gpui
 }
 
 pub(super) fn section_title(title: &str, icon: IconName, cx: &App) -> AnyElement {
-    h_flex()
-        .gap_2()
-        .items_center()
-        .child(accent_icon_badge(
-            icon,
-            cx.theme().primary,
-            cx.theme().primary.opacity(0.14),
-        ))
-        .child(
-            div()
-                .font_semibold()
-                .text_color(cx.theme().foreground)
-                .child(title.to_string()),
-        )
-        .into_any_element()
+    let _ = cx;
+    SectionTitle::new(title.to_string(), icon).into_any_element()
 }
 
 pub(super) fn section_caption(title: &str, icon: IconName, cx: &App) -> AnyElement {
@@ -484,25 +599,8 @@ pub(super) fn render_kv(label: &str, value: String, cx: &App) -> AnyElement {
 }
 
 pub(super) fn stat_tile(label: &str, value: String, cx: &App) -> AnyElement {
-    div()
-        .flex_1()
-        .p_3()
-        .rounded(cx.theme().radius)
-        .bg(cx.theme().secondary)
-        .border_1()
-        .border_color(cx.theme().border)
-        .child(
-            v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(label.to_string()),
-                )
-                .child(div().text_lg().font_semibold().child(value)),
-        )
-        .into_any_element()
+    let _ = cx;
+    StatTile::new(label.to_string(), value).into_any_element()
 }
 
 pub(super) fn status_banner(
@@ -796,20 +894,21 @@ pub(super) fn process_status_title(status: ProcessUiStatus, language: Language) 
     }
 }
 
-pub(super) fn process_status_message(workspace: &Workspace, language: Language) -> String {
-    match workspace.state.process.ui_status {
+pub(super) fn process_status_message(
+    process: &crate::ui::state::ProcessState,
+    language: Language,
+) -> String {
+    match process.ui_status {
         ProcessUiStatus::Idle => tr(language, "status_idle_hint").to_string(),
         ProcessUiStatus::Preflight => format!(
             "{} {}",
             tr(language, "status_preflight_hint"),
-            workspace.state.process.preflight.scanned_entries
+            process.preflight.scanned_entries
         ),
-        ProcessUiStatus::Running => workspace.state.process.processing_current_file.clone(),
+        ProcessUiStatus::Running => process.processing_current_file.clone(),
         ProcessUiStatus::Completed => tr(language, "status_completed_hint").to_string(),
         ProcessUiStatus::Cancelled => tr(language, "status_cancelled_hint").to_string(),
-        ProcessUiStatus::Error => workspace
-            .state
-            .process
+        ProcessUiStatus::Error => process
             .last_error
             .clone()
             .unwrap_or_else(|| tr(language, "status_error_hint").to_string()),

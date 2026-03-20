@@ -59,8 +59,11 @@ pub fn start(request: ProcessRequest) -> ProcessHandle {
     thread::spawn(move || {
         let event_tx = tx.clone();
         let cancel_for_run = thread_cancel.clone();
-        let result =
-            RUNTIME.block_on(async move { run_process(request, cancel_for_run, event_tx).await });
+        let result = match &*RUNTIME {
+            Ok(runtime) => runtime
+                .block_on(async move { run_process(request, cancel_for_run, event_tx).await }),
+            Err(err) => Err(AppError::new(err.clone())),
+        };
 
         match result {
             Ok(result) => {
