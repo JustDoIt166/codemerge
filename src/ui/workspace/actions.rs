@@ -1,5 +1,3 @@
-use std::collections::BTreeSet;
-
 use gpui::{App, ClickEvent, Context, Entity, SharedString, Window};
 use gpui_component::{
     WindowExt as _,
@@ -31,7 +29,7 @@ impl Workspace {
     }
 
     fn persist_settings_async(&self, cx: &mut Context<Self>) {
-        let config = self.state.to_config();
+        let config = self.settings.read(cx).to_config();
         cx.spawn(async move |this, cx| {
             let result =
                 crate::services::settings::execute(crate::domain::SettingsCommand::Save(config));
@@ -60,27 +58,19 @@ impl Workspace {
         gitignore_rules: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        self.state.selection.selected_folder = Some(path);
-        self.state.selection.gitignore_rules = gitignore_rules;
+        self.selection.update(cx, |selection, selection_cx| {
+            selection.set_selected_folder(path, gitignore_rules);
+            selection_cx.notify();
+        });
         self.refresh_preflight(cx);
         cx.notify();
     }
 
     pub(super) fn apply_selected_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
-        let mut existing = self
-            .state
-            .selection
-            .selected_files
-            .iter()
-            .map(|entry| entry.path.to_string_lossy().to_string())
-            .collect::<BTreeSet<_>>();
-        for entry in files {
-            let key = entry.path.to_string_lossy().to_string();
-            if self.state.selection.dedupe_exact_path && !existing.insert(key) {
-                continue;
-            }
-            self.state.selection.selected_files.push(entry);
-        }
+        self.selection.update(cx, |selection, selection_cx| {
+            selection.add_selected_files(files);
+            selection_cx.notify();
+        });
         self.refresh_preflight(cx);
         cx.notify();
     }
@@ -90,7 +80,10 @@ impl Workspace {
         path: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.state.selection.gitignore_file = path;
+        self.selection.update(cx, |selection, selection_cx| {
+            selection.set_gitignore_file(path);
+            selection_cx.notify();
+        });
         cx.notify();
     }
 
@@ -102,7 +95,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
-            self.clear_preview_state();
+            self.clear_preview_state(cx);
             self.sync_preview_table(cx);
         }
     }
@@ -152,13 +145,17 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.state.settings.language = self.state.settings.language.toggle();
+        let language = self.settings.update(cx, |settings, settings_cx| {
+            let language = settings.toggle_language();
+            settings_cx.notify();
+            language
+        });
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.sync_localized_inputs(window, cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "language_updated"),
+            tr(language, "language_updated"),
             window,
             cx,
         );
@@ -254,28 +251,29 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = &self.state.selection.gitignore_file else {
+        let selection = self.selection_snapshot(cx);
+        let Some(path) = &selection.gitignore_file else {
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "gitignore_required"),
+                tr(self.language(cx), "gitignore_required"),
                 window,
                 cx,
             );
             return;
         };
         let path = path.clone();
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
             let loaded = std::fs::read_to_string(&path)
                 .map(|content| crate::processor::walker::parse_gitignore_rules(&content));
             let _ = this.update(cx, |this, cx| match loaded {
                 Ok(rules) => {
-                    for rule in rules {
-                        if !this.state.settings.folder_blacklist.contains(&rule) {
-                            this.state.settings.folder_blacklist.push(rule);
-                        }
-                    }
+                    this.settings.update(cx, |settings, settings_cx| {
+                        let added = settings.append_gitignore_rules(rules);
+                        settings_cx.notify();
+                        added
+                    });
                     this.invalidate_rules_panel_cache();
                     this.persist_settings_async(cx);
                     this.refresh_preflight(cx);
@@ -306,7 +304,7 @@ impl Workspace {
             self.pending_confirmation = Some(PendingConfirmation::ClearInputs);
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "confirm_clear_notice"),
+                tr(self.language(cx), "confirm_clear_notice"),
                 window,
                 cx,
             );
@@ -314,14 +312,36 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation();
-        if let Some(handle) = self.state.process.process_handle.as_ref() {
+        if let Some(handle) = self.process.read(cx).state().process_handle.as_ref() {
             handle.cancel.cancel();
         }
-        self.state.process.preflight_rx = None;
-        self.state.workspace.preview_panel.preview_rx = None;
+        self.process.update(cx, |process, process_cx| {
+            process.state_mut().preflight_rx = None;
+            process_cx.notify();
+        });
+        self.preview.update(cx, |preview, preview_cx| {
+            preview.set_preview_rx(None);
+            preview_cx.notify();
+        });
         self.cleanup_current_result_artifacts();
-        let status_ready = tr(self.state.settings.language, "status_ready").to_string();
-        self.state.clear_inputs(status_ready);
+        let status_ready = tr(self.language(cx), "status_ready").to_string();
+        self.state.clear_inputs();
+        self.selection.update(cx, |selection, selection_cx| {
+            selection.clear();
+            selection_cx.notify();
+        });
+        self.preview.update(cx, |preview, preview_cx| {
+            preview.clear();
+            preview_cx.notify();
+        });
+        self.result.update(cx, |result, result_cx| {
+            result.clear();
+            result_cx.notify();
+        });
+        self.process.update(cx, |process, process_cx| {
+            process.clear_runtime(status_ready);
+            process_cx.notify();
+        });
         self.tree_panel.state.update(cx, |state, tree_cx| {
             state.set_selected_index(None, tree_cx);
         });
@@ -333,7 +353,7 @@ impl Workspace {
         self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "files_cleared"),
+            tr(self.language(cx), "files_cleared"),
             window,
             cx,
         );
@@ -346,50 +366,53 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.is_processing() {
+        if self.is_processing(cx) {
             return;
         }
-        if self.state.selection.selected_folder.is_none()
-            && self.state.selection.selected_files.is_empty()
-        {
+        if !self.has_inputs(cx) {
             self.push_notice(
                 NotificationType::Error,
-                tr(self.state.settings.language, "no_input_selected"),
+                tr(self.language(cx), "no_input_selected"),
                 window,
                 cx,
             );
             return;
         }
         self.cleanup_current_result_artifacts();
-        self.state.result = crate::ui::state::ResultState::default();
+        self.result.update(cx, |result, result_cx| {
+            result.clear();
+            result_cx.notify();
+        });
         self.state.workspace.reset_tree();
         self.tree_panel.data = None;
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.last_interaction = None;
-        self.clear_preview_state();
+        self.clear_preview_state(cx);
         self.clear_pending_confirmation();
         self.sync_tree(cx);
-        self.state
-            .process
-            .reset_for_run(tr(self.state.settings.language, "scanning_files").to_string());
-        self.state.process.process_handle = Some(crate::services::process::start(ProcessRequest {
-            selected_folder: self.state.selection.selected_folder.clone(),
-            selected_files: self
-                .state
-                .selection
+        self.sync_preview_table(cx);
+        let settings = self.settings_snapshot(cx);
+        let selection = self.selection_snapshot(cx);
+        let handle = crate::services::process::start(ProcessRequest {
+            selected_folder: selection.selected_folder.clone(),
+            selected_files: selection
                 .selected_files
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect(),
-            folder_blacklist: self.state.effective_folder_blacklist(),
-            ext_blacklist: self.state.settings.ext_blacklist.clone(),
-            options: self.state.settings.options.clone(),
-            language: self.state.settings.language,
-        }));
+            folder_blacklist: self.effective_folder_blacklist(cx),
+            ext_blacklist: settings.ext_blacklist.clone(),
+            options: settings.options.clone(),
+            language: settings.language,
+        });
+        self.process.update(cx, |process, process_cx| {
+            process.start_run(handle, tr(settings.language, "scanning_files").to_string());
+            process_cx.notify();
+        });
         self.ensure_background_polling(cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "process_started"),
+            tr(settings.language, "process_started"),
             window,
             cx,
         );
@@ -402,12 +425,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(handle) = &self.state.process.process_handle {
-            handle.cancel.cancel();
-            self.state.process.ui_status = crate::ui::state::ProcessUiStatus::Cancelled;
+        if self.process.update(cx, |process, process_cx| {
+            let cancelled = process.cancel_running();
+            process_cx.notify();
+            cancelled
+        }) {
             self.push_notice(
                 NotificationType::Info,
-                tr(self.state.settings.language, "cancelled"),
+                tr(self.language(cx), "cancelled"),
                 window,
                 cx,
             );
@@ -457,33 +482,24 @@ impl Workspace {
         if tokens.is_empty() {
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "blacklist_empty"),
+                tr(self.language(cx), "blacklist_empty"),
                 window,
                 cx,
             );
             return 0;
         }
 
-        let mut added = 0;
-        for token in tokens {
-            if as_ext {
-                let normalized = crate::processor::walker::normalize_ext(&token);
-                if !self.state.settings.ext_blacklist.contains(&normalized) {
-                    self.state.settings.ext_blacklist.push(normalized);
-                    added += 1;
-                }
-            } else if !self.state.settings.folder_blacklist.contains(&token) {
-                self.state.settings.folder_blacklist.push(token);
-                added += 1;
-            }
-        }
+        let added = self.settings.update(cx, |settings, settings_cx| {
+            settings_cx.notify();
+            settings.add_blacklist_tokens(&tokens, as_ext)
+        });
         self.blacklist_add_input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.push_notice(
             NotificationType::Success,
-            tr(self.state.settings.language, "blacklist_added"),
+            tr(self.language(cx), "blacklist_added"),
             window,
             cx,
         );
@@ -496,18 +512,19 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let settings = self.settings_snapshot(cx);
         let mut body = String::new();
         body.push_str("# folders\n");
-        for item in &self.state.settings.folder_blacklist {
+        for item in &settings.folder_blacklist {
             body.push_str(item);
             body.push('\n');
         }
         body.push_str("# extensions\n");
-        for item in &self.state.settings.ext_blacklist {
+        for item in &settings.ext_blacklist {
             body.push_str(item);
             body.push('\n');
         }
-        let language = self.state.settings.language;
+        let language = settings.language;
         let _ = window;
         cx.spawn(async move |this, cx| {
             let path = rfd::AsyncFileDialog::new()
@@ -560,32 +577,19 @@ impl Workspace {
             let content = std::fs::read_to_string(path);
             let _ = this.update(cx, |this, cx| match content {
                 Ok(content) => {
-                    for line in content
-                        .lines()
-                        .map(str::trim)
-                        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-                    {
-                        if line.starts_with('.') {
-                            let ext = crate::processor::walker::normalize_ext(line);
-                            if !this.state.settings.ext_blacklist.contains(&ext) {
-                                this.state.settings.ext_blacklist.push(ext);
-                            }
-                        } else if !this
-                            .state
-                            .settings
-                            .folder_blacklist
-                            .contains(&line.to_string())
-                        {
-                            this.state.settings.folder_blacklist.push(line.to_string());
-                        }
-                    }
+                    let language = this.language(cx);
+                    this.settings.update(cx, |settings, settings_cx| {
+                        let added = settings.import_blacklist_content(&content);
+                        settings_cx.notify();
+                        added
+                    });
                     this.invalidate_rules_panel_cache();
                     this.persist_settings_async(cx);
                     this.refresh_preflight(cx);
                     Self::notify_active_window(
                         cx,
                         NotificationType::Success,
-                        tr(this.state.settings.language, "blacklist_imported"),
+                        tr(language, "blacklist_imported"),
                     );
                     cx.notify();
                 }
@@ -607,7 +611,7 @@ impl Workspace {
             self.pending_confirmation = Some(PendingConfirmation::ResetBlacklist);
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "confirm_reset_notice"),
+                tr(self.language(cx), "confirm_reset_notice"),
                 window,
                 cx,
             );
@@ -615,14 +619,16 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation();
-        self.state.settings.folder_blacklist = crate::domain::default_folder_blacklist();
-        self.state.settings.ext_blacklist = crate::domain::default_ext_blacklist();
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.reset_blacklist();
+            settings_cx.notify();
+        });
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "blacklist_reset_default"),
+            tr(self.language(cx), "blacklist_reset_default"),
             window,
             cx,
         );
@@ -639,7 +645,7 @@ impl Workspace {
             self.pending_confirmation = Some(PendingConfirmation::ClearBlacklist);
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "confirm_clear_notice"),
+                tr(self.language(cx), "confirm_clear_notice"),
                 window,
                 cx,
             );
@@ -647,14 +653,16 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation();
-        self.state.settings.folder_blacklist.clear();
-        self.state.settings.ext_blacklist.clear();
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.clear_blacklist();
+            settings_cx.notify();
+        });
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "blacklist_cleared"),
+            tr(self.language(cx), "blacklist_cleared"),
             window,
             cx,
         );
@@ -668,7 +676,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation();
-        self.state.settings.options.compress = *checked;
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.set_compress(*checked);
+            settings_cx.notify();
+        });
         self.persist_settings_async(cx);
         cx.notify();
     }
@@ -680,7 +691,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation();
-        self.state.settings.options.use_gitignore = *checked;
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.set_use_gitignore(*checked);
+            settings_cx.notify();
+        });
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         cx.notify();
@@ -693,25 +707,10 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation();
-        self.state.settings.options.ignore_git = *checked;
-        if *checked {
-            if !self
-                .state
-                .settings
-                .folder_blacklist
-                .contains(&".git".to_string())
-            {
-                self.state
-                    .settings
-                    .folder_blacklist
-                    .push(".git".to_string());
-            }
-        } else {
-            self.state
-                .settings
-                .folder_blacklist
-                .retain(|item| item != ".git");
-        }
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.set_ignore_git(*checked);
+            settings_cx.notify();
+        });
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
@@ -720,22 +719,32 @@ impl Workspace {
 
     pub(super) fn toggle_dedupe(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
         self.clear_pending_confirmation();
-        self.state.selection.dedupe_exact_path = *checked;
+        self.selection.update(cx, |selection, selection_cx| {
+            selection.set_dedupe_exact_path(*checked);
+            selection_cx.notify();
+        });
         cx.notify();
     }
 
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
-        if *ix == 1 && !self.state.has_content_result() {
-            self.state.result.active_tab = ResultTab::Tree;
+        if *ix == 1 && !self.result_has_content(cx) {
+            self.result.update(cx, |result, result_cx| {
+                result.set_active_tab(ResultTab::Tree);
+                result_cx.notify();
+            });
             cx.notify();
             return;
         }
-        self.state.result.active_tab = if *ix == 0 {
+        let active_tab = if *ix == 0 {
             ResultTab::Tree
         } else {
             ResultTab::Content
         };
-        if self.state.result.active_tab == ResultTab::Content {
+        self.result.update(cx, |result, result_cx| {
+            result.set_active_tab(active_tab);
+            result_cx.notify();
+        });
+        if active_tab == ResultTab::Content {
             self.ensure_background_polling(cx);
         }
         cx.notify();
@@ -783,17 +792,13 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(result) = &self.state.result.result {
-            copy_to_clipboard(
-                &result.tree_string,
-                self.state.settings.language,
-                window,
-                cx,
-            );
+        let result = self.result.read(cx).state().result.clone();
+        if let Some(result) = result.as_ref() {
+            copy_to_clipboard(&result.tree_string, self.language(cx), window, cx);
         } else {
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "no_tree"),
+                tr(self.language(cx), "no_tree"),
                 window,
                 cx,
             );
@@ -806,17 +811,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
+        let document = self.preview.read(cx).preview_document().cloned();
+        let Some(document) = document else {
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "no_content"),
+                tr(self.language(cx), "no_content"),
                 window,
                 cx,
             );
             return;
         };
         let document = document.clone();
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
             let result = load_text(&document);
@@ -846,24 +852,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation();
-        match kind {
-            BlacklistItemKind::Folder => self
-                .state
-                .settings
-                .folder_blacklist
-                .retain(|item| item != &value),
-            BlacklistItemKind::Ext => self
-                .state
-                .settings
-                .ext_blacklist
-                .retain(|item| item != &value),
-        }
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.remove_blacklist_item(kind, &value);
+            settings_cx.notify();
+        });
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
         self.push_notice(
             NotificationType::Info,
-            tr(self.state.settings.language, "blacklist_item_removed"),
+            tr(self.language(cx), "blacklist_item_removed"),
             window,
             cx,
         );
@@ -876,13 +874,14 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let Some(result) = &self.state.result.result else {
+        let result = self.result.read(cx).state().result.clone();
+        let Some(result) = result.as_ref() else {
             return;
         };
         let Some(path) = &result.merged_content_path else {
             self.push_notice(
                 NotificationType::Warning,
-                tr(self.state.settings.language, "mode_tree_only_desc"),
+                tr(self.language(cx), "mode_tree_only_desc"),
                 window,
                 cx,
             );
@@ -890,7 +889,7 @@ impl Workspace {
         };
         let source_path = path.clone();
         let suggested_name = result.suggested_result_name.clone();
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
             let save_path = rfd::AsyncFileDialog::new()

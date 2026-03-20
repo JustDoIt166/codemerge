@@ -2,29 +2,30 @@ use std::ops::Range;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
-use gpui::{Context, ScrollStrategy, SharedString};
+use gpui::{Context, ScrollStrategy};
 
 use super::view::TreeExpansionMode;
 use super::{Workspace, model};
-use crate::domain::{ProcessResult, ProcessStatus, ResultTab};
+use crate::domain::{ProcessResult, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
-use crate::services::preview::{PreviewEvent, PreviewRequest, start as start_preview};
-use crate::services::process::ProcessEvent;
-use crate::ui::state::ProcessUiStatus;
-use crate::utils::i18n::tr;
+use crate::services::preview::{PreviewEvent, start as start_preview};
+use crate::ui::models::ProcessEventEffect;
+use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
     pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
-        let mut dirty = false;
+        let mut workspace_dirty = false;
         let mut received_events = false;
 
-        if let Some(rx) = self.state.process.preflight_rx.take() {
+        if let Some(rx) = self
+            .process
+            .update(cx, |process, _| process.state_mut().preflight_rx.take())
+        {
             let mut keep = true;
             loop {
                 match rx.try_recv() {
                     Ok(event) => {
-                        self.apply_preflight_event(event);
-                        dirty = true;
+                        self.apply_preflight_event(event, cx);
                         received_events = true;
                     }
                     Err(TryRecvError::Empty) => break,
@@ -35,62 +36,73 @@ impl Workspace {
                 }
             }
             if keep {
-                self.state.process.preflight_rx = Some(rx);
+                self.process
+                    .update(cx, |process, _| process.state_mut().preflight_rx = Some(rx));
             }
         }
 
-        let mut finish_processing = false;
-        if let Some(handle) = self.state.process.process_handle.as_mut() {
+        let (events, disconnected) = self.process.update(cx, |process, _| {
             let mut events = Vec::new();
-            loop {
-                match handle.receiver.try_recv() {
-                    Ok(event) => events.push(event),
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        finish_processing = true;
-                        break;
+            let mut disconnected = false;
+            if let Some(handle) = process.state_mut().process_handle.as_mut() {
+                loop {
+                    match handle.receiver.try_recv() {
+                        Ok(event) => events.push(event),
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => {
+                            disconnected = true;
+                            break;
+                        }
                     }
                 }
             }
-            for event in events {
-                dirty = true;
-                received_events = true;
-                finish_processing = self.apply_process_event(event, cx) || finish_processing;
-            }
+            (events, disconnected)
+        });
+        let mut finish_processing = disconnected;
+        for event in events {
+            received_events = true;
+            let (event_workspace_dirty, event_finished) = self.apply_process_event(event, cx);
+            workspace_dirty = event_workspace_dirty || workspace_dirty;
+            finish_processing = event_finished || finish_processing;
         }
         if finish_processing {
-            self.state.process.finish_run();
-            dirty = true;
+            self.process
+                .update(cx, |process, _| process.state_mut().finish_run());
         }
 
-        if let Some(rx) = self.state.workspace.preview_panel.preview_rx.take() {
+        if let Some(rx) = self
+            .preview
+            .update(cx, |preview, _| preview.take_preview_rx())
+        {
             let mut keep = true;
             loop {
                 match rx.try_recv() {
                     Ok(event) => {
                         received_events = true;
-                        dirty = self.apply_preview_event(event) || dirty;
+                        workspace_dirty = self.apply_preview_event(event, cx) || workspace_dirty;
                     }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         keep = false;
-                        self.state.workspace.preview_panel.preview_requested_range = None;
+                        self.preview.update(cx, |preview, preview_cx| {
+                            preview.clear_request();
+                            preview_cx.notify();
+                        });
                         break;
                     }
                 }
             }
             if keep {
-                self.state.workspace.preview_panel.preview_rx = Some(rx);
+                self.preview
+                    .update(cx, |preview, _| preview.set_preview_rx(Some(rx)));
             }
         }
 
-        if dirty {
+        if workspace_dirty {
             cx.notify();
         }
 
-        let active = self.state.process.preflight_rx.is_some()
-            || self.state.process.process_handle.is_some()
-            || self.state.workspace.preview_panel.preview_rx.is_some();
+        let active = self.needs_background_polling(cx);
         if active {
             self.poll_idle_streak = if received_events {
                 0
@@ -117,138 +129,62 @@ impl Workspace {
         next_delay
     }
 
-    fn apply_preflight_event(&mut self, event: PreflightEvent) {
-        let ready_label = tr(self.state.settings.language, "status_ready");
-        let is_processing = self.is_processing();
-        model::apply_preflight_event(&mut self.state.process, event, is_processing, ready_label);
+    fn apply_preflight_event(&mut self, event: PreflightEvent, cx: &mut Context<Self>) {
+        let language = self.language(cx);
+        self.process.update(cx, |process, process_cx| {
+            process.apply_preflight_event(event, language);
+            process_cx.notify();
+        });
     }
 
-    fn apply_process_event(&mut self, event: ProcessEvent, cx: &mut Context<Self>) -> bool {
-        match event {
-            ProcessEvent::Scanning {
-                scanned,
-                candidates,
-                skipped,
-            } => {
-                self.state.process.processing_scanned = scanned;
-                self.state.process.processing_candidates = candidates;
-                self.state.process.processing_skipped = skipped;
-                self.state.process.ui_status = ProcessUiStatus::Running;
-                self.state.process.processing_current_file = format!(
-                    "{} {}",
-                    tr(self.state.settings.language, "scanning_files"),
-                    scanned
-                );
-                false
+    fn apply_process_event(
+        &mut self,
+        event: crate::services::process::ProcessEvent,
+        cx: &mut Context<Self>,
+    ) -> (bool, bool) {
+        let language = self.language(cx);
+        match self.process.update(cx, |process, process_cx| {
+            process_cx.notify();
+            process.apply_process_event(event, language)
+        }) {
+            ProcessEventEffect::Continue => (false, false),
+            ProcessEventEffect::Completed(result) => {
+                self.set_result(*result, cx);
+                (true, true)
             }
-            ProcessEvent::Record(record) => {
-                self.state.process.ui_status = ProcessUiStatus::Running;
-                self.state.process.processing_current_file = record.file_name.clone();
-                if !matches!(record.status, ProcessStatus::Success) {
-                    self.state.process.processing_skipped += 1;
-                }
-                self.state.process.processing_records.push(record);
-                false
-            }
-            ProcessEvent::Completed(result) => {
-                self.state.process.ui_status = ProcessUiStatus::Completed;
-                self.state.process.last_error = None;
-                self.state.process.processing_current_file =
-                    tr(self.state.settings.language, "status_completed_hint").to_string();
-                self.set_result(result, cx);
-                true
-            }
-            ProcessEvent::Cancelled => {
-                self.state.process.ui_status = ProcessUiStatus::Cancelled;
-                self.state.process.processing_current_file =
-                    tr(self.state.settings.language, "status_cancelled_hint").to_string();
-                true
-            }
-            ProcessEvent::Failed(err) => {
-                self.state.process.ui_status = ProcessUiStatus::Error;
-                self.state.process.last_error = Some(err.to_string());
-                self.state.process.processing_current_file = err.to_string();
-                true
-            }
+            ProcessEventEffect::Finish => (false, true),
         }
     }
 
-    fn apply_preview_event(&mut self, event: PreviewEvent) -> bool {
-        match event {
-            PreviewEvent::Opened {
-                revision,
-                file_id,
-                document,
-                loaded_range,
-                lines,
-            } => {
-                if revision != self.state.workspace.preview_panel.preview_revision
-                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
-                {
-                    return false;
-                }
-                self.state.workspace.preview_panel.preview_document = Some(document);
-                self.state.workspace.preview_panel.preview_error = None;
-                self.state.workspace.preview_panel.preview_requested_range = None;
-                self.state.workspace.preview_panel.clear_loaded_chunks();
-                self.state.workspace.preview_panel.store_chunk(
-                    loaded_range,
-                    lines.into_iter().map(SharedString::from).collect(),
-                );
-                self.preview_scroll_handle
-                    .scroll_to_item_strict(0, ScrollStrategy::Top);
-                true
-            }
-            PreviewEvent::Loaded {
-                revision,
-                file_id,
-                loaded_range,
-                lines,
-            } => {
-                if revision != self.state.workspace.preview_panel.preview_revision
-                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
-                {
-                    return false;
-                }
-                self.state.workspace.preview_panel.preview_error = None;
-                self.state.workspace.preview_panel.preview_requested_range = None;
-                self.state.workspace.preview_panel.store_chunk(
-                    loaded_range,
-                    lines.into_iter().map(SharedString::from).collect(),
-                );
-                true
-            }
-            PreviewEvent::Failed {
-                revision,
-                file_id,
-                error,
-            } => {
-                if revision != self.state.workspace.preview_panel.preview_revision
-                    || self.state.workspace.preview_panel.selected_preview_file_id != Some(file_id)
-                {
-                    return false;
-                }
-                self.state.workspace.preview_panel.preview_error = Some(error.to_string());
-                self.state.workspace.preview_panel.preview_requested_range = None;
-                if self
-                    .state
-                    .workspace
-                    .preview_panel
-                    .preview_document
-                    .is_none()
-                {
-                    self.state.workspace.preview_panel.clear_loaded_chunks();
-                }
-                true
-            }
+    fn apply_preview_event(&mut self, event: PreviewEvent, cx: &mut Context<Self>) -> bool {
+        let effect = self.preview.update(cx, |preview, preview_cx| {
+            let effect = preview.apply_event(event);
+            preview_cx.notify();
+            effect
+        });
+        if matches!(effect, PreviewEventEffect::ScrollTop) {
+            self.preview_scroll_handle
+                .scroll_to_item_strict(0, ScrollStrategy::Top);
         }
+        !matches!(effect, PreviewEventEffect::Ignored)
     }
 
     fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
         self.cleanup_current_result_artifacts();
-        self.state.result.result = Some(result);
-        self.state.result.active_tab = ResultTab::Tree;
-        self.tree_panel.data = model::build_tree_panel_data(self.state.result.result.as_ref());
+        self.result_artifacts = super::ResultArtifacts {
+            merged_content_path: result.merged_content_path.clone(),
+            preview_blob_dir: result.preview_blob_dir.clone(),
+        };
+        self.result.update(cx, |result_model, result_cx| {
+            result_model.set_result(result);
+            result_cx.notify();
+        });
+        self.preview.update(cx, |preview, preview_cx| {
+            preview.clear();
+            preview_cx.notify();
+        });
+        let result = self.result.read(cx);
+        self.tree_panel.data = model::build_tree_panel_data(result.state().result.as_ref());
         self.tree_panel.last_interaction = None;
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.state.workspace.reset_tree();
@@ -304,11 +240,15 @@ impl Workspace {
             .trim()
             .to_ascii_lowercase();
         let table_model = model::build_preview_table_model(
-            self.state.result.result.as_ref(),
+            self.result.read(cx).state().result.as_ref(),
             filter.as_str(),
-            self.state.workspace.preview_panel.selected_preview_file_id,
+            self.preview.read(cx).selected_preview_file_id(),
         );
-        self.state.result.preview_rows = table_model.rows.clone();
+        let preview_rows = table_model.rows.clone();
+        self.result.update(cx, |result, result_cx| {
+            result.set_preview_rows(preview_rows);
+            result_cx.notify();
+        });
         self.preview_table.update(cx, |table, cx| {
             table.delegate_mut().rows = table_model.rows;
             if let Some(row_ix) =
@@ -332,40 +272,53 @@ impl Workspace {
                 let _ =
                     self.apply_tree_panel_effect(model::TreePanelEffect::OpenPreview(file_id), cx);
             }
-            None => self.clear_preview_state(),
+            None => self.clear_preview_state(cx),
         }
     }
 
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
-        self.state.process.preflight_revision += 1;
-        if !self.is_processing() {
-            self.state.process.ui_status = ProcessUiStatus::Preflight;
-            self.state.process.last_error = None;
-        }
-        self.state.process.preflight_rx = Some(crate::services::preflight::start_with_options(
+        let settings = self.settings_snapshot(cx);
+        let selection = self.selection_snapshot(cx);
+        let revision = self.process.update(cx, |process, process_cx| {
+            let is_processing = process.is_processing();
+            let state = process.state_mut();
+            state.preflight_revision += 1;
+            if !is_processing {
+                state.ui_status = crate::ui::state::ProcessUiStatus::Preflight;
+                state.last_error = None;
+            }
+            process_cx.notify();
+            state.preflight_revision
+        });
+        let rx = crate::services::preflight::start_with_options(
             PreflightRequest {
-                revision: self.state.process.preflight_revision,
-                selected_folder: self.state.selection.selected_folder.clone(),
-                selected_files: self
-                    .state
-                    .selection
+                revision,
+                selected_folder: selection.selected_folder.clone(),
+                selected_files: selection
                     .selected_files
                     .iter()
                     .map(|f| f.path.clone())
                     .collect(),
-                folder_blacklist: self.state.effective_folder_blacklist(),
-                ext_blacklist: self.state.settings.ext_blacklist.clone(),
+                folder_blacklist: self.effective_folder_blacklist(cx),
+                ext_blacklist: settings.ext_blacklist.clone(),
             },
             crate::processor::walker::WalkerOptions {
-                use_gitignore: self.state.settings.options.use_gitignore,
-                ignore_git: self.state.settings.options.ignore_git,
+                use_gitignore: settings.options.use_gitignore,
+                ignore_git: settings.options.ignore_git,
             },
-        ));
+        );
+        self.process.update(cx, |process, process_cx| {
+            process.state_mut().preflight_rx = Some(rx);
+            process_cx.notify();
+        });
         self.ensure_background_polling(cx);
     }
 
-    pub(super) fn clear_preview_state(&mut self) {
-        self.state.workspace.reset_preview();
+    pub(super) fn clear_preview_state(&mut self, cx: &mut Context<Self>) {
+        self.preview.update(cx, |preview, preview_cx| {
+            preview.clear();
+            preview_cx.notify();
+        });
     }
 
     pub(super) fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
@@ -414,7 +367,10 @@ impl Workspace {
                 true
             }
             model::TreePanelEffect::SwitchToContentAndOpen(file_id) => {
-                self.state.result.active_tab = ResultTab::Content;
+                self.result.update(cx, |result, result_cx| {
+                    result.set_active_tab(ResultTab::Content);
+                    result_cx.notify();
+                });
                 self.load_preview(file_id, cx);
                 true
             }
@@ -440,39 +396,25 @@ impl Workspace {
     }
 
     fn request_preview_range(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> bool {
-        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
-            return false;
-        };
-        let Some(file_id) = self.state.workspace.preview_panel.selected_preview_file_id else {
-            return false;
-        };
-
-        let padded = self.preview_request_range(range, document.line_count());
-        if padded.start >= padded.end {
+        if self.preview.read(cx).preview_document().is_none() {
             return false;
         }
-        if self.state.workspace.preview_panel.has_loaded_range(&padded) {
-            return false;
-        }
-        if self
-            .state
-            .workspace
-            .preview_panel
-            .preview_requested_range
-            .as_ref()
-            == Some(&padded)
-        {
+        if self.preview.read(cx).selected_preview_file_id().is_none() {
             return false;
         }
 
-        self.state.workspace.preview_panel.preview_requested_range = Some(padded.clone());
-        self.state.workspace.preview_panel.preview_rx =
-            Some(start_preview(PreviewRequest::LoadRange {
-                revision: self.state.workspace.preview_panel.preview_revision,
-                file_id,
-                document: document.clone(),
-                range: padded,
-            }));
+        let Some(request) = self.preview.update(cx, |preview, preview_cx| {
+            let request = preview.load_preview_range_request(range);
+            if request.is_some() {
+                preview_cx.notify();
+            }
+            request
+        }) else {
+            return false;
+        };
+        self.preview.update(cx, |preview, _| {
+            preview.set_preview_rx(Some(start_preview(request)));
+        });
         self.ensure_background_polling(cx);
         true
     }
@@ -482,7 +424,8 @@ impl Workspace {
         visible: Range<usize>,
         cx: &mut Context<Self>,
     ) -> bool {
-        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
+        let preview_state = self.preview.read(cx).state();
+        let Some(document) = &preview_state.preview_document else {
             return false;
         };
         let line_count = document.line_count();
@@ -493,19 +436,15 @@ impl Workspace {
         let start = visible.start.min(line_count.saturating_sub(1));
         let end = visible.end.max(start + 1).min(line_count);
         let visible = start..end;
-        let changed = self
-            .state
-            .workspace
-            .preview_panel
-            .update_visible_range(visible.clone(), line_count);
+        let request_range = self.preview_request_range(visible.clone(), line_count);
+        let already_loaded = preview_state.has_loaded_range(&request_range);
+        let changed = self.preview.update(cx, |preview, _| {
+            preview
+                .state_mut()
+                .update_visible_range(visible.clone(), line_count)
+        });
 
-        if !changed
-            || self
-                .state
-                .workspace
-                .preview_panel
-                .has_loaded_range(&self.preview_request_range(visible.clone(), line_count))
-        {
+        if !changed || already_loaded {
             return false;
         }
 
@@ -513,42 +452,36 @@ impl Workspace {
     }
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
-        if self.state.workspace.preview_panel.selected_preview_file_id == Some(file_id)
-            && (self
-                .state
-                .workspace
-                .preview_panel
-                .preview_document
-                .is_some()
-                || self.state.workspace.preview_panel.preview_rx.is_some())
+        let preview_state = self.preview.read(cx).state();
+        if preview_state.selected_preview_file_id == Some(file_id)
+            && (preview_state.preview_document.is_some() || preview_state.preview_rx.is_some())
         {
             return;
         }
-        let Some(entry) = self.state.result.result.as_ref().and_then(|result| {
-            result
-                .preview_files
-                .iter()
-                .find(|entry| entry.id == file_id)
-        }) else {
+        let Some(entry) = self
+            .result
+            .read(cx)
+            .state()
+            .result
+            .as_ref()
+            .and_then(|result| {
+                result
+                    .preview_files
+                    .iter()
+                    .find(|entry| entry.id == file_id)
+            })
+        else {
             return;
         };
-        self.state.workspace.preview_panel.preview_revision += 1;
-        self.state.workspace.preview_panel.selected_preview_file_id = Some(file_id);
-        self.state.workspace.preview_panel.preview_error = None;
-        self.state.workspace.preview_panel.preview_rx = Some(start_preview(PreviewRequest::Open {
-            revision: self.state.workspace.preview_panel.preview_revision,
-            file_id,
-            path: entry.preview_blob_path.clone(),
-            initial_range: 0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2,
-        }));
-        self.state.workspace.preview_panel.preview_requested_range =
-            Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
-        self.state.workspace.preview_panel.preview_document = None;
-        self.state
-            .workspace
-            .preview_panel
-            .preview_last_visible_range = 0..0;
-        self.state.workspace.preview_panel.clear_loaded_chunks();
+        let preview_blob_path = entry.preview_blob_path.clone();
+        let request = self.preview.update(cx, |preview, preview_cx| {
+            let request = preview.open_preview(file_id, preview_blob_path);
+            preview_cx.notify();
+            request
+        });
+        self.preview.update(cx, |preview, _| {
+            preview.set_preview_rx(Some(start_preview(request)));
+        });
         self.preview_scroll_handle
             .scroll_to_item_strict(0, ScrollStrategy::Top);
         self.ensure_background_polling(cx);

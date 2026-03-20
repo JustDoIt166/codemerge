@@ -130,7 +130,8 @@ pub(super) struct BlacklistSectionViewModel {
     pub items: Vec<BlacklistTagViewModel>,
 }
 
-pub(super) fn apply_preflight_event(
+#[cfg_attr(not(test), allow(dead_code))]
+pub(crate) fn apply_preflight_event(
     process: &mut ProcessState,
     event: PreflightEvent,
     is_processing: bool,

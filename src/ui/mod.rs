@@ -1,4 +1,8 @@
 mod assets;
+mod models;
+mod preview_model;
+mod result_model;
+mod selection_model;
 pub mod state;
 mod workspace;
 

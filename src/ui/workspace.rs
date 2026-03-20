@@ -20,8 +20,12 @@ use gpui_component::{
     tree::TreeState,
 };
 
-use crate::domain::{Language, PreviewRowViewModel, ProcessResult};
+use crate::domain::{Language, PreviewRowViewModel};
 use crate::services::settings::{self, ConfigLoadIssue};
+use crate::ui::models::{ProcessModel, SettingsModel};
+use crate::ui::preview_model::PreviewModel;
+use crate::ui::result_model::ResultModel;
+use crate::ui::selection_model::SelectionModel;
 use crate::ui::state::{AppState, ProcessUiStatus};
 use crate::utils::i18n::tr;
 
@@ -38,7 +42,7 @@ pub(super) fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum BlacklistItemKind {
+pub(crate) enum BlacklistItemKind {
     Folder,
     Ext,
 }
@@ -163,8 +167,6 @@ impl Default for RulesPanelCache {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WorkspacePanelKind {
-    Input,
-    Status,
     Right,
     CompactContent,
 }
@@ -175,9 +177,41 @@ struct WorkspacePanelView {
     _subscriptions: Vec<Subscription>,
 }
 
+struct StatusPanelView {
+    workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct InputPanelView {
+    workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct RulesPanelView {
+    workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct ResultsPanelView {
+    workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Clone, Default)]
+struct ResultArtifacts {
+    merged_content_path: Option<std::path::PathBuf>,
+    preview_blob_dir: Option<std::path::PathBuf>,
+}
+
 pub struct Workspace {
     focus_handle: FocusHandle,
     state: AppState,
+    selection: Entity<SelectionModel>,
+    settings: Entity<SettingsModel>,
+    process: Entity<ProcessModel>,
+    result: Entity<ResultModel>,
+    preview: Entity<PreviewModel>,
+    result_artifacts: ResultArtifacts,
     preview_scroll_handle: UniformListScrollHandle,
     tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
@@ -185,8 +219,10 @@ pub struct Workspace {
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
-    input_panel_view: Entity<WorkspacePanelView>,
-    status_panel_view: Entity<WorkspacePanelView>,
+    input_panel_view: Entity<InputPanelView>,
+    status_panel_view: Entity<StatusPanelView>,
+    rules_panel_view: Entity<RulesPanelView>,
+    results_panel_view: Entity<ResultsPanelView>,
     right_panel_view: Entity<WorkspacePanelView>,
     compact_content_view: Entity<WorkspacePanelView>,
     side_panel_tab: SidePanelTab,
@@ -219,12 +255,39 @@ impl Workspace {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table =
             cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
+        let settings_model = cx.new(|_| SettingsModel::from_config(cfg.clone()));
+        let selection_model = cx.new(|_| SelectionModel::new());
+        let process_model =
+            cx.new(|_| ProcessModel::new(tr(cfg.language, "status_ready").to_string()));
+        let result_model = cx.new(|_| ResultModel::new());
+        let preview_model = cx.new(|_| PreviewModel::new());
         let workspace_entity = cx.entity();
         let input_panel_view = cx.new(|cx| {
-            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Input, cx)
+            InputPanelView::new(
+                workspace_entity.clone(),
+                settings_model.clone(),
+                selection_model.clone(),
+                cx,
+            )
         });
-        let status_panel_view = cx.new(|cx| {
-            WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Status, cx)
+        let status_panel_view =
+            cx.new(|cx| StatusPanelView::new(workspace_entity.clone(), process_model.clone(), cx));
+        let rules_panel_view = cx.new(|cx| {
+            RulesPanelView::new(
+                workspace_entity.clone(),
+                settings_model.clone(),
+                blacklist_filter_input.clone(),
+                cx,
+            )
+        });
+        let results_panel_view = cx.new(|cx| {
+            ResultsPanelView::new(
+                workspace_entity.clone(),
+                result_model.clone(),
+                preview_model.clone(),
+                preview_filter_input.clone(),
+                cx,
+            )
         });
         let right_panel_view = cx.new(|cx| {
             WorkspacePanelView::new(workspace_entity.clone(), WorkspacePanelKind::Right, cx)
@@ -255,6 +318,12 @@ impl Workspace {
         let mut this = Self {
             focus_handle: cx.focus_handle(),
             state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
+            selection: selection_model,
+            settings: settings_model,
+            process: process_model,
+            result: result_model,
+            preview: preview_model,
+            result_artifacts: ResultArtifacts::default(),
             preview_scroll_handle: UniformListScrollHandle::new(),
             tree_panel: TreePanelController {
                 state: tree_state,
@@ -273,6 +342,8 @@ impl Workspace {
             },
             input_panel_view,
             status_panel_view,
+            rules_panel_view,
+            results_panel_view,
             right_panel_view,
             compact_content_view,
             side_panel_tab: SidePanelTab::Results,
@@ -300,7 +371,7 @@ impl Workspace {
     }
 
     fn ensure_background_polling(&mut self, cx: &mut Context<Self>) {
-        if self.poll_task_running || !self.needs_background_polling() {
+        if self.poll_task_running || !self.needs_background_polling(cx) {
             return;
         }
 
@@ -319,23 +390,50 @@ impl Workspace {
         }));
     }
 
-    fn needs_background_polling(&self) -> bool {
-        self.state.process.preflight_rx.is_some()
-            || self.state.process.process_handle.is_some()
-            || self.state.workspace.preview_panel.preview_rx.is_some()
+    fn needs_background_polling(&self, cx: &App) -> bool {
+        let process = self.process.read(cx);
+        process.state().preflight_rx.is_some()
+            || process.state().process_handle.is_some()
+            || self.preview.read(cx).state().preview_rx.is_some()
     }
 
-    fn has_inputs(&self) -> bool {
-        self.state.selection.selected_folder.is_some()
-            || !self.state.selection.selected_files.is_empty()
+    fn has_inputs(&self, cx: &App) -> bool {
+        self.selection.read(cx).has_inputs()
     }
 
-    fn is_processing(&self) -> bool {
-        self.state.process.process_handle.is_some()
+    fn is_processing(&self, cx: &App) -> bool {
+        self.process.read(cx).is_processing()
     }
 
     fn clear_pending_confirmation(&mut self) {
         self.pending_confirmation = None;
+    }
+
+    pub(super) fn selection_snapshot(&self, cx: &App) -> crate::ui::state::SelectionState {
+        self.selection.read(cx).snapshot()
+    }
+
+    pub(super) fn settings_snapshot(&self, cx: &App) -> crate::ui::state::SettingsState {
+        self.settings.read(cx).snapshot()
+    }
+
+    pub(super) fn language(&self, cx: &App) -> Language {
+        self.settings.read(cx).language()
+    }
+
+    pub(super) fn effective_folder_blacklist(&self, cx: &App) -> Vec<String> {
+        let selection = self.selection_snapshot(cx);
+        self.settings
+            .read(cx)
+            .effective_folder_blacklist(&selection)
+    }
+
+    pub(super) fn result_has_content(&self, cx: &App) -> bool {
+        self.result.read(cx).has_content_result()
+    }
+
+    pub(super) fn result_is_tree_only(&self, cx: &App) -> bool {
+        self.result.read(cx).is_tree_only_result()
     }
 
     pub(super) fn invalidate_rules_panel_cache(&mut self) {
@@ -343,7 +441,8 @@ impl Workspace {
     }
 
     pub(super) fn refresh_rules_panel_cache(&mut self, cx: &Context<Self>) {
-        let language = self.state.settings.language;
+        let settings = self.settings.read(cx).snapshot();
+        let language = settings.language;
         let filter = self
             .blacklist_filter_input
             .read(cx)
@@ -359,8 +458,8 @@ impl Workspace {
         }
 
         cache.sections = Rc::new(model::build_blacklist_sections(
-            &self.state.settings.folder_blacklist,
-            &self.state.settings.ext_blacklist,
+            &settings.folder_blacklist,
+            &settings.ext_blacklist,
             filter.as_str(),
             language,
         ));
@@ -369,23 +468,22 @@ impl Workspace {
         cache.revision = self.rules_panel.revision;
     }
 
-    pub(super) fn cleanup_result_artifacts(result: &ProcessResult) {
-        if let Some(path) = &result.merged_content_path {
+    fn cleanup_result_artifacts(artifacts: &ResultArtifacts) {
+        if let Some(path) = &artifacts.merged_content_path {
             let _ = std::fs::remove_file(path);
         }
-        if let Some(dir) = &result.preview_blob_dir {
+        if let Some(dir) = &artifacts.preview_blob_dir {
             let _ = crate::utils::temp_file::cleanup_preview_dir(dir);
         }
     }
 
-    pub(super) fn cleanup_current_result_artifacts(&self) {
-        if let Some(result) = self.state.result.result.as_ref() {
-            Self::cleanup_result_artifacts(result);
-        }
+    pub(super) fn cleanup_current_result_artifacts(&mut self) {
+        Self::cleanup_result_artifacts(&self.result_artifacts);
+        self.result_artifacts = ResultArtifacts::default();
     }
 
     fn sync_localized_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let language = self.state.settings.language;
+        let language = self.settings.read(cx).language();
         self.tree_panel.filter_input.update(cx, |state, cx| {
             state.set_placeholder(tr(language, "tree_filter"), window, cx)
         });
@@ -402,8 +500,14 @@ impl Workspace {
             table.delegate_mut().set_language(language);
             cx.notify();
         });
-        if !self.is_processing() && self.state.process.ui_status == ProcessUiStatus::Idle {
-            self.state.process.processing_current_file = tr(language, "status_ready").to_string();
+        if !self.is_processing(cx)
+            && self.process.read(cx).state().ui_status == ProcessUiStatus::Idle
+        {
+            self.process.update(cx, |process, process_cx| {
+                process.state_mut().processing_current_file =
+                    tr(language, "status_ready").to_string();
+                process_cx.notify();
+            });
         }
     }
 }
@@ -425,12 +529,6 @@ impl WorkspacePanelView {
     ) -> AnyElement {
         self.workspace
             .update(cx, |workspace, workspace_cx| match self.kind {
-                WorkspacePanelKind::Input => workspace
-                    .render_input_panel(workspace_cx)
-                    .into_any_element(),
-                WorkspacePanelKind::Status => workspace
-                    .render_status_panel(workspace_cx)
-                    .into_any_element(),
                 WorkspacePanelKind::Right => workspace
                     .render_right_panel(workspace_cx)
                     .into_any_element(),
@@ -441,9 +539,121 @@ impl WorkspacePanelView {
     }
 }
 
+impl InputPanelView {
+    fn new(
+        workspace: Entity<Workspace>,
+        settings: Entity<SettingsModel>,
+        selection: Entity<SelectionModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&selection, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl StatusPanelView {
+    fn new(
+        workspace: Entity<Workspace>,
+        process: Entity<ProcessModel>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![cx.observe(&process, |_, _, cx| cx.notify())];
+        Self {
+            workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl RulesPanelView {
+    fn new(
+        workspace: Entity<Workspace>,
+        settings: Entity<SettingsModel>,
+        blacklist_filter_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&blacklist_filter_input, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl ResultsPanelView {
+    fn new(
+        workspace: Entity<Workspace>,
+        result: Entity<ResultModel>,
+        preview: Entity<PreviewModel>,
+        preview_filter_input: Entity<InputState>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![
+            cx.observe(&result, |_, _, cx| cx.notify()),
+            cx.observe(&preview, |_, _, cx| cx.notify()),
+            cx.observe(&preview_filter_input, |_, _, cx| cx.notify()),
+            cx.observe(&workspace, |_, _, cx| cx.notify()),
+        ];
+        Self {
+            workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
 impl Render for WorkspacePanelView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.render_workspace_panel(window, cx)
+    }
+}
+
+impl Render for InputPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace
+                .render_input_panel(workspace_cx)
+                .into_any_element()
+        })
+    }
+}
+
+impl Render for StatusPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace
+                .render_status_panel(workspace_cx)
+                .into_any_element()
+        })
+    }
+}
+
+impl Render for RulesPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace
+                .render_rules_panel(workspace_cx)
+                .into_any_element()
+        })
+    }
+}
+
+impl Render for ResultsPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace
+                .render_results_panel(workspace_cx)
+                .into_any_element()
+        })
     }
 }
 
@@ -473,8 +683,6 @@ impl Render for Workspace {
 
 impl Drop for Workspace {
     fn drop(&mut self) {
-        if let Some(result) = self.state.result.result.as_ref() {
-            Self::cleanup_result_artifacts(result);
-        }
+        Self::cleanup_result_artifacts(&self.result_artifacts);
     }
 }

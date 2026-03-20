@@ -35,9 +35,9 @@ use crate::utils::i18n::tr;
 
 impl Workspace {
     fn render_process_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
-        let has_inputs = self.has_inputs();
-        let is_processing = self.is_processing();
+        let language = self.language(cx);
+        let has_inputs = self.has_inputs(cx);
+        let is_processing = self.is_processing(cx);
 
         h_flex()
             .gap_2()
@@ -60,7 +60,7 @@ impl Workspace {
     }
 
     pub(super) fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         h_flex()
             .justify_between()
             .items_center()
@@ -108,27 +108,27 @@ impl Workspace {
     }
 
     pub(super) fn render_input_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
-        let has_inputs = self.has_inputs();
-        let selected_files = Rc::new(self.state.selection.selected_files.clone());
+        let settings = self.settings_snapshot(cx);
+        let selection = self.selection_snapshot(cx);
+        let language = settings.language;
+        let has_inputs = self.has_inputs(cx);
+        let selected_files = Rc::new(selection.selected_files.clone());
         let folder_label = self
-            .state
-            .selection
+            .selection_snapshot(cx)
             .selected_folder
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| tr(language, "input_folder_empty").to_string());
         let gitignore_label = self
-            .state
-            .selection
+            .selection_snapshot(cx)
             .gitignore_file
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| {
-                if self.state.settings.options.use_gitignore {
+                if settings.options.use_gitignore {
                     tr(language, "gitignore_auto_hint").to_string()
                 } else {
-                    match self.state.settings.language {
+                    match settings.language {
                         crate::domain::Language::Zh => "自动 .gitignore 已停用".to_string(),
                         crate::domain::Language::En => "Auto .gitignore disabled".to_string(),
                     }
@@ -185,9 +185,7 @@ impl Workspace {
                                     div()
                                         .text_sm()
                                         .text_color(cx.theme().muted_foreground)
-                                        .child(
-                                            self.state.selection.selected_files.len().to_string(),
-                                        ),
+                                        .child(selection.selected_files.len().to_string()),
                                 ),
                         )
                         .child(if selected_files.is_empty() {
@@ -231,7 +229,7 @@ impl Workspace {
                 .child(render_info_block(
                     tr(language, "gitignore"),
                     gitignore_label,
-                    self.state.selection.gitignore_file.is_some(),
+                    selection.gitignore_file.is_some(),
                     IconName::BookOpen,
                     cx,
                 ))
@@ -250,7 +248,7 @@ impl Workspace {
                                 .outline()
                                 .icon(IconName::Check)
                                 .label(tr(language, "apply_gitignore"))
-                                .disabled(self.state.selection.gitignore_file.is_none())
+                                .disabled(selection.gitignore_file.is_none())
                                 .on_click(cx.listener(Self::apply_gitignore)),
                         ),
                 )
@@ -267,25 +265,25 @@ impl Workspace {
                 ))
                 .child(
                     Checkbox::new("compress")
-                        .checked(self.state.settings.options.compress)
+                        .checked(settings.options.compress)
                         .label(tr(language, "compress"))
                         .on_click(cx.listener(Self::toggle_compress)),
                 )
                 .child(
                     Checkbox::new("use-gitignore")
-                        .checked(self.state.settings.options.use_gitignore)
+                        .checked(settings.options.use_gitignore)
                         .label(tr(language, "use_gitignore"))
                         .on_click(cx.listener(Self::toggle_use_gitignore)),
                 )
                 .child(
                     Checkbox::new("ignore-git")
-                        .checked(self.state.settings.options.ignore_git)
+                        .checked(settings.options.ignore_git)
                         .label(tr(language, "ignore_git"))
                         .on_click(cx.listener(Self::toggle_ignore_git)),
                 )
                 .child(
                     Checkbox::new("dedupe")
-                        .checked(self.state.selection.dedupe_exact_path)
+                        .checked(selection.dedupe_exact_path)
                         .label(tr(language, "dedupe_exact_path"))
                         .on_click(cx.listener(Self::toggle_dedupe)),
                 )
@@ -333,24 +331,25 @@ impl Workspace {
     }
 
     fn render_status_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
+        let process_actions = self.render_process_actions(cx).into_any_element();
+        let process = self.process.read(cx);
+        let process = process.state();
         let result_stats = self
-            .state
             .result
+            .read(cx)
+            .state()
             .result
             .as_ref()
             .map(|result| result.stats.clone());
-        let processed_count = self.state.process.processing_records.len();
-        let failed_count = self
-            .state
-            .process
+        let processed_count = process.processing_records.len();
+        let failed_count = process
             .processing_records
             .iter()
             .filter(|record| matches!(record.status, ProcessStatus::Failed))
             .count();
         let activity_rows = Rc::new(
-            self.state
-                .process
+            process
                 .processing_records
                 .iter()
                 .rev()
@@ -358,18 +357,14 @@ impl Workspace {
                 .cloned()
                 .collect::<Vec<_>>(),
         );
-        let progress_total = self
-            .state
-            .process
+        let progress_total = process
             .processing_candidates
-            .max(self.state.process.preflight.to_process_files)
+            .max(process.preflight.to_process_files)
             .max(1);
         let progress_value = processed_count.min(progress_total);
         let progress_ratio = progress_value as f32 / progress_total as f32;
         let bar_fill = px((progress_ratio * 240.0).round());
-        let elapsed = self
-            .state
-            .process
+        let elapsed = process
             .processing_started_at
             .map(|start| format_duration(start.elapsed()))
             .unwrap_or_else(|| "--:--".to_string());
@@ -383,23 +378,23 @@ impl Workspace {
                 IconName::LayoutDashboard,
                 cx,
             ))
-            .child(self.render_process_actions(cx))
+            .child(process_actions)
             .child(
                 h_flex()
                     .gap_2()
                     .child(stat_tile(
                         tr(language, "total"),
-                        self.state.process.preflight.total_files.to_string(),
+                        process.preflight.total_files.to_string(),
                         cx,
                     ))
                     .child(stat_tile(
                         tr(language, "process"),
-                        self.state.process.preflight.to_process_files.to_string(),
+                        process.preflight.to_process_files.to_string(),
                         cx,
                     ))
                     .child(stat_tile(
                         tr(language, "skip"),
-                        self.state.process.preflight.skipped_files.to_string(),
+                        process.preflight.skipped_files.to_string(),
                         cx,
                     )),
             )
@@ -429,9 +424,9 @@ impl Workspace {
                     )),
             )
             .child(status_banner(
-                process_status_title(self.state.process.ui_status, language),
-                process_status_message(self, language),
-                self.state.process.ui_status,
+                process_status_title(process.ui_status, language),
+                process_status_message(process, language),
+                process.ui_status,
                 cx,
             ))
             .child(
@@ -470,7 +465,7 @@ impl Workspace {
                     .child(render_kv(tr(language, "elapsed"), elapsed, cx))
                     .child(render_kv(
                         tr(language, "processing"),
-                        self.state.process.processing_current_file.clone(),
+                        process.processing_current_file.clone(),
                         cx,
                     )),
             )
@@ -525,7 +520,7 @@ impl Workspace {
     }
 
     fn render_right_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         let selected_index = if self.side_panel_tab == SidePanelTab::Results {
             0
         } else {
@@ -553,17 +548,17 @@ impl Workspace {
             )
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
                 match self.side_panel_tab {
-                    SidePanelTab::Results => self.render_results_panel(cx).into_any_element(),
-                    SidePanelTab::Rules => self.render_rules_panel(cx).into_any_element(),
+                    SidePanelTab::Results => self.results_panel_view.clone().into_any_element(),
+                    SidePanelTab::Rules => self.rules_panel_view.clone().into_any_element(),
                 },
             ))
     }
 
     pub(super) fn render_results_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
-        let has_content_result = self.state.has_content_result();
-        let selected_tab = if self.state.result.active_tab == ResultTab::Tree || !has_content_result
-        {
+        let language = self.language(cx);
+        let result_state = self.result.read(cx).state().clone();
+        let has_content_result = self.result_has_content(cx);
+        let selected_tab = if result_state.active_tab == ResultTab::Tree || !has_content_result {
             0
         } else {
             1
@@ -600,13 +595,13 @@ impl Workspace {
                                 Button::new("copy-active")
                                     .outline()
                                     .icon(IconName::Copy)
-                                    .label(if self.state.result.active_tab == ResultTab::Tree {
+                                    .label(if result_state.active_tab == ResultTab::Tree {
                                         tr(language, "copy_tree")
                                     } else {
                                         tr(language, "copy_current_page")
                                     })
                                     .on_click(cx.listener(
-                                        if self.state.result.active_tab == ResultTab::Tree {
+                                        if result_state.active_tab == ResultTab::Tree {
                                             Self::copy_tree
                                         } else {
                                             Self::copy_preview
@@ -624,7 +619,7 @@ impl Workspace {
                     ),
             )
             .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
-                match self.state.result.active_tab {
+                match result_state.active_tab {
                     ResultTab::Tree => self.render_tree_panel(cx).into_any_element(),
                     ResultTab::Content => self.render_content_panel(cx).into_any_element(),
                 },
@@ -632,7 +627,7 @@ impl Workspace {
     }
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         self.refresh_rules_panel_cache(cx);
         let blacklist_sections = self.rules_panel.cache.sections.clone();
 
@@ -802,7 +797,7 @@ impl Workspace {
     }
 
     pub(super) fn render_tree_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
         let tree_filter = self
             .tree_panel
             .filter_input
@@ -811,7 +806,7 @@ impl Workspace {
             .trim()
             .to_string();
         let filter_active = !tree_filter.is_empty();
-        let has_result = self.state.result.result.is_some();
+        let has_result = self.result.read(cx).state().result.is_some();
         let has_visible_nodes = !self.tree_panel.render_state.rows.is_empty();
         let view = cx.entity();
         let tree_view = tree(&self.tree_panel.state, move |ix, entry, selected, _, cx| {
@@ -917,10 +912,11 @@ impl Workspace {
     }
 
     pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
-        let has_result = self.state.result.result.is_some();
-        let has_rows = !self.state.result.preview_rows.is_empty();
-        let tree_only = self.state.is_tree_only_result();
+        let language = self.language(cx);
+        let result_state = self.result.read(cx).state().clone();
+        let has_result = result_state.result.is_some();
+        let has_rows = !result_state.preview_rows.is_empty();
+        let tree_only = self.result_is_tree_only(cx);
 
         if tree_only {
             return v_flex()
@@ -972,21 +968,16 @@ impl Workspace {
     }
 
     pub(super) fn render_preview(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.state.settings.language;
+        let language = self.language(cx);
+        let result_state = self.result.read(cx).state().clone();
+        let preview_state = self.preview.read(cx).state();
         let selected_preview = self
-            .state
-            .workspace
-            .preview_panel
-            .selected_preview_file_id
-            .and_then(|id| {
-                self.state
-                    .result
-                    .preview_rows
-                    .iter()
-                    .find(|row| row.id == id)
-            });
+            .preview
+            .read(cx)
+            .selected_preview_file_id()
+            .and_then(|id| result_state.preview_rows.iter().find(|row| row.id == id));
 
-        if let Some(error) = self.state.workspace.preview_panel.preview_error.as_ref() {
+        if let Some(error) = preview_state.preview_error.as_ref() {
             let preview_failure_title = selected_preview
                 .map(|row| row.display_path.clone())
                 .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
@@ -998,7 +989,7 @@ impl Workspace {
             return empty_box(title, error.to_string(), IconName::TriangleAlert, cx);
         }
 
-        let Some(document) = &self.state.workspace.preview_panel.preview_document else {
+        let Some(document) = &preview_state.preview_document else {
             return empty_box(
                 tr(language, "preview_empty"),
                 tr(language, "preview_empty_hint"),
@@ -1048,15 +1039,14 @@ impl Workspace {
                                       app_cx| {
                                     workspace
                                         .sync_preview_visible_range(visible_range.clone(), app_cx);
-                                    let preview_panel = &workspace.state.workspace.preview_panel;
+                                    let preview = workspace.preview.read(app_cx);
                                     let muted = app_cx.theme().muted_foreground;
                                     let mono = app_cx.theme().mono_font_family.clone();
 
                                     visible_range
                                         .filter(|ix| *ix < line_count)
                                         .map(|ix| {
-                                            let line =
-                                                preview_panel.line_at(ix).unwrap_or_default();
+                                            let line = preview.line_at(ix).unwrap_or_default();
                                             h_flex()
                                                 .gap_3()
                                                 .px_3()
@@ -1104,18 +1094,18 @@ impl Workspace {
                         .child(
                             Tab::new()
                                 .prefix(tab_icon_badge(IconName::LayoutDashboard, false, cx))
-                                .label(tr(self.state.settings.language, "panel_status")),
+                                .label(tr(self.language(cx), "panel_status")),
                         )
                         .child(
                             Tab::new()
                                 .prefix(tab_icon_badge(IconName::PanelRight, true, cx))
-                                .label(tr(self.state.settings.language, "panel_results")),
+                                .label(tr(self.language(cx), "panel_results")),
                         ),
                 )
                 .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
                     match self.narrow_content_tab {
                         NarrowContentTab::Status => {
-                            self.render_status_panel_body(cx).into_any_element()
+                            self.status_panel_view.clone().into_any_element()
                         }
                         NarrowContentTab::Results => {
                             self.render_right_panel_body(cx).into_any_element()
