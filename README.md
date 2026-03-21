@@ -49,6 +49,22 @@ cargo test --locked
 
 提交前至少跑完以上三项。
 
+## 性能排查
+- 真实性能评估请优先使用 `cargo run --release`
+- 可启用 GPUI Inspector 观察元素树和重绘情况：
+  ```bash
+  GPUI_INSPECTOR=1 cargo run --release
+  ```
+- 可通过日志查看 GPUI 内部布局/事件轨迹：
+  ```bash
+  RUST_LOG=gpui=trace cargo run --release 2> trace.log
+  ```
+- 仓库内置了 `src/ui/perf.rs` 的轻量计数器，供测试和本地调试统计：
+  - 子视图条件刷新次数
+  - `sync_tree()` 次数与 `tree.set_items()` 次数
+  - `sync_preview_table()` 次数
+  - 预览 range 请求次数
+
 ## 配置与数据
 - 配置文件：
   - Windows: `%APPDATA%/codemerge/config.json`

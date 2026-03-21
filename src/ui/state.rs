@@ -15,7 +15,7 @@ pub struct AppState {
     pub workspace: WorkspaceState,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum ProcessUiStatus {
     #[default]
     Idle,
@@ -26,28 +26,28 @@ pub enum ProcessUiStatus {
     Error,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SidePanelTab {
     #[default]
     Results,
     Rules,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum NarrowContentTab {
     #[default]
     Status,
     Results,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PendingConfirmation {
     ClearInputs,
     ResetBlacklist,
     ClearBlacklist,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct WorkspaceUiState {
     pub side_panel_tab: SidePanelTab,
     pub narrow_content_tab: NarrowContentTab,
@@ -147,10 +147,11 @@ pub struct PreviewPanelState {
     pub preview_revision: u64,
     pub preview_rx: Option<std::sync::mpsc::Receiver<PreviewEvent>>,
     pub preview_requested_range: Option<Range<usize>>,
+    pub queued_preview_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
     pub preview_error: Option<String>,
     pub preview_chunks: Vec<PreviewChunk>,
-    pub preview_chunk_line_index: Vec<Option<usize>>,
+    pub render_revision: u64,
 }
 
 impl PreviewPanelState {
@@ -159,7 +160,7 @@ impl PreviewPanelState {
 
     pub fn clear_loaded_chunks(&mut self) {
         self.preview_chunks.clear();
-        self.preview_chunk_line_index.clear();
+        self.bump_render_revision();
     }
 
     pub fn store_chunk(&mut self, range: Range<usize>, lines: Vec<SharedString>) {
@@ -185,7 +186,7 @@ impl PreviewPanelState {
                 .unwrap_or(0);
             self.preview_chunks.remove(prune_ix);
         }
-        self.rebuild_chunk_line_index();
+        self.bump_render_revision();
     }
 
     pub fn has_loaded_range(&self, range: &Range<usize>) -> bool {
@@ -211,30 +212,29 @@ impl PreviewPanelState {
     }
 
     pub fn line_at(&self, ix: usize) -> Option<SharedString> {
-        let chunk_ix = self.preview_chunk_line_index.get(ix).and_then(|ix| *ix)?;
-        let chunk = self.preview_chunks.get(chunk_ix)?;
-        chunk.lines.get(ix.checked_sub(chunk.range.start)?).cloned()
+        self.preview_chunks
+            .iter()
+            .find(|chunk| chunk.range.start <= ix && ix < chunk.range.end)
+            .and_then(|chunk| chunk.lines.get(ix.checked_sub(chunk.range.start)?))
+            .cloned()
     }
 
-    fn rebuild_chunk_line_index(&mut self) {
-        let line_count = self
-            .preview_document
-            .as_ref()
-            .map(PreviewDocument::line_count)
-            .unwrap_or_else(|| {
-                self.preview_chunks
-                    .iter()
-                    .map(|chunk| chunk.range.end)
-                    .max()
-                    .unwrap_or(0)
-            });
-        self.preview_chunk_line_index = vec![None; line_count];
-        for (chunk_ix, chunk) in self.preview_chunks.iter().enumerate() {
-            let end = chunk.range.end.min(self.preview_chunk_line_index.len());
-            for line_ix in chunk.range.start..end {
-                self.preview_chunk_line_index[line_ix] = Some(chunk_ix);
+    pub fn queue_preview_range(&mut self, range: Range<usize>) {
+        match &mut self.queued_preview_range {
+            Some(queued) => {
+                queued.start = queued.start.min(range.start);
+                queued.end = queued.end.max(range.end);
             }
+            None => self.queued_preview_range = Some(range),
         }
+    }
+
+    pub fn take_queued_preview_range(&mut self) -> Option<Range<usize>> {
+        self.queued_preview_range.take()
+    }
+
+    pub fn bump_render_revision(&mut self) {
+        self.render_revision = self.render_revision.wrapping_add(1);
     }
 }
 
@@ -340,7 +340,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_panel_line_index_tracks_loaded_chunks() {
+    fn preview_panel_line_lookup_tracks_loaded_chunks_without_full_index() {
         let mut state = PreviewPanelState::default();
         state.store_chunk(
             200..250,
@@ -359,5 +359,16 @@ mod tests {
             state.line_at(275).map(|line| line.to_string()),
             Some("d-275".into())
         );
+    }
+
+    #[test]
+    fn preview_panel_queues_ranges_by_merging_visible_buckets() {
+        let mut state = PreviewPanelState::default();
+
+        state.queue_preview_range(100..180);
+        state.queue_preview_range(180..260);
+
+        assert_eq!(state.take_queued_preview_range(), Some(100..260));
+        assert_eq!(state.take_queued_preview_range(), None);
     }
 }

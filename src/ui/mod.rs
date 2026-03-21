@@ -1,5 +1,6 @@
 mod assets;
 mod models;
+pub mod perf;
 mod preview_model;
 mod result_model;
 mod selection_model;

@@ -11,6 +11,13 @@ pub struct PreviewModel {
     state: PreviewPanelState,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreviewRenderLine {
+    pub line_number: SharedString,
+    pub text: SharedString,
+    pub missing: bool,
+}
+
 impl PreviewModel {
     pub fn new() -> Self {
         Self {
@@ -43,6 +50,7 @@ impl PreviewModel {
                 self.state.preview_document = Some(document);
                 self.state.preview_error = None;
                 self.state.preview_requested_range = None;
+                self.state.queued_preview_range = None;
                 self.state.clear_loaded_chunks();
                 self.state.store_chunk(
                     loaded_range,
@@ -84,6 +92,7 @@ impl PreviewModel {
                 if self.state.preview_document.is_none() {
                     self.state.clear_loaded_chunks();
                 }
+                self.state.bump_render_revision();
                 PreviewEventEffect::Updated
             }
         }
@@ -113,6 +122,10 @@ impl PreviewModel {
         self.state.preview_requested_range = None;
     }
 
+    pub fn take_queued_preview_range(&mut self) -> Option<Range<usize>> {
+        self.state.take_queued_preview_range()
+    }
+
     pub fn take_preview_rx(&mut self) -> Option<Receiver<PreviewEvent>> {
         self.state.preview_rx.take()
     }
@@ -123,8 +136,10 @@ impl PreviewModel {
         self.state.preview_error = None;
         self.state.preview_requested_range =
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
+        self.state.queued_preview_range = None;
         self.state.preview_document = None;
         self.state.clear_loaded_chunks();
+        self.state.bump_render_revision();
 
         PreviewRequest::Open {
             revision: self.state.preview_revision,
@@ -148,6 +163,24 @@ impl PreviewModel {
 
     pub fn line_at(&self, ix: usize) -> Option<SharedString> {
         self.state.line_at(ix)
+    }
+
+    pub fn render_revision(&self) -> u64 {
+        self.state.render_revision
+    }
+
+    pub fn build_render_lines(&self, range: Range<usize>) -> Vec<PreviewRenderLine> {
+        range
+            .map(|ix| {
+                let loaded = self.line_at(ix);
+                let text = loaded.clone().unwrap_or_default();
+                PreviewRenderLine {
+                    line_number: SharedString::from((ix + 1).to_string()),
+                    missing: loaded.is_none(),
+                    text,
+                }
+            })
+            .collect()
     }
 
     pub fn preview_request_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
@@ -176,6 +209,10 @@ impl PreviewModel {
             return None;
         }
         if self.state.preview_requested_range.as_ref() == Some(&padded) {
+            return None;
+        }
+        if self.state.preview_requested_range.is_some() {
+            self.state.queue_preview_range(padded);
             return None;
         }
 
@@ -234,6 +271,49 @@ mod tests {
             model.line_at(1).map(|line| line.to_string()),
             Some("b".into())
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn repeated_bucket_requests_are_coalesced_while_request_is_in_flight() {
+        let root = std::env::temp_dir().join(format!(
+            "codemerge_preview_model_queue_tests_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("preview.txt");
+        fs::write(
+            &path,
+            (0..512)
+                .map(|ix| format!("line-{ix}\n"))
+                .collect::<String>(),
+        )
+        .expect("write preview");
+        let mut model = PreviewModel::new();
+        let request = model.open_preview(7, path.clone());
+        let revision = match request {
+            PreviewRequest::Open { revision, .. } => revision,
+            _ => unreachable!(),
+        };
+        let document = index_document(&path).expect("index document");
+        let _ = model.apply_event(PreviewEvent::Opened {
+            revision,
+            file_id: 7,
+            document,
+            loaded_range: 0..128,
+            lines: (0..128).map(|ix| format!("line-{ix}")).collect(),
+        });
+
+        assert!(matches!(
+            model.load_preview_range_request(160..200),
+            Some(PreviewRequest::LoadRange { .. })
+        ));
+        assert!(model.load_preview_range_request(420..460).is_none());
+        assert!(model.take_queued_preview_range().is_some());
         let _ = fs::remove_dir_all(root);
     }
 }

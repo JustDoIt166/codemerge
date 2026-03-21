@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::processor::stats::ProcessingStats;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Language {
     Zh,
     En,
@@ -19,7 +19,7 @@ impl Language {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum OutputFormat {
     Default,
     Xml,
@@ -27,13 +27,13 @@ pub enum OutputFormat {
     Markdown,
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum ProcessingMode {
     Full,
     TreeOnly,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ProcessingOptions {
     pub compress: bool,
     pub use_gitignore: bool,
@@ -73,7 +73,7 @@ impl Default for AppConfigV1 {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct FileEntry {
     pub path: PathBuf,
     pub name: String,
@@ -122,7 +122,7 @@ pub struct TreeNodeViewModel {
     pub depth: usize,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct PreviewRowViewModel {
     pub id: u32,
     pub display_path: String,
@@ -172,7 +172,7 @@ pub struct PreflightStats {
     pub is_scanning: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
 pub enum ResultTab {
     #[default]
     Tree,

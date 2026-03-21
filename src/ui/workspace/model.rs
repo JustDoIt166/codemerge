@@ -1,4 +1,5 @@
 use std::collections::{BTreeSet, HashMap};
+use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
 use gpui::SharedString;
@@ -11,7 +12,7 @@ use crate::services::tree::{IndexedTreeNode, TreeIndex};
 use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
 use crate::utils::i18n::tr;
 
-#[derive(Default, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TreeCountSummary {
     pub folders: usize,
     pub files: usize,
@@ -27,6 +28,10 @@ impl TreeCountSummary {
 pub(super) enum TreeIconKind {
     FolderClosed,
     FolderOpen,
+    Rust,
+    Toml,
+    Json,
+    Markdown,
     Code,
     Document,
     Config,
@@ -40,6 +45,10 @@ impl TreeIconKind {
         match self {
             Self::FolderClosed => Icon::new(IconName::Folder),
             Self::FolderOpen => Icon::new(IconName::FolderOpen),
+            Self::Rust => Icon::new(IconName::SquareTerminal),
+            Self::Toml => Icon::new(IconName::Settings2),
+            Self::Json => Icon::new(IconName::LayoutDashboard),
+            Self::Markdown => Icon::new(IconName::BookOpen),
             Self::Code => Icon::new(IconName::SquareTerminal),
             Self::Document => Icon::new(IconName::BookOpen),
             Self::Config => Icon::new(IconName::Settings2),
@@ -83,6 +92,7 @@ pub(super) struct TreeRenderState {
     pub rows_by_id: HashMap<String, TreeRowViewModel>,
     pub visible_summary: TreeCountSummary,
     pub selected_row_ix: Option<usize>,
+    pub structure_signature: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -113,6 +123,7 @@ pub(super) struct TreeProjectionState {
     pub total_summary: TreeCountSummary,
 }
 
+#[derive(Clone)]
 pub(super) struct PreviewTableModel {
     pub rows: Vec<PreviewRowViewModel>,
     pub selected_row_ix: Option<usize>,
@@ -340,6 +351,7 @@ pub(super) fn build_tree_render_state(
         rows_by_id,
         visible_summary,
         selected_row_ix,
+        structure_signature: tree_structure_signature(projection, &visible_context),
     }
 }
 
@@ -581,12 +593,16 @@ fn extension_for_path(path: &str) -> Option<String> {
 
 fn icon_kind_for_extension(extension: Option<String>) -> TreeIconKind {
     match extension.as_deref() {
+        Some("rs") => TreeIconKind::Rust,
+        Some("toml") => TreeIconKind::Toml,
+        Some("json") => TreeIconKind::Json,
+        Some("md" | "mdx") => TreeIconKind::Markdown,
         Some(
-            "rs" | "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "kt" | "swift" | "c" | "cc"
-            | "cpp" | "h" | "hpp" | "cs" | "php" | "rb" | "sh" | "ps1" | "toml" | "yaml" | "yml",
+            "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "kt" | "swift" | "c" | "cc" | "cpp"
+            | "h" | "hpp" | "cs" | "php" | "rb" | "sh" | "ps1" | "yaml" | "yml",
         ) => TreeIconKind::Code,
-        Some("md" | "mdx" | "txt" | "rtf") => TreeIconKind::Document,
-        Some("json" | "lock" | "ini" | "conf" | "config" | "env") => TreeIconKind::Config,
+        Some("txt" | "rtf") => TreeIconKind::Document,
+        Some("lock" | "ini" | "conf" | "config" | "env") => TreeIconKind::Config,
         Some("csv" | "tsv" | "sql") => TreeIconKind::Data,
         Some("png" | "jpg" | "jpeg" | "gif" | "webp" | "svg" | "mp4" | "mov" | "mp3" | "wav") => {
             TreeIconKind::Media
@@ -610,6 +626,33 @@ fn build_blacklist_section_items(
             deletable: true,
         })
         .collect()
+}
+
+fn tree_structure_signature(
+    projection: &TreeProjectionState,
+    context: &VisibleTreeContext<'_>,
+) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for node in &projection.roots {
+        hash_visible_tree(node, context, &mut hasher);
+    }
+    hasher.finish()
+}
+
+fn hash_visible_tree(
+    node: &TreeProjectionNode,
+    context: &VisibleTreeContext<'_>,
+    hasher: &mut impl Hasher,
+) {
+    node.node_id.hash(hasher);
+    node.is_folder.hash(hasher);
+    node.is_expanded(context).hash(hasher);
+    if !(node.is_folder && node.is_expanded(context)) {
+        return;
+    }
+    for child in &node.children {
+        hash_visible_tree(child, context, hasher);
+    }
 }
 
 #[cfg(test)]
@@ -796,6 +839,23 @@ mod tests {
     }
 
     #[test]
+    fn tree_structure_signature_only_changes_when_visible_structure_changes() {
+        let result = sample_result();
+        let data = build_tree_panel_data(Some(&result));
+        let expanded = data
+            .as_ref()
+            .map(|data| data.index.default_expanded_ids.clone())
+            .unwrap_or_default();
+
+        let projection = build_tree_projection(data.as_ref(), "");
+        let render_a = build_tree_render_state(&projection, false, &expanded, Some("src"));
+        let render_b = build_tree_render_state(&projection, false, &expanded, Some("src/lib.rs"));
+
+        assert_eq!(render_a.structure_signature, render_b.structure_signature);
+        assert_ne!(render_a.selected_row_ix, render_b.selected_row_ix);
+    }
+
+    #[test]
     fn folder_summaries_include_nested_children() {
         let result = nested_result();
         let data = build_tree_panel_data(Some(&result));
@@ -945,6 +1005,19 @@ mod tests {
 
         assert_eq!(effect, TreePanelEffect::SwitchToContentAndOpen(2));
         assert_eq!(state.selected_node_id.as_deref(), Some("src/lib.rs"));
+    }
+
+    #[test]
+    fn tree_icon_mapping_promotes_common_file_types_to_dedicated_kinds() {
+        assert_eq!(icon_kind_for_extension(Some("rs".into())), TreeIconKind::Rust);
+        assert_eq!(icon_kind_for_extension(Some("toml".into())), TreeIconKind::Toml);
+        assert_eq!(icon_kind_for_extension(Some("json".into())), TreeIconKind::Json);
+        assert_eq!(
+            icon_kind_for_extension(Some("md".into())),
+            TreeIconKind::Markdown
+        );
+        assert_eq!(icon_kind_for_extension(Some("ts".into())), TreeIconKind::Code);
+        assert_eq!(icon_kind_for_extension(Some("txt".into())), TreeIconKind::Document);
     }
 
     fn sample_result() -> ProcessResult {

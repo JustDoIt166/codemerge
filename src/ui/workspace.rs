@@ -6,6 +6,7 @@ mod tree_palette;
 mod view;
 
 use std::rc::Rc;
+use std::{hash::Hash, hash::Hasher, ops::Range};
 
 use gpui::{
     AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
@@ -23,6 +24,7 @@ use gpui_component::{
 use crate::domain::{Language, PreviewRowViewModel};
 use crate::services::settings::{self, ConfigLoadIssue};
 use crate::ui::models::{ProcessModel, SettingsModel, WorkspaceUiModel};
+use crate::ui::perf;
 use crate::ui::preview_model::PreviewModel;
 use crate::ui::result_model::ResultModel;
 use crate::ui::selection_model::SelectionModel;
@@ -149,7 +151,7 @@ impl Default for RulesPanelCache {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorkspacePanelKind {
     Right,
     CompactContent,
@@ -158,31 +160,37 @@ enum WorkspacePanelKind {
 struct WorkspacePanelView {
     workspace: Entity<Workspace>,
     kind: WorkspacePanelKind,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct StatusPanelView {
     workspace: Entity<Workspace>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct InputPanelView {
     workspace: Entity<Workspace>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct RulesPanelView {
     workspace: Entity<Workspace>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct ResultsPanelView {
     workspace: Entity<Workspace>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct TreePaneView {
     workspace: Entity<Workspace>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -192,8 +200,20 @@ struct PreviewPaneView {
     result: Entity<ResultModel>,
     settings: Entity<SettingsModel>,
     scroll_handle: UniformListScrollHandle,
-    last_visible_bucket: std::ops::Range<usize>,
+    last_visible_bucket: Range<usize>,
+    render_cache_range: Range<usize>,
+    render_cache_revision: u64,
+    render_cache: Vec<crate::ui::preview_model::PreviewRenderLine>,
+    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
+}
+
+#[derive(Default)]
+struct PreviewTableCache {
+    filter: String,
+    result_key: u64,
+    current_selected_id: Option<u32>,
+    model: Option<model::PreviewTableModel>,
 }
 
 #[derive(Clone, Default)]
@@ -215,6 +235,9 @@ pub struct Workspace {
     tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
+    preview_filter_revision: u64,
+    preview_filter_task: Option<Task<()>>,
+    preview_table_cache: PreviewTableCache,
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
@@ -366,6 +389,9 @@ impl Workspace {
             },
             preview_table,
             preview_filter_input,
+            preview_filter_revision: 0,
+            preview_filter_task: None,
+            preview_table_cache: PreviewTableCache::default(),
             blacklist_filter_input,
             blacklist_add_input,
             rules_panel: RulesPanelController {
@@ -551,6 +577,140 @@ impl Workspace {
             });
         }
     }
+
+    fn schedule_preview_table_sync(&mut self, cx: &mut Context<Self>) {
+        self.preview_filter_revision = self.preview_filter_revision.wrapping_add(1);
+        let revision = self.preview_filter_revision;
+        self.preview_filter_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(std::time::Duration::from_millis(50)).await;
+            let _ = this.update(cx, |workspace, cx| {
+                if workspace.preview_filter_revision != revision {
+                    return;
+                }
+                workspace.preview_filter_task = None;
+                workspace.sync_preview_table(cx);
+            });
+        }));
+    }
+
+    fn hash_value<T: Hash>(value: &T) -> u64 {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn input_panel_invalidation_key(&self, cx: &App) -> u64 {
+        let settings = self.settings.read(cx).snapshot();
+        let selection = self.selection.read(cx).snapshot();
+        let ui = self.ui.read(cx).state();
+        Self::hash_value(&(
+            settings.language,
+            settings.options,
+            settings.folder_blacklist,
+            settings.ext_blacklist,
+            selection.dedupe_exact_path,
+            selection.selected_folder,
+            selection.selected_files,
+            selection.gitignore_file,
+            selection.gitignore_rules,
+            ui.pending_confirmation,
+        ))
+    }
+
+    fn status_panel_invalidation_key(&self, cx: &App) -> u64 {
+        let process = self.process.read(cx).state();
+        let result = self.result.read(cx).state();
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        self.settings.read(cx).language().hash(&mut hasher);
+        process.ui_status.hash(&mut hasher);
+        process.preflight.total_files.hash(&mut hasher);
+        process.preflight.skipped_files.hash(&mut hasher);
+        process.preflight.to_process_files.hash(&mut hasher);
+        process.preflight.scanned_entries.hash(&mut hasher);
+        process.preflight.is_scanning.hash(&mut hasher);
+        process.processing_records.len().hash(&mut hasher);
+        process.processing_scanned.hash(&mut hasher);
+        process.processing_candidates.hash(&mut hasher);
+        process.processing_skipped.hash(&mut hasher);
+        process.processing_current_file.hash(&mut hasher);
+        process.last_error.hash(&mut hasher);
+        result
+            .result
+            .as_ref()
+            .map(|result| {
+                (
+                    result.stats.total_chars,
+                    result.stats.total_tokens,
+                    result.preview_files.len(),
+                )
+            })
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    fn rules_panel_invalidation_key(&self, cx: &App) -> u64 {
+        let settings = self.settings.read(cx).snapshot();
+        let ui = self.ui.read(cx).state();
+        let filter = self.blacklist_filter_input.read(cx).value().to_string();
+        Self::hash_value(&(
+            settings.language,
+            settings.folder_blacklist,
+            settings.ext_blacklist,
+            ui.pending_confirmation,
+            filter,
+            self.rules_panel.revision,
+        ))
+    }
+
+    fn results_panel_invalidation_key(&self, cx: &App) -> u64 {
+        let result = self.result.read(cx).state();
+        let filter = self.preview_filter_input.read(cx).value().to_string();
+        Self::hash_value(&(
+            self.settings.read(cx).language(),
+            result.active_tab,
+            result.preview_rows.clone(),
+            result.result.as_ref().map(|result| {
+                (
+                    result.preview_files.len(),
+                    result.merged_content_path.is_some(),
+                )
+            }),
+            filter,
+        ))
+    }
+
+    fn tree_pane_invalidation_key(&self, cx: &App) -> u64 {
+        let result = self.result.read(cx).state();
+        let tree_state = self.tree_panel.state.read(cx);
+        Self::hash_value(&(
+            self.settings.read(cx).language(),
+            self.tree_panel.render_state.structure_signature,
+            self.tree_panel.render_state.selected_row_ix,
+            self.tree_panel.total_summary,
+            self.tree_panel.filter_input.read(cx).value().to_string(),
+            result.result.as_ref().map(|result| result.tree_nodes.len()),
+            tree_state.selected_index(),
+        ))
+    }
+
+    fn preview_pane_invalidation_key(&self, cx: &App) -> u64 {
+        let preview = self.preview.read(cx);
+        let result = self.result.read(cx).state();
+        let state = preview.state();
+        Self::hash_value(&(
+            self.settings.read(cx).language(),
+            preview.render_revision(),
+            state.selected_preview_file_id,
+            state.preview_error.as_deref(),
+            state.preview_requested_range.clone(),
+            result.preview_rows.clone(),
+        ))
+    }
+
+    fn workspace_panel_invalidation_key(&self, kind: WorkspacePanelKind, cx: &App) -> u64 {
+        let ui = self.ui.read(cx).state();
+        Self::hash_value(&(self.settings.read(cx).language(), ui, kind))
+    }
 }
 
 impl WorkspacePanelView {
@@ -562,12 +722,33 @@ impl WorkspacePanelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&ui, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&ui, |this, _, cx| {
+                let key = this
+                    .workspace
+                    .read(cx)
+                    .workspace_panel_invalidation_key(this.kind, cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this
+                    .workspace
+                    .read(cx)
+                    .workspace_panel_invalidation_key(this.kind, cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
             kind,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -598,12 +779,34 @@ impl InputPanelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&ui, |_, _, cx| cx.notify()),
-            cx.observe(&selection, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&ui, |this, _, cx| {
+                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&selection, |this, _, cx| {
+                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -618,12 +821,34 @@ impl StatusPanelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&process, |_, _, cx| cx.notify()),
-            cx.observe(&result, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&process, |this, _, cx| {
+                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&result, |this, _, cx| {
+                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -638,12 +863,34 @@ impl RulesPanelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&ui, |_, _, cx| cx.notify()),
-            cx.observe(&blacklist_filter_input, |_, _, cx| cx.notify()),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&ui, |this, _, cx| {
+                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&blacklist_filter_input, |this, _, cx| {
+                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -658,12 +905,34 @@ impl ResultsPanelView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&result, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&preview_filter_input, |_, _, cx| cx.notify()),
+            cx.observe(&result, |this, _, cx| {
+                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&preview_filter_input, |this, _, cx| {
+                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -680,18 +949,39 @@ impl TreePaneView {
     ) -> Self {
         let tree_workspace = workspace.clone();
         let subscriptions = vec![
-            cx.observe(&result, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&result, |this, _, cx| {
+                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
             cx.observe(&tree_state, move |_, _, cx| {
                 tree_workspace.update(cx, |workspace, workspace_cx| {
                     let _ = workspace.sync_tree_interaction(workspace_cx);
                 });
-                cx.notify();
             }),
-            cx.observe(&tree_filter_input, |_, _, cx| cx.notify()),
+            cx.observe(&tree_filter_input, |this, _, cx| {
+                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -706,9 +996,30 @@ impl PreviewPaneView {
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&preview, |_, _, cx| cx.notify()),
-            cx.observe(&result, |_, _, cx| cx.notify()),
-            cx.observe(&settings, |_, _, cx| cx.notify()),
+            cx.observe(&preview, |this, _, cx| {
+                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&result, |this, _, cx| {
+                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
         ];
         Self {
             workspace,
@@ -717,6 +1028,10 @@ impl PreviewPaneView {
             settings,
             scroll_handle: UniformListScrollHandle::new(),
             last_visible_bucket: 0..0,
+            render_cache_range: 0..0,
+            render_cache_revision: 0,
+            render_cache: Vec::new(),
+            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -807,5 +1122,152 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         Self::cleanup_result_artifacts(&self.result_artifacts);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Workspace;
+    use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
+    use crate::processor::stats::ProcessingStats;
+    use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
+    use crate::ui::{perf, preview_model::PreviewModel};
+    use gpui::{AppContext as _, TestAppContext};
+    use gpui_component::tree::TreeState;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{Duration, Instant};
+
+    #[gpui::test]
+    fn preview_render_cache_handles_large_visible_windows(cx: &mut TestAppContext) {
+        let root = std::env::temp_dir().join(format!(
+            "codemerge_preview_perf_tests_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("preview.txt");
+        fs::write(
+            &path,
+            (0..10_240)
+                .map(|ix| format!("line-{ix}\n"))
+                .collect::<String>(),
+        )
+        .expect("write preview");
+
+        let preview = cx.new(|_| PreviewModel::new());
+        preview.update(cx, |preview: &mut PreviewModel, _| {
+            let request = preview.open_preview(7, path.clone());
+            let revision = match request {
+                PreviewRequest::Open { revision, .. } => revision,
+                _ => unreachable!(),
+            };
+            let document = index_document(&path).expect("index document");
+            let _ = preview.apply_event(PreviewEvent::Opened {
+                revision,
+                file_id: 7,
+                document,
+                loaded_range: 0..512,
+                lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
+            });
+        });
+
+        let start = Instant::now();
+        preview.update(cx, |preview: &mut PreviewModel, _| {
+            for _ in 0..200 {
+                let lines = preview.build_render_lines(128..320);
+                assert_eq!(lines.len(), 192);
+            }
+        });
+        assert!(start.elapsed() < Duration::from_millis(200));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
+    fn tree_selection_changes_do_not_rebuild_tree_items(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result(), cx);
+            perf::reset();
+            workspace.sync_tree(cx);
+            let baseline = perf::snapshot();
+
+            workspace
+                .tree_panel
+                .state
+                .update(cx, |state: &mut TreeState, tree_cx| {
+                    state.set_selected_index(Some(0), tree_cx);
+                });
+            let _ = workspace.sync_tree_interaction(cx);
+
+            let after = perf::snapshot();
+            assert_eq!(after.tree_set_items, baseline.tree_set_items);
+            assert!(after.tree_syncs >= baseline.tree_syncs);
+        });
+    }
+
+    fn sample_result() -> ProcessResult {
+        ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: vec![
+                TreeNode {
+                    id: "src".to_string(),
+                    label: "src".to_string(),
+                    relative_path: "src".to_string(),
+                    is_folder: true,
+                    children: vec![
+                        TreeNode {
+                            id: "src/main.rs".to_string(),
+                            label: "main.rs".to_string(),
+                            relative_path: "src/main.rs".to_string(),
+                            is_folder: false,
+                            children: Vec::new(),
+                        },
+                        TreeNode {
+                            id: "src/lib.rs".to_string(),
+                            label: "lib.rs".to_string(),
+                            relative_path: "src/lib.rs".to_string(),
+                            is_folder: false,
+                            children: Vec::new(),
+                        },
+                    ],
+                },
+                TreeNode {
+                    id: "README.md".to_string(),
+                    label: "README.md".to_string(),
+                    relative_path: "README.md".to_string(),
+                    is_folder: false,
+                    children: Vec::new(),
+                },
+            ],
+            merged_content_path: None,
+            suggested_result_name: "workspace-20260321.txt".to_string(),
+            file_details: Vec::new(),
+            preview_files: vec![
+                PreviewFileEntry {
+                    id: 1,
+                    display_path: "src/main.rs".to_string(),
+                    chars: 10,
+                    tokens: 3,
+                    preview_blob_path: PathBuf::from("a"),
+                    byte_len: 10,
+                },
+                PreviewFileEntry {
+                    id: 2,
+                    display_path: "src/lib.rs".to_string(),
+                    chars: 12,
+                    tokens: 4,
+                    preview_blob_path: PathBuf::from("b"),
+                    byte_len: 12,
+                },
+            ],
+            preview_blob_dir: None,
+        }
     }
 }

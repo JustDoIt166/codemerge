@@ -91,7 +91,7 @@ impl Workspace {
     ) {
         if matches!(event, InputEvent::Change) {
             self.clear_preview_state(cx);
-            self.sync_preview_table(cx);
+            self.schedule_preview_table_sync(cx);
         }
     }
 
@@ -321,6 +321,8 @@ impl Workspace {
             preview_cx.notify();
         });
         self.cleanup_current_result_artifacts();
+        self.preview_filter_task = None;
+        self.preview_table_cache = super::PreviewTableCache::default();
         let status_ready = tr(self.language(cx), "status_ready").to_string();
         self.state.clear_inputs();
         self.selection.update(cx, |selection, selection_cx| {
@@ -378,6 +380,8 @@ impl Workspace {
             return;
         }
         self.cleanup_current_result_artifacts();
+        self.preview_filter_task = None;
+        self.preview_table_cache = super::PreviewTableCache::default();
         self.result.update(cx, |result, result_cx| {
             result.clear();
             result_cx.notify();

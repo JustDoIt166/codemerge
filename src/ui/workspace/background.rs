@@ -10,6 +10,7 @@ use crate::domain::{ProcessResult, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
 use crate::services::preview::{PreviewEvent, start as start_preview};
 use crate::ui::models::ProcessEventEffect;
+use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
@@ -132,8 +133,30 @@ impl Workspace {
     fn apply_preflight_event(&mut self, event: PreflightEvent, cx: &mut Context<Self>) {
         let language = self.language(cx);
         self.process.update(cx, |process, process_cx| {
+            let before = (
+                process.state().ui_status,
+                process.state().preflight.total_files,
+                process.state().preflight.skipped_files,
+                process.state().preflight.to_process_files,
+                process.state().preflight.scanned_entries,
+                process.state().preflight.is_scanning,
+                process.state().processing_current_file.clone(),
+                process.state().last_error.clone(),
+            );
             process.apply_preflight_event(event, language);
-            process_cx.notify();
+            let after = (
+                process.state().ui_status,
+                process.state().preflight.total_files,
+                process.state().preflight.skipped_files,
+                process.state().preflight.to_process_files,
+                process.state().preflight.scanned_entries,
+                process.state().preflight.is_scanning,
+                process.state().processing_current_file.clone(),
+                process.state().last_error.clone(),
+            );
+            if before != after {
+                process_cx.notify();
+            }
         });
     }
 
@@ -144,8 +167,29 @@ impl Workspace {
     ) -> (bool, bool) {
         let language = self.language(cx);
         match self.process.update(cx, |process, process_cx| {
-            process_cx.notify();
-            process.apply_process_event(event, language)
+            let before = (
+                process.state().ui_status,
+                process.state().processing_records.len(),
+                process.state().processing_scanned,
+                process.state().processing_candidates,
+                process.state().processing_skipped,
+                process.state().processing_current_file.clone(),
+                process.state().last_error.clone(),
+            );
+            let effect = process.apply_process_event(event, language);
+            let after = (
+                process.state().ui_status,
+                process.state().processing_records.len(),
+                process.state().processing_scanned,
+                process.state().processing_candidates,
+                process.state().processing_skipped,
+                process.state().processing_current_file.clone(),
+                process.state().last_error.clone(),
+            );
+            if before != after {
+                process_cx.notify();
+            }
+            effect
         }) {
             ProcessEventEffect::Continue => (false, false),
             ProcessEventEffect::Completed(result) => {
@@ -158,8 +202,22 @@ impl Workspace {
 
     fn apply_preview_events(&mut self, events: Vec<PreviewEvent>, cx: &mut Context<Self>) {
         let effect = self.preview.update(cx, |preview, preview_cx| {
+            let before = (
+                preview.state().selected_preview_file_id,
+                preview.state().preview_requested_range.clone(),
+                preview.state().preview_error.clone(),
+                preview.render_revision(),
+            );
             let effect = preview.apply_events(events);
-            preview_cx.notify();
+            let after = (
+                preview.state().selected_preview_file_id,
+                preview.state().preview_requested_range.clone(),
+                preview.state().preview_error.clone(),
+                preview.render_revision(),
+            );
+            if before != after {
+                preview_cx.notify();
+            }
             effect
         });
         if matches!(effect, PreviewEventEffect::ScrollTop) {
@@ -167,10 +225,12 @@ impl Workspace {
                 view.scroll_to_top();
             });
         }
+        self.request_queued_preview_range(cx);
     }
 
-    fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
+    pub(super) fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
         self.cleanup_current_result_artifacts();
+        self.preview_table_cache = super::PreviewTableCache::default();
         self.result_artifacts = super::ResultArtifacts {
             merged_content_path: result.merged_content_path.clone(),
             preview_blob_dir: result.preview_blob_dir.clone(),
@@ -203,6 +263,7 @@ impl Workspace {
     }
 
     pub(super) fn sync_tree_with_mode(&mut self, mode: TreeExpansionMode, cx: &mut Context<Self>) {
+        perf::record_tree_sync();
         if let Some(data) = self.tree_panel.data.as_ref() {
             match mode {
                 TreeExpansionMode::Default => {}
@@ -235,31 +296,74 @@ impl Workspace {
             &self.state.workspace.tree_panel.expanded_ids,
             self.state.workspace.tree_panel.selected_node_id.as_deref(),
         );
+        let replace_items =
+            self.tree_panel.render_state.structure_signature != render_state.structure_signature;
+        let selected_changed =
+            self.tree_panel.render_state.selected_row_ix != render_state.selected_row_ix;
         self.tree_panel.state.update(cx, |state, tree_cx| {
-            state.set_items(render_state.items.clone(), tree_cx);
-            state.set_selected_index(render_state.selected_row_ix, tree_cx);
+            if replace_items {
+                perf::record_tree_set_items();
+                state.set_items(render_state.items.clone(), tree_cx);
+            }
+            if replace_items || selected_changed {
+                state.set_selected_index(render_state.selected_row_ix, tree_cx);
+            }
         });
         self.tree_panel.render_state = render_state;
     }
 
     pub(super) fn sync_preview_table(&mut self, cx: &mut Context<Self>) {
+        perf::record_preview_table_sync();
         let filter = self
             .preview_filter_input
             .read(cx)
             .value()
             .trim()
             .to_ascii_lowercase();
-        let table_model = model::build_preview_table_model(
-            self.result.read(cx).state().result.as_ref(),
-            filter.as_str(),
-            self.preview.read(cx).selected_preview_file_id(),
-        );
+        let current_selected_id = self.preview.read(cx).selected_preview_file_id();
+        let result_key = self
+            .result
+            .read(cx)
+            .state()
+            .result
+            .as_ref()
+            .map_or(0, |result| {
+                result.preview_files.len()
+                    ^ result.tree_nodes.len()
+                    ^ usize::from(result.merged_content_path.is_some())
+            }) as u64;
+        let table_model = if self.preview_table_cache.filter == filter
+            && self.preview_table_cache.result_key == result_key
+            && self.preview_table_cache.current_selected_id == current_selected_id
+        {
+            self.preview_table_cache.model.clone().unwrap_or_else(|| {
+                model::build_preview_table_model(
+                    self.result.read(cx).state().result.as_ref(),
+                    filter.as_str(),
+                    current_selected_id,
+                )
+            })
+        } else {
+            let model = model::build_preview_table_model(
+                self.result.read(cx).state().result.as_ref(),
+                filter.as_str(),
+                current_selected_id,
+            );
+            self.preview_table_cache.filter = filter.clone();
+            self.preview_table_cache.result_key = result_key;
+            self.preview_table_cache.current_selected_id = current_selected_id;
+            self.preview_table_cache.model = Some(model.clone());
+            model
+        };
         let preview_rows = table_model.rows.clone();
         self.result.update(cx, |result, result_cx| {
-            result.set_preview_rows(preview_rows);
-            result_cx.notify();
+            if result.state().preview_rows != preview_rows {
+                result.set_preview_rows(preview_rows);
+                result_cx.notify();
+            }
         });
         self.preview_table.update(cx, |table, cx| {
+            let prev_rows = table.delegate().rows.clone();
             table.delegate_mut().rows = table_model.rows;
             if let Some(row_ix) =
                 table_model
@@ -274,7 +378,9 @@ impl Workspace {
             } else {
                 table.clear_selection(cx);
             }
-            cx.notify();
+            if prev_rows != table.delegate().rows {
+                cx.notify();
+            }
         });
 
         match table_model.next_selected_file_id {
@@ -326,8 +432,11 @@ impl Workspace {
 
     pub(super) fn clear_preview_state(&mut self, cx: &mut Context<Self>) {
         self.preview.update(cx, |preview, preview_cx| {
+            let before = preview.render_revision();
             preview.clear();
-            preview_cx.notify();
+            if before != preview.render_revision() {
+                preview_cx.notify();
+            }
         });
     }
 
@@ -408,6 +517,7 @@ impl Workspace {
         }) else {
             return false;
         };
+        perf::record_preview_range_request();
         self.preview.update(cx, |preview, _| {
             preview.set_preview_rx(Some(start_preview(request)));
         });
@@ -450,5 +560,17 @@ impl Workspace {
             view.scroll_to_top();
         });
         self.ensure_background_polling(cx);
+    }
+
+    fn request_queued_preview_range(&mut self, cx: &mut Context<Self>) {
+        let queued = self.preview.update(cx, |preview, _| {
+            if preview.state().preview_requested_range.is_some() {
+                return None;
+            }
+            preview.take_queued_preview_range()
+        });
+        if let Some(range) = queued {
+            let _ = self.request_preview_range(range, cx);
+        }
     }
 }
