@@ -9,7 +9,7 @@ use std::rc::Rc;
 use std::{hash::Hash, hash::Hasher, ops::Range};
 
 use gpui::{
-    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId, FocusHandle, Focusable,
     InteractiveElement, ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task,
     Timer, UniformListScrollHandle, Window, px, size,
 };
@@ -213,15 +213,19 @@ struct TreePaneView {
 }
 
 struct PreviewPaneView {
+    entity_id: EntityId,
     workspace: Entity<Workspace>,
     preview: Entity<PreviewModel>,
     result: Entity<ResultModel>,
     settings: Entity<SettingsModel>,
     scroll_handle: UniformListScrollHandle,
-    last_visible_bucket: Range<usize>,
+    last_requested_load_range: Range<usize>,
     render_cache_range: Range<usize>,
     render_cache_revision: u64,
     render_cache: Vec<crate::ui::preview_model::PreviewRenderLine>,
+    pending_visible_range: Option<Range<usize>>,
+    scheduled_visible_sync: bool,
+    last_scroll_anchor: usize,
     last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
@@ -724,7 +728,6 @@ impl Workspace {
             preview.render_revision(),
             state.selected_preview_file_id,
             state.preview_error.as_deref(),
-            state.preview_requested_range.clone(),
             result.preview_rows.clone(),
         ))
     }
@@ -1045,15 +1048,19 @@ impl PreviewPaneView {
             }),
         ];
         Self {
+            entity_id: cx.entity().entity_id(),
             workspace,
             preview,
             result,
             settings,
             scroll_handle: UniformListScrollHandle::new(),
-            last_visible_bucket: 0..0,
+            last_requested_load_range: 0..0,
             render_cache_range: 0..0,
             render_cache_revision: 0,
             render_cache: Vec::new(),
+            pending_visible_range: None,
+            scheduled_visible_sync: false,
+            last_scroll_anchor: 0,
             last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
@@ -1155,7 +1162,7 @@ mod tests {
     use crate::processor::stats::ProcessingStats;
     use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
     use crate::ui::{perf, preview_model::PreviewModel};
-    use gpui::{AppContext as _, TestAppContext};
+    use gpui::{AppContext as _, Entity, TestAppContext};
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
@@ -1254,6 +1261,146 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn preview_requested_range_changes_do_not_invalidate_preview_pane(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_notify", 512);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
+            workspace.preview.update(cx, |preview, _| {
+                let _ = preview.load_preview_range_request(
+                    256..320,
+                    crate::ui::preview_model::PreviewScrollDirection::Down,
+                );
+            });
+            perf::reset();
+
+            workspace.preview.update(cx, |preview, preview_cx| {
+                preview.clear_request();
+                preview_cx.notify();
+            });
+
+            let snapshot = perf::snapshot();
+            assert_eq!(snapshot.workspace_view_notifies, 0);
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_visible_range_sync_coalesces_to_latest_window(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_scroll", 1_024);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+            perf::reset();
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.queue_visible_range_sync(0..24, cx);
+                view.queue_visible_range_sync(128..160, cx);
+                assert_eq!(view.pending_visible_range, Some(128..160));
+                assert!(view.scheduled_visible_sync);
+                view.flush_pending_visible_range(cx);
+                assert_eq!(
+                    view.render_cache_range,
+                    128..192.min(crate::ui::state::PreviewPanelState::RENDER_WINDOW_LINES + 128)
+                );
+            });
+
+            let snapshot = perf::snapshot();
+            assert_eq!(snapshot.preview_visible_syncs, 1);
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_updates_outside_visible_window_do_not_rebuild_render_cache(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_cache", 1_024);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.refresh_render_cache(0..64, cx);
+            });
+            perf::reset();
+
+            workspace.preview.update(cx, |preview, preview_cx| {
+                let revision = preview.state().preview_revision;
+                let _ = preview.apply_event(PreviewEvent::Loaded {
+                    revision,
+                    file_id: 1,
+                    loaded_range: 384..512,
+                    lines: (384..512).map(|ix| format!("line-{ix}")).collect(),
+                });
+                preview_cx.notify();
+            });
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.refresh_render_cache(view.render_cache_range.clone(), cx);
+            });
+
+            let snapshot = perf::snapshot();
+            assert_eq!(snapshot.preview_render_cache_rebuilds, 0);
+            assert!(snapshot.preview_render_cache_partial_updates >= 1);
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_scroll_perf_reports_batched_metrics(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_perf_scroll", 8_192);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..3_072, 1);
+            perf::reset();
+
+            let start = Instant::now();
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                for frame in 0..30usize {
+                    for offset in 0..4usize {
+                        let start_ix = frame * 16 + offset * 8;
+                        view.queue_visible_range_sync(start_ix..start_ix + 24, cx);
+                    }
+                    view.flush_pending_visible_range(cx);
+                }
+            });
+            let elapsed = start.elapsed();
+            let snapshot = perf::snapshot();
+
+            println!(
+                "preview_scroll_perf frames=30 events=120 elapsed_ms={} visible_syncs={} range_requests={} cache_rebuilds={} cache_partial_updates={} workspace_notifies={}",
+                elapsed.as_millis(),
+                snapshot.preview_visible_syncs,
+                snapshot.preview_range_requests,
+                snapshot.preview_render_cache_rebuilds,
+                snapshot.preview_render_cache_partial_updates,
+                snapshot.workspace_view_notifies,
+            );
+
+            assert_eq!(snapshot.preview_visible_syncs, 30);
+            assert!(snapshot.preview_range_requests <= snapshot.preview_visible_syncs);
+            assert!(snapshot.preview_render_cache_rebuilds <= snapshot.preview_visible_syncs);
+            assert!(snapshot.preview_render_cache_partial_updates > 0);
+            assert!(elapsed < Duration::from_millis(500));
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
     fn sample_result() -> ProcessResult {
         ProcessResult {
             stats: ProcessingStats::default(),
@@ -1312,5 +1459,57 @@ mod tests {
             ],
             preview_blob_dir: None,
         }
+    }
+
+    fn sample_result_with_path(path: &std::path::Path) -> ProcessResult {
+        let mut result = sample_result();
+        result.preview_files[0].preview_blob_path = path.to_path_buf();
+        result
+    }
+
+    fn seed_preview_model(
+        preview: &Entity<PreviewModel>,
+        path: &std::path::Path,
+        cx: &mut impl gpui::AppContext,
+        loaded_range: std::ops::Range<usize>,
+        file_id: u32,
+    ) {
+        preview.update(cx, |preview: &mut PreviewModel, _| {
+            let request = preview.open_preview(file_id, path.to_path_buf());
+            let revision = match request {
+                PreviewRequest::Open { revision, .. } => revision,
+                _ => unreachable!(),
+            };
+            let document = index_document(path).expect("index document");
+            let _ = preview.apply_event(PreviewEvent::Opened {
+                revision,
+                file_id,
+                document,
+                loaded_range: loaded_range.clone(),
+                lines: loaded_range
+                    .clone()
+                    .map(|ix| format!("line-{ix}"))
+                    .collect(),
+            });
+        });
+    }
+
+    fn write_preview_fixture(prefix: &str, line_count: usize) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}.txt",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::write(
+            &path,
+            (0..line_count)
+                .map(|ix| format!("line-{ix}\n"))
+                .collect::<String>(),
+        )
+        .expect("write preview fixture");
+        path
     }
 }

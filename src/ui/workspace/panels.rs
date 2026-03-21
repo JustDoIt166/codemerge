@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div, px,
-    uniform_list,
+    App, Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div,
+    prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable, Icon, IconName, Sizable, Size, StyledExt as _,
@@ -32,6 +32,8 @@ use super::{
     workspace_panel_min_height,
 };
 use crate::domain::{ProcessStatus, ResultTab};
+use crate::ui::perf;
+use crate::ui::preview_model::PreviewScrollDirection;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
 
@@ -1164,8 +1166,10 @@ impl PreviewPaneView {
     pub(super) fn scroll_to_top(&mut self) {
         self.scroll_handle
             .scroll_to_item_strict(0, gpui::ScrollStrategy::Top);
-        self.last_visible_bucket = 0..0;
+        self.last_requested_load_range = 0..0;
         self.render_cache_range = 0..0;
+        self.pending_visible_range = Some(0..0);
+        self.last_scroll_anchor = 0;
     }
 
     pub(super) fn render_preview_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -1195,7 +1199,7 @@ impl PreviewPaneView {
         }
 
         let Some(document) = preview_document.as_ref() else {
-            self.last_visible_bucket = 0..0;
+            self.last_requested_load_range = 0..0;
             return empty_box(
                 tr(language, "preview_empty"),
                 tr(language, "preview_empty_hint"),
@@ -1208,10 +1212,14 @@ impl PreviewPaneView {
             .map(|row| row.display_path.clone())
             .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
         let line_count = document.line_count();
-        self.refresh_render_cache(
-            0..line_count.min(crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES),
-            cx,
-        );
+        self.flush_pending_visible_range(cx);
+        if self.render_cache_range.is_empty() && line_count > 0 {
+            let initial =
+                0..line_count.min(crate::ui::state::PreviewPanelState::RENDER_WINDOW_LINES);
+            self.refresh_render_cache(initial, cx);
+        } else {
+            self.refresh_render_cache(self.render_cache_range.clone(), cx);
+        }
 
         v_flex()
             .gap_2()
@@ -1245,7 +1253,7 @@ impl PreviewPaneView {
                             line_count,
                             cx.processor(
                                 move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
-                                    view.sync_visible_range(visible_range.clone(), app_cx);
+                                    view.queue_visible_range_sync(visible_range.clone(), app_cx);
                                     let muted = app_cx.theme().muted_foreground;
                                     let mono = app_cx.theme().mono_font_family.clone();
                                     let rows = view.render_lines_for(visible_range);
@@ -1264,7 +1272,14 @@ impl PreviewPaneView {
                                                         .text_color(muted)
                                                         .child(row.line_number),
                                                 )
-                                                .child(div().flex_1().child(row.text))
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .when(row.missing, |this| {
+                                                            this.text_color(muted.opacity(0.75))
+                                                        })
+                                                        .child(row.text),
+                                                )
                                         })
                                         .collect()
                                 },
@@ -1277,55 +1292,145 @@ impl PreviewPaneView {
             )
     }
 
-    fn sync_visible_range(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
-        let (line_count, already_loaded) = {
+    pub(super) fn queue_visible_range_sync(
+        &mut self,
+        visible: std::ops::Range<usize>,
+        cx: &mut App,
+    ) {
+        self.pending_visible_range = Some(visible);
+        if self.scheduled_visible_sync {
+            return;
+        }
+        self.scheduled_visible_sync = true;
+        let entity_id = self.entity_id;
+        cx.defer(move |cx| {
+            cx.notify(entity_id);
+        });
+    }
+
+    pub(super) fn flush_pending_visible_range(&mut self, cx: &mut App) {
+        self.scheduled_visible_sync = false;
+        let Some(visible) = self.pending_visible_range.take() else {
+            return;
+        };
+        self.sync_visible_range(visible, cx);
+    }
+
+    pub(super) fn sync_visible_range(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
+        perf::record_preview_visible_sync();
+        let (line_count, already_loaded, direction) = {
             let preview = self.preview.read(cx);
             let preview_state = preview.state();
             let Some(document) = &preview_state.preview_document else {
-                self.last_visible_bucket = 0..0;
+                self.last_requested_load_range = 0..0;
                 return;
             };
             let line_count = document.line_count();
-            let bucketed = bucket_visible_range(
+            let load_window = bucket_visible_range(
                 visible.clone(),
                 crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES,
                 line_count,
             );
-            let already_loaded = preview_state.has_loaded_range(&bucketed);
-            (line_count, already_loaded)
+            let already_loaded = preview_state.has_loaded_range(&load_window);
+            let anchor = visible.start.min(line_count.saturating_sub(1));
+            let direction = if anchor >= self.last_scroll_anchor {
+                PreviewScrollDirection::Down
+            } else {
+                PreviewScrollDirection::Up
+            };
+            (line_count, already_loaded, direction)
         };
         if line_count == 0 {
-            self.last_visible_bucket = 0..0;
+            self.last_requested_load_range = 0..0;
             return;
         }
 
-        let bucketed = bucket_visible_range(
+        let anchor = visible.start.min(line_count.saturating_sub(1));
+        self.last_scroll_anchor = anchor;
+        let render_window = bucket_visible_range(
+            visible.clone(),
+            crate::ui::state::PreviewPanelState::RENDER_WINDOW_LINES,
+            line_count,
+        );
+        self.refresh_render_cache(render_window, cx);
+        let load_window = bucket_visible_range(
             visible,
             crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES,
             line_count,
         );
-        if self.last_visible_bucket == bucketed {
+        if self.last_requested_load_range == load_window {
             return;
         }
-        self.last_visible_bucket = bucketed.clone();
-        self.refresh_render_cache(bucketed.clone(), cx);
+        self.last_requested_load_range = load_window.clone();
         if already_loaded {
             return;
         }
 
         self.workspace.update(cx, |workspace, cx| {
-            workspace.request_preview_range(bucketed, cx);
+            workspace.request_preview_range(load_window, direction, cx);
         });
     }
 
-    fn refresh_render_cache(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
+    pub(super) fn refresh_render_cache(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
+        if visible.is_empty() {
+            self.render_cache.clear();
+            self.render_cache_range = visible;
+            self.render_cache_revision = self.preview.read(cx).render_revision();
+            return;
+        }
         let render_revision = self.preview.read(cx).render_revision();
         if self.render_cache_revision == render_revision && self.render_cache_range == visible {
             return;
         }
-        self.render_cache = self.preview.read(cx).build_render_lines(visible.clone());
+        let overlaps = self.render_cache_range.start < visible.end
+            && visible.start < self.render_cache_range.end
+            && !self.render_cache.is_empty();
+        if self.render_cache_range != visible {
+            if overlaps && self.render_cache_revision == render_revision {
+                self.patch_render_cache_range(visible.clone(), cx);
+                perf::record_preview_render_cache_partial_update();
+            } else {
+                self.render_cache = self.preview.read(cx).build_render_lines(visible.clone());
+                perf::record_preview_render_cache_rebuild();
+            }
+        } else {
+            self.patch_render_cache_contents(cx);
+            perf::record_preview_render_cache_partial_update();
+        }
         self.render_cache_range = visible;
         self.render_cache_revision = render_revision;
+    }
+
+    fn patch_render_cache_range(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
+        let overlap_start = self.render_cache_range.start.max(visible.start);
+        let overlap_end = self.render_cache_range.end.min(visible.end);
+        let mut next_cache = Vec::with_capacity(visible.end.saturating_sub(visible.start));
+        let preview = self.preview.read(cx);
+
+        if visible.start < overlap_start {
+            next_cache.extend(preview.build_render_lines_partial(visible.start..overlap_start));
+        }
+        if overlap_start < overlap_end {
+            let start_ix = overlap_start.saturating_sub(self.render_cache_range.start);
+            let end_ix = overlap_end.saturating_sub(self.render_cache_range.start);
+            next_cache.extend(self.render_cache[start_ix..end_ix].iter().cloned());
+        }
+        if overlap_end < visible.end {
+            next_cache.extend(preview.build_render_lines_partial(overlap_end..visible.end));
+        }
+
+        self.render_cache = next_cache;
+    }
+
+    fn patch_render_cache_contents(&mut self, cx: &mut App) {
+        let preview = self.preview.read(cx);
+        for (offset, line) in self.render_cache.iter_mut().enumerate() {
+            let ix = self.render_cache_range.start + offset;
+            let next = preview.build_render_line(ix);
+            if *line != next {
+                *line = next;
+            }
+        }
     }
 
     fn render_lines_for(

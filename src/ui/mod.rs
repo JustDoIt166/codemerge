@@ -18,6 +18,9 @@ pub fn run() {
         cx.activate(true);
         cx.spawn(async move |cx| {
             cx.open_window(WindowOptions::default(), |window, cx| {
+                #[cfg(debug_assertions)]
+                window.toggle_inspector(cx);
+
                 let view = workspace::Workspace::view(window, cx);
                 cx.new(|cx| Root::new(view, window, cx))
             })?;

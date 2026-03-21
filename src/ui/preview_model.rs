@@ -11,6 +11,12 @@ pub struct PreviewModel {
     state: PreviewPanelState,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewScrollDirection {
+    Up,
+    Down,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PreviewRenderLine {
     pub line_number: SharedString,
@@ -52,9 +58,10 @@ impl PreviewModel {
                 self.state.preview_requested_range = None;
                 self.state.queued_preview_range = None;
                 self.state.clear_loaded_chunks();
-                self.state.store_chunk(
+                self.state.store_chunk_with_focus(
                     loaded_range,
                     lines.into_iter().map(SharedString::from).collect(),
+                    &(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2),
                 );
                 PreviewEventEffect::ScrollTop
             }
@@ -71,9 +78,16 @@ impl PreviewModel {
                 }
                 self.state.preview_error = None;
                 self.state.preview_requested_range = None;
-                self.state.store_chunk(
+                let focus_range = self
+                    .state
+                    .queued_preview_range
+                    .clone()
+                    .or_else(|| self.state.preview_requested_range.clone())
+                    .unwrap_or_else(|| loaded_range.clone());
+                self.state.store_chunk_with_focus(
                     loaded_range,
                     lines.into_iter().map(SharedString::from).collect(),
+                    &focus_range,
                 );
                 PreviewEventEffect::Updated
             }
@@ -170,20 +184,31 @@ impl PreviewModel {
     }
 
     pub fn build_render_lines(&self, range: Range<usize>) -> Vec<PreviewRenderLine> {
-        range
-            .map(|ix| {
-                let loaded = self.line_at(ix);
-                let text = loaded.clone().unwrap_or_default();
-                PreviewRenderLine {
-                    line_number: SharedString::from((ix + 1).to_string()),
-                    missing: loaded.is_none(),
-                    text,
-                }
-            })
-            .collect()
+        self.build_render_lines_partial(range)
     }
 
-    pub fn preview_request_range(&self, range: Range<usize>, line_count: usize) -> Range<usize> {
+    pub fn build_render_lines_partial(&self, range: Range<usize>) -> Vec<PreviewRenderLine> {
+        range.map(|ix| self.build_render_line(ix)).collect()
+    }
+
+    pub fn build_render_line(&self, ix: usize) -> PreviewRenderLine {
+        let loaded = self.line_at(ix);
+        let text = loaded
+            .clone()
+            .unwrap_or_else(|| SharedString::from("\u{2026}"));
+        PreviewRenderLine {
+            line_number: SharedString::from((ix + 1).to_string()),
+            missing: loaded.is_none(),
+            text,
+        }
+    }
+
+    pub fn preview_request_range(
+        &self,
+        range: Range<usize>,
+        line_count: usize,
+        direction: PreviewScrollDirection,
+    ) -> Range<usize> {
         if line_count == 0 {
             return 0..0;
         }
@@ -198,13 +223,27 @@ impl PreviewModel {
             .unwrap_or(bucket)
             .min(line_count);
 
-        bucket_start.saturating_sub(bucket)..(bucket_end + bucket * 2).min(line_count)
+        let leading_buckets = match direction {
+            PreviewScrollDirection::Down => 1,
+            PreviewScrollDirection::Up => 3,
+        };
+        let trailing_buckets = match direction {
+            PreviewScrollDirection::Down => 3,
+            PreviewScrollDirection::Up => 1,
+        };
+
+        bucket_start.saturating_sub(bucket * leading_buckets)
+            ..(bucket_end + bucket * trailing_buckets).min(line_count)
     }
 
-    pub fn load_preview_range_request(&mut self, range: Range<usize>) -> Option<PreviewRequest> {
+    pub fn load_preview_range_request(
+        &mut self,
+        range: Range<usize>,
+        direction: PreviewScrollDirection,
+    ) -> Option<PreviewRequest> {
         let document = self.state.preview_document.as_ref()?.clone();
         let file_id = self.state.selected_preview_file_id?;
-        let padded = self.preview_request_range(range, document.line_count());
+        let padded = self.preview_request_range(range, document.line_count(), direction);
         if padded.start >= padded.end || self.state.has_loaded_range(&padded) {
             return None;
         }
@@ -234,7 +273,7 @@ pub enum PreviewEventEffect {
 
 #[cfg(test)]
 mod tests {
-    use super::{PreviewEventEffect, PreviewModel};
+    use super::{PreviewEventEffect, PreviewModel, PreviewScrollDirection};
     use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
     use std::fs;
 
@@ -309,11 +348,76 @@ mod tests {
         });
 
         assert!(matches!(
-            model.load_preview_range_request(160..200),
+            model.load_preview_range_request(160..200, PreviewScrollDirection::Down),
             Some(PreviewRequest::LoadRange { .. })
         ));
-        assert!(model.load_preview_range_request(420..460).is_none());
+        assert!(
+            model
+                .load_preview_range_request(420..460, PreviewScrollDirection::Down)
+                .is_none()
+        );
         assert!(model.take_queued_preview_range().is_some());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn preview_request_range_prefetches_in_scroll_direction() {
+        let model = PreviewModel::new();
+
+        assert_eq!(
+            model.preview_request_range(384..448, 2_000, PreviewScrollDirection::Down),
+            192..1152
+        );
+        assert_eq!(
+            model.preview_request_range(384..448, 2_000, PreviewScrollDirection::Up),
+            0..768
+        );
+    }
+
+    #[test]
+    fn repeated_requests_within_same_prefetch_window_do_not_refetch() {
+        let root = std::env::temp_dir().join(format!(
+            "codemerge_preview_model_prefetch_tests_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("preview.txt");
+        fs::write(
+            &path,
+            (0..1_024)
+                .map(|ix| format!("line-{ix}\n"))
+                .collect::<String>(),
+        )
+        .expect("write preview");
+
+        let mut model = PreviewModel::new();
+        let request = model.open_preview(9, path.clone());
+        let revision = match request {
+            PreviewRequest::Open { revision, .. } => revision,
+            _ => unreachable!(),
+        };
+        let document = index_document(&path).expect("index document");
+        let _ = model.apply_event(PreviewEvent::Opened {
+            revision,
+            file_id: 9,
+            document,
+            loaded_range: 0..128,
+            lines: (0..128).map(|ix| format!("line-{ix}")).collect(),
+        });
+
+        assert!(matches!(
+            model.load_preview_range_request(192..256, PreviewScrollDirection::Down),
+            Some(PreviewRequest::LoadRange { .. })
+        ));
+        assert!(
+            model
+                .load_preview_range_request(256..320, PreviewScrollDirection::Down)
+                .is_none()
+        );
         let _ = fs::remove_dir_all(root);
     }
 }

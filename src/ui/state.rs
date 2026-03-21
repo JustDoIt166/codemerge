@@ -155,8 +155,9 @@ pub struct PreviewPanelState {
 }
 
 impl PreviewPanelState {
-    const MAX_CHUNKS: usize = 3;
+    const MAX_CHUNKS: usize = 6;
     pub const VISIBLE_BUCKET_LINES: usize = 192;
+    pub const RENDER_WINDOW_LINES: usize = 64;
 
     pub fn clear_loaded_chunks(&mut self) {
         self.preview_chunks.clear();
@@ -164,6 +165,15 @@ impl PreviewPanelState {
     }
 
     pub fn store_chunk(&mut self, range: Range<usize>, lines: Vec<SharedString>) {
+        self.store_chunk_with_focus(range.clone(), lines, &range);
+    }
+
+    pub fn store_chunk_with_focus(
+        &mut self,
+        range: Range<usize>,
+        lines: Vec<SharedString>,
+        focus_range: &Range<usize>,
+    ) {
         if range.start >= range.end || lines.is_empty() {
             return;
         }
@@ -176,7 +186,7 @@ impl PreviewPanelState {
         });
         self.preview_chunks.sort_by_key(|chunk| chunk.range.start);
         while self.preview_chunks.len() > Self::MAX_CHUNKS {
-            let focus_center = range_center(&range);
+            let focus_center = range_center(focus_range);
             let prune_ix = self
                 .preview_chunks
                 .iter()
@@ -317,8 +327,21 @@ mod tests {
             250..300,
             (250..300).map(|ix| format!("d-{ix}").into()).collect(),
         );
+        state.store_chunk(
+            400..450,
+            (400..450).map(|ix| format!("e-{ix}").into()).collect(),
+        );
+        state.store_chunk(
+            500..550,
+            (500..550).map(|ix| format!("f-{ix}").into()).collect(),
+        );
+        state.store_chunk_with_focus(
+            600..650,
+            (600..650).map(|ix| format!("g-{ix}").into()).collect(),
+            &(550..650),
+        );
 
-        assert_eq!(state.preview_chunks.len(), 3);
+        assert_eq!(state.preview_chunks.len(), 6);
         assert!(
             !state
                 .preview_chunks
@@ -329,7 +352,13 @@ mod tests {
             state
                 .preview_chunks
                 .iter()
-                .any(|chunk| chunk.range == (200..250))
+                .any(|chunk| chunk.range == (500..550))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (600..650))
         );
         assert!(
             state
@@ -370,5 +399,50 @@ mod tests {
 
         assert_eq!(state.take_queued_preview_range(), Some(100..260));
         assert_eq!(state.take_queued_preview_range(), None);
+    }
+
+    #[test]
+    fn preview_panel_keeps_neighboring_chunks_around_latest_focus() {
+        let mut state = PreviewPanelState::default();
+        for base in [0, 100, 200, 300, 400, 500] {
+            state.store_chunk_with_focus(
+                base..base + 50,
+                (base..base + 50)
+                    .map(|ix| format!("line-{ix}").into())
+                    .collect(),
+                &(450..550),
+            );
+        }
+        state.store_chunk_with_focus(
+            600..650,
+            (600..650).map(|ix| format!("line-{ix}").into()).collect(),
+            &(550..650),
+        );
+
+        assert_eq!(state.preview_chunks.len(), 6);
+        assert!(
+            !state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (0..50))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (400..450))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (500..550))
+        );
+        assert!(
+            state
+                .preview_chunks
+                .iter()
+                .any(|chunk| chunk.range == (600..650))
+        );
     }
 }

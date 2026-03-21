@@ -92,9 +92,8 @@ impl Workspace {
                 self.apply_preview_events(events, cx);
             }
             if !keep {
-                self.preview.update(cx, |preview, preview_cx| {
+                self.preview.update(cx, |preview, _| {
                     preview.clear_request();
-                    preview_cx.notify();
                 });
             }
             if keep {
@@ -204,14 +203,12 @@ impl Workspace {
         let effect = self.preview.update(cx, |preview, preview_cx| {
             let before = (
                 preview.state().selected_preview_file_id,
-                preview.state().preview_requested_range.clone(),
                 preview.state().preview_error.clone(),
                 preview.render_revision(),
             );
             let effect = preview.apply_events(events);
             let after = (
                 preview.state().selected_preview_file_id,
-                preview.state().preview_requested_range.clone(),
                 preview.state().preview_error.clone(),
                 preview.render_revision(),
             );
@@ -499,6 +496,7 @@ impl Workspace {
     pub(super) fn request_preview_range(
         &mut self,
         range: Range<usize>,
+        direction: crate::ui::preview_model::PreviewScrollDirection,
         cx: &mut Context<Self>,
     ) -> bool {
         if self.preview.read(cx).preview_document().is_none() {
@@ -508,12 +506,8 @@ impl Workspace {
             return false;
         }
 
-        let Some(request) = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview.load_preview_range_request(range);
-            if request.is_some() {
-                preview_cx.notify();
-            }
-            request
+        let Some(request) = self.preview.update(cx, |preview, _| {
+            preview.load_preview_range_request(range, direction)
         }) else {
             return false;
         };
@@ -570,7 +564,11 @@ impl Workspace {
             preview.take_queued_preview_range()
         });
         if let Some(range) = queued {
-            let _ = self.request_preview_range(range, cx);
+            let _ = self.request_preview_range(
+                range,
+                crate::ui::preview_model::PreviewScrollDirection::Down,
+                cx,
+            );
         }
     }
 }
