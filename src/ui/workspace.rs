@@ -31,6 +31,8 @@ use crate::ui::selection_model::SelectionModel;
 use crate::ui::state::{AppState, ProcessUiStatus, WorkspaceUiState};
 use crate::utils::i18n::tr;
 
+const MERGED_CONTENT_PREVIEW_FILE_ID: u32 = u32::MAX;
+
 pub(super) fn preview_line_height() -> Pixels {
     px(22.)
 }
@@ -224,6 +226,7 @@ struct PreviewPaneView {
     render_cache_revision: u64,
     render_cache: Vec<crate::ui::preview_model::PreviewRenderLine>,
     pending_visible_range: Option<Range<usize>>,
+    last_synced_visible_range: Option<Range<usize>>,
     scheduled_visible_sync: bool,
     last_scroll_anchor: usize,
     last_invalidation_key: u64,
@@ -1059,6 +1062,7 @@ impl PreviewPaneView {
             render_cache_revision: 0,
             render_cache: Vec::new(),
             pending_visible_range: None,
+            last_synced_visible_range: None,
             scheduled_visible_sync: false,
             last_scroll_anchor: 0,
             last_invalidation_key: 0,
@@ -1321,6 +1325,33 @@ mod tests {
     }
 
     #[gpui::test]
+    fn preview_same_visible_range_does_not_reschedule_notify(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_repeat_visible", 1_024);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.queue_visible_range_sync(128..160, cx);
+                assert!(view.scheduled_visible_sync);
+
+                view.flush_pending_visible_range(cx);
+                assert_eq!(view.last_synced_visible_range, Some(128..160));
+                assert!(!view.scheduled_visible_sync);
+
+                view.queue_visible_range_sync(128..160, cx);
+                assert_eq!(view.pending_visible_range, None);
+                assert!(!view.scheduled_visible_sync);
+            });
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
     fn preview_updates_outside_visible_window_do_not_rebuild_render_cache(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
@@ -1401,6 +1432,40 @@ mod tests {
         let _ = fs::remove_file(path);
     }
 
+    #[gpui::test]
+    fn content_tab_loads_merged_result_preview(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("merged_content", 256);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            workspace.load_merged_content_preview(cx);
+        });
+
+        let rx = workspace
+            .update(cx, |workspace: &mut Workspace, cx| {
+                workspace
+                    .preview
+                    .update(cx, |preview, _| preview.take_preview_rx())
+            })
+            .expect("preview receiver");
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("preview open event")
+        {
+            PreviewEvent::Opened {
+                file_id, document, ..
+            } => {
+                assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
+                assert_eq!(document.path(), path.as_path());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        let _ = fs::remove_file(path);
+    }
+
     fn sample_result() -> ProcessResult {
         ProcessResult {
             stats: ProcessingStats::default(),
@@ -1464,6 +1529,13 @@ mod tests {
     fn sample_result_with_path(path: &std::path::Path) -> ProcessResult {
         let mut result = sample_result();
         result.preview_files[0].preview_blob_path = path.to_path_buf();
+        result
+    }
+
+    fn sample_result_with_merged_content_path(path: &std::path::Path) -> ProcessResult {
+        let mut result = sample_result();
+        result.merged_content_path = Some(path.to_path_buf());
+        result.preview_files.clear();
         result
     }
 

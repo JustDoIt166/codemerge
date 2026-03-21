@@ -14,6 +14,52 @@ use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
+    fn load_preview_path(
+        &mut self,
+        file_id: u32,
+        preview_path: std::path::PathBuf,
+        cx: &mut Context<Self>,
+    ) {
+        let preview_state = self.preview.read(cx).state();
+        if preview_state.selected_preview_file_id == Some(file_id)
+            && (preview_state.preview_document.is_some() || preview_state.preview_rx.is_some())
+        {
+            return;
+        }
+
+        let request = self.preview.update(cx, |preview, preview_cx| {
+            let request = preview.open_preview(file_id, preview_path);
+            preview_cx.notify();
+            request
+        });
+        self.preview.update(cx, |preview, _| {
+            preview.set_preview_rx(Some(start_preview(request)));
+        });
+        self.preview_pane_view.update(cx, |view, _| {
+            view.scroll_to_top();
+        });
+        self.ensure_background_polling(cx);
+    }
+
+    pub(super) fn load_merged_content_preview(&mut self, cx: &mut Context<Self>) {
+        let merged_content_path = self
+            .result
+            .read(cx)
+            .state()
+            .result
+            .as_ref()
+            .and_then(|result| result.merged_content_path.clone());
+        let Some(merged_content_path) = merged_content_path else {
+            return;
+        };
+
+        self.load_preview_path(
+            super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            merged_content_path,
+            cx,
+        );
+    }
+
     pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
         let mut received_events = false;
 
@@ -520,12 +566,6 @@ impl Workspace {
     }
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
-        let preview_state = self.preview.read(cx).state();
-        if preview_state.selected_preview_file_id == Some(file_id)
-            && (preview_state.preview_document.is_some() || preview_state.preview_rx.is_some())
-        {
-            return;
-        }
         let Some(entry) = self
             .result
             .read(cx)
@@ -541,19 +581,7 @@ impl Workspace {
         else {
             return;
         };
-        let preview_blob_path = entry.preview_blob_path.clone();
-        let request = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview.open_preview(file_id, preview_blob_path);
-            preview_cx.notify();
-            request
-        });
-        self.preview.update(cx, |preview, _| {
-            preview.set_preview_rx(Some(start_preview(request)));
-        });
-        self.preview_pane_view.update(cx, |view, _| {
-            view.scroll_to_top();
-        });
-        self.ensure_background_polling(cx);
+        self.load_preview_path(file_id, entry.preview_blob_path.clone(), cx);
     }
 
     fn request_queued_preview_range(&mut self, cx: &mut Context<Self>) {

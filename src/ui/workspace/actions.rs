@@ -749,6 +749,7 @@ impl Workspace {
             result_cx.notify();
         });
         if active_tab == ResultTab::Content {
+            self.load_merged_content_preview(cx);
             self.ensure_background_polling(cx);
         }
     }

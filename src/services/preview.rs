@@ -52,6 +52,10 @@ pub struct PreviewDocument {
 }
 
 impl PreviewDocument {
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     pub fn line_count(&self) -> usize {
         self.line_offsets.len()
     }

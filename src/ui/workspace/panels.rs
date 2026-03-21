@@ -16,7 +16,6 @@ use gpui_component::{
     scroll::ScrollableElement,
     tab::Tab,
     tab::TabBar,
-    table::Table,
     tree::tree,
     v_flex, v_virtual_list,
 };
@@ -28,8 +27,8 @@ use super::view::{
     section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
 use super::{
-    PreviewPaneView, TreePaneView, TreeViewMode, Workspace, fixed_list_sizes, preview_line_height,
-    workspace_panel_min_height,
+    MERGED_CONTENT_PREVIEW_FILE_ID, PreviewPaneView, TreePaneView, TreeViewMode, Workspace,
+    fixed_list_sizes, preview_line_height, workspace_panel_min_height,
 };
 use crate::domain::{ProcessStatus, ResultTab};
 use crate::ui::perf;
@@ -805,9 +804,6 @@ impl Workspace {
 
     pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
-        let result_state = self.result.read(cx).state().clone();
-        let has_result = result_state.result.is_some();
-        let has_rows = !result_state.preview_rows.is_empty();
         let tree_only = self.result_is_tree_only(cx);
 
         if tree_only {
@@ -828,33 +824,6 @@ impl Workspace {
             .gap_3()
             .size_full()
             .min_h(px(0.))
-            .child(Input::new(&self.preview_filter_input).cleanable(true))
-            .child(if has_result && has_rows {
-                div()
-                    .h(px(220.))
-                    .child(
-                        Table::new(&self.preview_table)
-                            .with_size(Size::Small)
-                            .stripe(true),
-                    )
-                    .into_any_element()
-            } else {
-                empty_box(
-                    if has_result {
-                        tr(language, "content_no_match")
-                    } else {
-                        tr(language, "content_empty")
-                    },
-                    if has_result {
-                        tr(language, "content_no_match_hint")
-                    } else {
-                        tr(language, "content_empty_hint")
-                    },
-                    IconName::File,
-                    cx,
-                )
-                .into_any_element()
-            })
             .child(self.preview_pane_view.clone())
             .into_any_element()
     }
@@ -1169,6 +1138,7 @@ impl PreviewPaneView {
         self.last_requested_load_range = 0..0;
         self.render_cache_range = 0..0;
         self.pending_visible_range = Some(0..0);
+        self.last_synced_visible_range = None;
         self.last_scroll_anchor = 0;
     }
 
@@ -1208,9 +1178,13 @@ impl PreviewPaneView {
             );
         };
 
-        let file_path = selected_preview
-            .map(|row| row.display_path.clone())
-            .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+        let file_path = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
+            tr(language, "tab_merged_content").to_string()
+        } else {
+            selected_preview
+                .map(|row| row.display_path.clone())
+                .unwrap_or_else(|| document.path().display().to_string())
+        };
         let line_count = document.line_count();
         self.flush_pending_visible_range(cx);
         if self.render_cache_range.is_empty() && line_count > 0 {
@@ -1297,6 +1271,12 @@ impl PreviewPaneView {
         visible: std::ops::Range<usize>,
         cx: &mut App,
     ) {
+        if self.pending_visible_range.as_ref() == Some(&visible)
+            || (!self.scheduled_visible_sync
+                && self.last_synced_visible_range.as_ref() == Some(&visible))
+        {
+            return;
+        }
         self.pending_visible_range = Some(visible);
         if self.scheduled_visible_sync {
             return;
@@ -1313,6 +1293,7 @@ impl PreviewPaneView {
         let Some(visible) = self.pending_visible_range.take() else {
             return;
         };
+        self.last_synced_visible_range = Some(visible.clone());
         self.sync_visible_range(visible, cx);
     }
 
