@@ -900,6 +900,7 @@ pub(super) fn process_status_title(status: ProcessUiStatus, language: Language) 
 pub(super) fn process_status_message(
     process: &crate::ui::state::ProcessState,
     language: Language,
+    merged_file_size_hint: Option<String>,
 ) -> String {
     match process.ui_status {
         ProcessUiStatus::Idle => tr(language, "status_idle_hint").to_string(),
@@ -909,7 +910,13 @@ pub(super) fn process_status_message(
             process.preflight.scanned_entries
         ),
         ProcessUiStatus::Running => process.processing_current_file.clone(),
-        ProcessUiStatus::Completed => tr(language, "status_completed_hint").to_string(),
+        ProcessUiStatus::Completed => {
+            let base = tr(language, "status_completed_hint").to_string();
+            match merged_file_size_hint {
+                Some(size) => format!("{base} ({size})"),
+                None => base,
+            }
+        }
         ProcessUiStatus::Cancelled => tr(language, "status_cancelled_hint").to_string(),
         ProcessUiStatus::Error => process
             .last_error
@@ -918,7 +925,7 @@ pub(super) fn process_status_message(
     }
 }
 
-fn format_size(size: u64) -> String {
+pub(super) fn format_size(size: u64) -> String {
     if size < 1024 {
         format!("{size} B")
     } else if size < 1024 * 1024 {
@@ -955,6 +962,39 @@ pub(super) fn format_duration(duration: std::time::Duration) -> String {
         format!("{hours:02}:{minutes:02}:{seconds:02}")
     } else {
         format!("{minutes:02}:{seconds:02}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::process_status_message;
+    use crate::domain::Language;
+    use crate::ui::state::{ProcessState, ProcessUiStatus};
+    use crate::utils::i18n::tr;
+
+    #[test]
+    fn completed_status_message_appends_merged_file_size_hint() {
+        let process = ProcessState {
+            ui_status: ProcessUiStatus::Completed,
+            ..ProcessState::default()
+        };
+
+        let message = process_status_message(&process, Language::En, Some("1.2 MB".to_string()));
+        let expected = format!("{} (1.2 MB)", tr(Language::En, "status_completed_hint"));
+
+        assert_eq!(message, expected);
+    }
+
+    #[test]
+    fn completed_status_message_omits_hint_when_missing() {
+        let process = ProcessState {
+            ui_status: ProcessUiStatus::Completed,
+            ..ProcessState::default()
+        };
+
+        let message = process_status_message(&process, Language::En, None);
+
+        assert_eq!(message, tr(Language::En, "status_completed_hint"));
     }
 }
 

@@ -23,12 +23,12 @@ use gpui_component::{
 
 use super::view::{
     activity_row, card, empty_box, format_duration, format_tree_summary, panel_frame,
-    panel_viewport, pill_label, process_status_message, process_status_title,
-    render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
-    section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
+    panel_viewport, process_status_message, process_status_title, render_blacklist_section,
+    render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
+    section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
 use super::{
-    PreviewPaneView, TreePaneView, Workspace, fixed_list_sizes, preview_line_height,
+    PreviewPaneView, TreePaneView, TreeViewMode, Workspace, fixed_list_sizes, preview_line_height,
     workspace_panel_min_height,
 };
 use crate::domain::{ProcessStatus, ResultTab};
@@ -338,13 +338,13 @@ impl Workspace {
         let process_actions = self.render_process_actions(cx).into_any_element();
         let process = self.process.read(cx);
         let process = process.state();
-        let result_stats = self
-            .result
-            .read(cx)
-            .state()
-            .result
-            .as_ref()
-            .map(|result| result.stats.clone());
+        let result = self.result.read(cx);
+        let result = result.state().result.as_ref();
+        let result_stats = result.map(|result| result.stats.clone());
+        let merged_file_size_hint = result
+            .and_then(|result| result.merged_content_path.as_ref())
+            .and_then(|path| std::fs::metadata(path).ok())
+            .map(|metadata| super::view::format_size(metadata.len()));
         let processed_count = process.processing_records.len();
         let failed_count = process
             .processing_records
@@ -428,7 +428,7 @@ impl Workspace {
             )
             .child(status_banner(
                 process_status_title(process.ui_status, language),
-                process_status_message(process, language),
+                process_status_message(process, language, merged_file_size_hint),
                 process.ui_status,
                 cx,
             ))
@@ -984,6 +984,33 @@ impl TreePaneView {
         };
         let has_result = self.result_has_tree(cx);
         let filter_active = !tree_filter.is_empty();
+        let is_plain_text_mode = matches!(self.view_mode, TreeViewMode::PlainText);
+        let view_mode_label = if is_plain_text_mode {
+            tr(language, "tree_view_tree")
+        } else {
+            tr(language, "tree_view_text")
+        };
+        let plain_text = if is_plain_text_mode {
+            workspace
+                .read(cx)
+                .result
+                .read(cx)
+                .state()
+                .result
+                .as_ref()
+                .map(|result| result.tree_string.clone())
+                .unwrap_or_default()
+        } else {
+            String::new()
+        };
+        let plain_text_lines = if is_plain_text_mode {
+            plain_text
+                .split('\n')
+                .map(|line| line.trim_end_matches('\r').replace(' ', "\u{00A0}"))
+                .collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
 
         let row_workspace = workspace.clone();
         let expand_workspace = workspace.clone();
@@ -1023,7 +1050,7 @@ impl TreePaneView {
                             .outline()
                             .icon(IconName::ChevronDown)
                             .label(tr(language, "tree_expand_all"))
-                            .disabled(!has_result || filter_active)
+                            .disabled(!has_result || filter_active || is_plain_text_mode)
                             .on_click(cx.listener(move |_, event, window, cx| {
                                 expand_workspace.update(cx, |workspace, cx| {
                                     workspace.expand_tree(event, window, cx);
@@ -1035,7 +1062,7 @@ impl TreePaneView {
                             .outline()
                             .icon(IconName::ChevronRight)
                             .label(tr(language, "tree_collapse_all"))
-                            .disabled(!has_result || filter_active)
+                            .disabled(!has_result || filter_active || is_plain_text_mode)
                             .on_click(cx.listener(move |_, event, window, cx| {
                                 collapse_workspace.update(cx, |workspace, cx| {
                                     workspace.collapse_tree(event, window, cx);
@@ -1058,14 +1085,12 @@ impl TreePaneView {
                                 language,
                             )),
                     )
-                    .child(pill_label(
-                        if filter_active {
-                            tr(language, "tree_filter_active")
-                        } else {
-                            tr(language, "tree_filter_idle")
-                        },
-                        cx,
-                    )),
+                    .child(
+                        Button::new("tree-view-mode")
+                            .outline()
+                            .label(view_mode_label)
+                            .on_click(cx.listener(Self::toggle_view_mode)),
+                    ),
             )
             .child(
                 div()
@@ -1076,7 +1101,33 @@ impl TreePaneView {
                     .rounded(px(14.))
                     .bg(cx.theme().secondary.opacity(0.35))
                     .p_2()
-                    .child(if has_visible_nodes {
+                    .child(if is_plain_text_mode {
+                        if plain_text.is_empty() {
+                            empty_box(
+                                tr(language, "tree_empty"),
+                                tr(language, "tree_empty_hint"),
+                                IconName::FolderOpen,
+                                cx,
+                            )
+                            .into_any_element()
+                        } else {
+                            div()
+                                .size_full()
+                                .min_h(px(0.))
+                                .overflow_y_scrollbar()
+                                .p_2()
+                                .child(v_flex().children(plain_text_lines.into_iter().map(
+                                    |line| {
+                                        div()
+                                            .font_family(cx.theme().mono_font_family.clone())
+                                            .text_sm()
+                                            .whitespace_nowrap()
+                                            .child(line)
+                                    },
+                                )))
+                                .into_any_element()
+                        }
+                    } else if has_visible_nodes {
                         tree_view.into_any_element()
                     } else {
                         empty_box(

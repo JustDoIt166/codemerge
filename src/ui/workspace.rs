@@ -9,9 +9,9 @@ use std::rc::Rc;
 use std::{hash::Hash, hash::Hasher, ops::Range};
 
 use gpui::{
-    AnyElement, App, AppContext, Context, Entity, FocusHandle, Focusable, InteractiveElement,
-    ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task, Timer,
-    UniformListScrollHandle, Window, px, size,
+    AnyElement, App, AppContext, ClickEvent, Context, Entity, FocusHandle, Focusable,
+    InteractiveElement, ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task,
+    Timer, UniformListScrollHandle, Window, px, size,
 };
 use gpui_component::{
     WindowExt as _,
@@ -151,6 +151,23 @@ impl Default for RulesPanelCache {
     }
 }
 
+impl TreePaneView {
+    fn toggle_view_mode(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.view_mode = match self.view_mode {
+            TreeViewMode::Tree => TreeViewMode::PlainText,
+            TreeViewMode::PlainText => TreeViewMode::Tree,
+        };
+        cx.notify();
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum TreeViewMode {
+    #[default]
+    Tree,
+    PlainText,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorkspacePanelKind {
     Right,
@@ -190,6 +207,7 @@ struct ResultsPanelView {
 
 struct TreePaneView {
     workspace: Entity<Workspace>,
+    view_mode: TreeViewMode,
     last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
@@ -689,6 +707,10 @@ impl Workspace {
             self.tree_panel.total_summary,
             self.tree_panel.filter_input.read(cx).value().to_string(),
             result.result.as_ref().map(|result| result.tree_nodes.len()),
+            result
+                .result
+                .as_ref()
+                .map(|result| result.tree_string.as_str()),
             tree_state.selected_index(),
         ))
     }
@@ -981,6 +1003,7 @@ impl TreePaneView {
         ];
         Self {
             workspace,
+            view_mode: TreeViewMode::Tree,
             last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
@@ -1208,6 +1231,26 @@ mod tests {
             let after = perf::snapshot();
             assert_eq!(after.tree_set_items, baseline.tree_set_items);
             assert!(after.tree_syncs >= baseline.tree_syncs);
+        });
+    }
+
+    #[gpui::test]
+    fn tree_pane_invalidation_key_tracks_tree_string_changes(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let mut first_result = sample_result();
+            first_result.tree_string = "src/\n  main.rs\n".to_string();
+            workspace.set_result(first_result, cx);
+            let first_key = workspace.tree_pane_invalidation_key(cx);
+
+            let mut second_result = sample_result();
+            second_result.tree_string = "app/\n  lib.rs\n".to_string();
+            workspace.set_result(second_result, cx);
+            let second_key = workspace.tree_pane_invalidation_key(cx);
+
+            assert_ne!(first_key, second_key);
         });
     }
 
