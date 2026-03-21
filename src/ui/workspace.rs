@@ -343,9 +343,6 @@ impl Workspace {
                 Self::on_blacklist_filter_event,
             ),
             cx.subscribe_in(&preview_table, window, Self::on_preview_table_event),
-            cx.observe(&tree_state, |this, _, cx| {
-                let _ = this.sync_tree_interaction(cx);
-            }),
         ];
         let mut this = Self {
             focus_handle: cx.focus_handle(),
@@ -681,10 +678,16 @@ impl TreePaneView {
         tree_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
+        let tree_workspace = workspace.clone();
         let subscriptions = vec![
             cx.observe(&result, |_, _, cx| cx.notify()),
             cx.observe(&settings, |_, _, cx| cx.notify()),
-            cx.observe(&tree_state, |_, _, cx| cx.notify()),
+            cx.observe(&tree_state, move |_, _, cx| {
+                tree_workspace.update(cx, |workspace, workspace_cx| {
+                    let _ = workspace.sync_tree_interaction(workspace_cx);
+                });
+                cx.notify();
+            }),
             cx.observe(&tree_filter_input, |_, _, cx| cx.notify()),
         ];
         Self {
