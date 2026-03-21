@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Div, Hsla, IntoElement, ParentElement, RenderOnce, SharedString,
-    StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
+    AnyElement, App, Div, Hsla, InteractiveElement, IntoElement, ParentElement, RenderOnce,
+    SharedString, StyleRefinement, Styled, Window, div, hsla, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
     ActiveTheme as _, Icon, IconName, Sizable, Size, StyledExt as _, WindowExt as _, h_flex,
@@ -169,197 +169,85 @@ pub(super) fn render_tree_row(
     let badge = tree_filter_badge(row, language);
     let palette = TreeRowPalette::new(selected, row.icon_kind, row.is_filter_match, row.match_kind)
         .resolve(cx.theme());
+    let row_indent = px((row.depth as f32) * 20.);
 
     ListItem::new(ix)
         .w_full()
-        .h(px(42.))
-        .rounded(px(10.))
+        .h(px(48.))
+        .rounded(px(8.))
+        .bg(palette.row_bg)
         .child(
-            h_flex()
-                .w_full()
-                .items_center()
-                .gap_2()
-                .children(render_tree_guides(row, &palette))
-                .child(
-                    div()
-                        .flex()
-                        .w(px(14.))
-                        .items_center()
-                        .justify_center()
-                        .text_color(palette.chevron_fg)
-                        .when_some(chevron, |this, chevron| this.child(chevron)),
-                )
-                .child(
-                    div()
-                        .w(px(2.))
-                        .h(px(18.))
-                        .rounded(px(999.))
-                        .bg(palette.selection_bar_bg),
-                )
-                .child(
-                    div()
-                        .flex()
-                        .w(px(26.))
-                        .h(px(26.))
-                        .rounded(px(8.))
-                        .items_center()
-                        .justify_center()
-                        .bg(palette.icon_bg)
-                        .child(
-                            row.icon_kind
-                                .icon()
-                                .text_color(palette.icon_fg)
-                                .with_size(Size::Small),
-                        ),
-                )
-                .child(
-                    v_flex()
-                        .min_w(px(0.))
-                        .flex_1()
-                        .gap_1()
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .gap_2()
-                                .child(render_match_label(
-                                    row.label.as_ref(),
-                                    row.match_kind,
-                                    row.match_range.as_ref(),
-                                    &palette,
-                                ))
-                                .when_some(badge, |this, badge| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .px_2()
-                                            .py(px(1.))
-                                            .rounded(px(999.))
-                                            .bg(palette.badge_bg)
-                                            .text_color(palette.badge_fg)
-                                            .child(badge),
-                                    )
-                                }),
-                        )
-                        .child(
-                            h_flex()
-                                .items_center()
-                                .justify_between()
-                                .gap_3()
-                                .child(
-                                    div()
-                                        .min_w(px(0.))
-                                        .text_xs()
-                                        .text_color(palette.secondary_fg)
-                                        .truncate()
-                                        .child(
-                                            if matches!(row.match_kind, Some(FilterMatchKind::Path))
-                                            {
-                                                row.relative_path.clone()
-                                            } else {
-                                                SharedString::from(tree_secondary_label(
-                                                    row, language,
-                                                ))
-                                            },
-                                        ),
-                                )
-                                .when(!row.is_folder, |this| {
-                                    this.child(
-                                        div()
-                                            .text_xs()
-                                            .px_2()
-                                            .py(px(1.))
-                                            .rounded(px(999.))
-                                            .bg(palette.extension_bg)
-                                            .text_color(palette.extension_fg)
-                                            .child(
-                                                row.extension
-                                                    .clone()
-                                                    .unwrap_or_else(|| row.label.clone()),
-                                            ),
-                                    )
-                                }),
-                        ),
-                ),
+            div().w_full().h_full().child(
+                h_flex()
+                    .w_full()
+                    .h_full()
+                    .items_center()
+                    .gap_3()
+                    .px(px(12.))
+                    .pl(px(12.) + row_indent)
+                    .hover(|style| style.bg(palette.row_hover_bg))
+                    .child(
+                        div()
+                            .flex()
+                            .w(px(14.))
+                            .items_center()
+                            .justify_center()
+                            .text_color(palette.chevron_fg)
+                            .when_some(chevron, |this, chevron| this.child(chevron)),
+                    )
+                    .child(
+                        div()
+                            .flex()
+                            .w(px(20.))
+                            .h(px(20.))
+                            .items_center()
+                            .justify_center()
+                            .child(
+                                row.icon_kind
+                                    .icon()
+                                    .text_color(palette.icon_fg)
+                                    .with_size(Size::Small),
+                            ),
+                    )
+                    .child(
+                        v_flex()
+                            .min_w(px(0.))
+                            .flex_1()
+                            .gap_1()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap_3()
+                                    .child(div().min_w(px(0.)).flex_1().child(render_match_label(
+                                        row.label.as_ref(),
+                                        row.match_kind,
+                                        row.match_range.as_ref(),
+                                        &palette,
+                                    )))
+                                    .when_some(badge, |this, badge| {
+                                        this.child(
+                                            div()
+                                                .text_xs()
+                                                .px(px(7.))
+                                                .py(px(2.))
+                                                .rounded(px(6.))
+                                                .bg(palette.badge_bg)
+                                                .text_color(palette.badge_fg)
+                                                .child(badge),
+                                        )
+                                    }),
+                            )
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .justify_between()
+                                    .gap(px(6.))
+                                    .child(render_secondary_label(row, language, &palette)),
+                            ),
+                    ),
+            ),
         )
-}
-
-fn render_tree_guides(row: &TreeRowViewModel, palette: &ResolvedTreeRowPalette) -> Vec<AnyElement> {
-    let last_ix = row.guide_continuations.len().saturating_sub(1);
-    row.guide_continuations
-        .iter()
-        .enumerate()
-        .map(|(depth, continues)| {
-            if depth == last_ix {
-                render_branch_guide(depth, *continues, palette)
-            } else {
-                render_ancestor_guide(depth, *continues, palette)
-            }
-        })
-        .collect()
-}
-
-fn render_ancestor_guide(
-    depth: usize,
-    continues: bool,
-    palette: &ResolvedTreeRowPalette,
-) -> AnyElement {
-    let color = palette.guide_color(depth);
-    div()
-        .flex()
-        .w(px(10.))
-        .h(px(28.))
-        .items_center()
-        .justify_center()
-        .child(if continues {
-            render_vertical_guide_line(px(28.), color)
-        } else {
-            div().w(px(1.)).h(px(28.)).into_any_element()
-        })
-        .into_any_element()
-}
-
-fn render_branch_guide(
-    depth: usize,
-    continues: bool,
-    palette: &ResolvedTreeRowPalette,
-) -> AnyElement {
-    let color = palette.guide_color(depth);
-    div()
-        .flex()
-        .w(px(10.))
-        .h(px(28.))
-        .items_center()
-        .justify_center()
-        .child(
-            v_flex()
-                .w(px(10.))
-                .h_full()
-                .items_center()
-                .justify_center()
-                .child(render_vertical_guide_line(px(13.), color))
-                .child(
-                    h_flex()
-                        .w(px(10.))
-                        .h(px(1.))
-                        .items_center()
-                        .child(div().w(px(4.)).h(px(1.)))
-                        .child(render_horizontal_guide_line(px(6.), color)),
-                )
-                .child(if continues {
-                    render_vertical_guide_line(px(14.), color)
-                } else {
-                    div().w(px(1.)).h(px(14.)).into_any_element()
-                }),
-        )
-        .into_any_element()
-}
-
-fn render_vertical_guide_line(length: gpui::Pixels, color: Hsla) -> AnyElement {
-    div().w(px(1.)).h(length).bg(color).into_any_element()
-}
-
-fn render_horizontal_guide_line(length: gpui::Pixels, color: Hsla) -> AnyElement {
-    div().w(length).h(px(1.)).bg(color).into_any_element()
 }
 
 fn tree_secondary_label(row: &TreeRowViewModel, language: Language) -> String {
@@ -373,10 +261,16 @@ fn tree_secondary_label(row: &TreeRowViewModel, language: Language) -> String {
         );
     }
 
-    row.extension
-        .as_ref()
-        .map(|ext| ext.to_string())
-        .unwrap_or_else(|| row.relative_path.to_string())
+    match (row.preview_chars, row.preview_tokens) {
+        (Some(chars), Some(tokens)) => format!(
+            "{} {} · {} {}",
+            chars,
+            tr(language, "chars"),
+            tokens,
+            tr(language, "tokens")
+        ),
+        _ => String::new(),
+    }
 }
 
 fn tree_filter_badge(row: &TreeRowViewModel, language: Language) -> Option<String> {
@@ -404,52 +298,161 @@ fn render_match_label(
     match_range: Option<&std::ops::Range<usize>>,
     palette: &ResolvedTreeRowPalette,
 ) -> AnyElement {
-    let base = div()
-        .font_semibold()
-        .text_color(palette.label_fg)
-        .truncate()
-        .whitespace_nowrap();
-
     if !matches!(match_kind, Some(FilterMatchKind::Label)) {
-        return base.child(text.to_string()).into_any_element();
+        return div()
+            .text_sm()
+            .font_medium()
+            .text_color(palette.label_fg)
+            .truncate()
+            .whitespace_nowrap()
+            .child(text.to_string())
+            .into_any_element();
     }
 
     let Some(range) = match_range else {
-        return base.child(text.to_string()).into_any_element();
+        return div()
+            .text_sm()
+            .font_medium()
+            .text_color(palette.label_fg)
+            .truncate()
+            .whitespace_nowrap()
+            .child(text.to_string())
+            .into_any_element();
     };
     if range.start >= text.len() || range.end > text.len() || range.start >= range.end {
-        return base.child(text.to_string()).into_any_element();
+        return div()
+            .text_sm()
+            .font_medium()
+            .text_color(palette.label_fg)
+            .truncate()
+            .whitespace_nowrap()
+            .child(text.to_string())
+            .into_any_element();
+    }
+
+    render_inline_match(text, range, palette, false)
+}
+
+fn render_secondary_label(
+    row: &TreeRowViewModel,
+    language: Language,
+    palette: &ResolvedTreeRowPalette,
+) -> AnyElement {
+    if matches!(row.match_kind, Some(FilterMatchKind::Path))
+        && let Some(range) = row.match_range.as_ref()
+    {
+        return render_inline_match(row.relative_path.as_ref(), range, palette, true);
+    }
+
+    div()
+        .min_w(px(0.))
+        .text_xs()
+        .text_color(palette.secondary_fg)
+        .truncate()
+        .child(SharedString::from(tree_secondary_label(row, language)))
+        .into_any_element()
+}
+
+fn render_inline_match(
+    text: &str,
+    range: &std::ops::Range<usize>,
+    palette: &ResolvedTreeRowPalette,
+    secondary: bool,
+) -> AnyElement {
+    if range.start >= text.len() || range.end > text.len() || range.start >= range.end {
+        return if secondary {
+            div()
+                .min_w(px(0.))
+                .text_xs()
+                .text_color(palette.secondary_fg)
+                .truncate()
+                .child(text.to_string())
+                .into_any_element()
+        } else {
+            div()
+                .text_sm()
+                .font_medium()
+                .text_color(palette.label_fg)
+                .truncate()
+                .whitespace_nowrap()
+                .child(text.to_string())
+                .into_any_element()
+        };
     }
 
     let prefix = &text[..range.start];
     let matched = &text[range.start..range.end];
     let suffix = &text[range.end..];
 
-    h_flex()
-        .gap_1()
-        .items_center()
+    let base_color = if secondary {
+        palette.secondary_fg
+    } else {
+        palette.label_fg
+    };
+
+    div()
+        .min_w(px(0.))
+        .overflow_hidden()
         .child(
-            div()
-                .font_semibold()
-                .text_color(palette.label_fg)
-                .truncate()
-                .child(prefix.to_string()),
-        )
-        .child(
-            div()
-                .font_semibold()
-                .px_1()
-                .rounded(px(4.))
-                .bg(palette.match_bg)
-                .text_color(palette.match_fg)
-                .child(matched.to_string()),
-        )
-        .child(
-            div()
-                .font_semibold()
-                .text_color(palette.label_fg)
-                .truncate()
-                .child(suffix.to_string()),
+            h_flex()
+                .items_center()
+                .child(if secondary {
+                    div()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(base_color)
+                        .whitespace_nowrap()
+                        .child(prefix.to_string())
+                } else {
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .text_color(base_color)
+                        .whitespace_nowrap()
+                        .child(prefix.to_string())
+                })
+                .child(if secondary {
+                    div()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(palette.match_fg)
+                        .whitespace_nowrap()
+                        .px(px(1.))
+                        .rounded(px(4.))
+                        .bg(palette.match_bg)
+                        .text_decoration_1()
+                        .text_decoration_color(palette.match_fg)
+                        .child(matched.to_string())
+                } else {
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .text_color(palette.match_fg)
+                        .whitespace_nowrap()
+                        .px(px(1.))
+                        .rounded(px(4.))
+                        .bg(palette.match_bg)
+                        .text_decoration_1()
+                        .text_decoration_color(palette.match_fg)
+                        .child(matched.to_string())
+                })
+                .child(if secondary {
+                    div()
+                        .min_w(px(0.))
+                        .text_xs()
+                        .text_color(base_color)
+                        .whitespace_nowrap()
+                        .truncate()
+                        .child(suffix.to_string())
+                } else {
+                    div()
+                        .text_sm()
+                        .font_medium()
+                        .text_color(base_color)
+                        .whitespace_nowrap()
+                        .truncate()
+                        .child(suffix.to_string())
+                }),
         )
         .into_any_element()
 }

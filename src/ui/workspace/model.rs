@@ -74,6 +74,8 @@ pub(super) struct TreeRowViewModel {
     pub depth: usize,
     pub extension: Option<SharedString>,
     pub preview_file_id: Option<u32>,
+    pub preview_chars: Option<usize>,
+    pub preview_tokens: Option<usize>,
     pub child_file_count: usize,
     pub child_folder_count: usize,
     pub icon_kind: TreeIconKind,
@@ -82,7 +84,6 @@ pub(super) struct TreeRowViewModel {
     pub match_range: Option<Range<usize>>,
     pub match_kind: Option<FilterMatchKind>,
     pub matched_descendants: usize,
-    pub guide_continuations: Vec<bool>,
 }
 
 #[derive(Default)]
@@ -98,7 +99,7 @@ pub(super) struct TreeRenderState {
 #[derive(Clone, Debug)]
 pub(super) struct TreePanelData {
     pub index: TreeIndex,
-    pub preview_file_ids: HashMap<String, u32>,
+    preview_files: HashMap<String, PreviewFileMeta>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -272,7 +273,7 @@ pub(super) fn build_blacklist_sections(
 pub(super) fn build_tree_panel_data(result: Option<&ProcessResult>) -> Option<TreePanelData> {
     result.map(|result| TreePanelData {
         index: crate::services::tree::build_tree_index(&result.tree_nodes),
-        preview_file_ids: preview_file_id_map(&result.preview_files),
+        preview_files: preview_file_map(&result.preview_files),
     })
 }
 
@@ -288,7 +289,7 @@ pub(super) fn build_tree_projection(
     let filter_lower = filter.to_ascii_lowercase();
     let context = TreeProjectionContext {
         filter: filter_lower.as_str(),
-        preview_file_ids: &data.preview_file_ids,
+        preview_files: &data.preview_files,
     };
     let mut roots = Vec::new();
 
@@ -324,17 +325,8 @@ pub(super) fn build_tree_render_state(
         .collect::<Vec<_>>();
     let mut rows = Vec::new();
     let mut visible_summary = TreeCountSummary::default();
-    let last_root_ix = projection.roots.len().saturating_sub(1);
-    for (ix, node) in projection.roots.iter().enumerate() {
-        append_visible_tree_rows(
-            node,
-            0,
-            &[],
-            ix < last_root_ix,
-            &visible_context,
-            &mut rows,
-            &mut visible_summary,
-        );
+    for node in &projection.roots {
+        append_visible_tree_rows(node, 0, &visible_context, &mut rows, &mut visible_summary);
     }
 
     let rows_by_id = rows
@@ -413,8 +405,8 @@ fn build_tree_projection_node(
         relative_path: node.relative_path.clone(),
         is_folder: node.is_folder,
         extension: extension_for_path(node.relative_path.as_str()),
-        preview_file_id: context
-            .preview_file_ids
+        preview: context
+            .preview_files
             .get(node.relative_path.as_str())
             .copied(),
         child_file_count: node.stats.descendant_files,
@@ -427,10 +419,19 @@ fn build_tree_projection_node(
     })
 }
 
-fn preview_file_id_map(preview_files: &[PreviewFileEntry]) -> HashMap<String, u32> {
+fn preview_file_map(preview_files: &[PreviewFileEntry]) -> HashMap<String, PreviewFileMeta> {
     preview_files
         .iter()
-        .map(|entry| (entry.display_path.clone(), entry.id))
+        .map(|entry| {
+            (
+                entry.display_path.clone(),
+                PreviewFileMeta {
+                    id: entry.id,
+                    chars: entry.chars,
+                    tokens: entry.tokens,
+                },
+            )
+        })
         .collect()
 }
 
@@ -446,7 +447,14 @@ struct VisibleTreeContext<'a> {
 
 struct TreeProjectionContext<'a> {
     filter: &'a str,
-    preview_file_ids: &'a HashMap<String, u32>,
+    preview_files: &'a HashMap<String, PreviewFileMeta>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PreviewFileMeta {
+    id: u32,
+    chars: usize,
+    tokens: usize,
 }
 
 #[derive(Clone, Debug)]
@@ -456,7 +464,7 @@ pub(super) struct TreeProjectionNode {
     relative_path: String,
     is_folder: bool,
     extension: Option<String>,
-    preview_file_id: Option<u32>,
+    preview: Option<PreviewFileMeta>,
     child_file_count: usize,
     child_folder_count: usize,
     is_filter_match: bool,
@@ -503,8 +511,6 @@ impl TreeProjectionNode {
 fn append_visible_tree_rows(
     node: &TreeProjectionNode,
     depth: usize,
-    ancestor_guides: &[bool],
-    has_next_sibling: bool,
     context: &VisibleTreeContext<'_>,
     rows: &mut Vec<TreeRowViewModel>,
     summary: &mut TreeCountSummary,
@@ -516,11 +522,6 @@ fn append_visible_tree_rows(
         summary.files += 1;
     }
 
-    let mut guide_continuations = ancestor_guides.to_vec();
-    if depth > 0 {
-        guide_continuations.push(has_next_sibling);
-    }
-
     rows.push(TreeRowViewModel {
         node_id: SharedString::from(node.node_id.clone()),
         label: SharedString::from(node.label.clone()),
@@ -528,7 +529,9 @@ fn append_visible_tree_rows(
         is_folder: node.is_folder,
         depth,
         extension: node.extension.clone().map(SharedString::from),
-        preview_file_id: node.preview_file_id,
+        preview_file_id: node.preview.map(|preview| preview.id),
+        preview_chars: node.preview.map(|preview| preview.chars),
+        preview_tokens: node.preview.map(|preview| preview.tokens),
         child_file_count: node.child_file_count,
         child_folder_count: node.child_folder_count,
         icon_kind: node.icon_kind(context),
@@ -537,24 +540,14 @@ fn append_visible_tree_rows(
         match_range: node.match_range.clone(),
         match_kind: node.match_kind,
         matched_descendants: node.matched_descendants,
-        guide_continuations: guide_continuations.clone(),
     });
 
     if !(node.is_folder && is_expanded) {
         return;
     }
 
-    let last_child_ix = node.children.len().saturating_sub(1);
-    for (ix, child) in node.children.iter().enumerate() {
-        append_visible_tree_rows(
-            child,
-            depth + 1,
-            &guide_continuations,
-            ix < last_child_ix,
-            context,
-            rows,
-            summary,
-        );
+    for child in &node.children {
+        append_visible_tree_rows(child, depth + 1, context, rows, summary);
     }
 }
 
@@ -598,8 +591,8 @@ fn icon_kind_for_extension(extension: Option<String>) -> TreeIconKind {
         Some("json") => TreeIconKind::Json,
         Some("md" | "mdx") => TreeIconKind::Markdown,
         Some(
-            "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "kt" | "swift" | "c" | "cc" | "cpp"
-            | "h" | "hpp" | "cs" | "php" | "rb" | "sh" | "ps1" | "yaml" | "yml",
+            "js" | "jsx" | "ts" | "tsx" | "py" | "go" | "java" | "kt" | "swift" | "c" | "cc"
+            | "cpp" | "h" | "hpp" | "cs" | "php" | "rb" | "sh" | "ps1" | "yaml" | "yml",
         ) => TreeIconKind::Code,
         Some("txt" | "rtf") => TreeIconKind::Document,
         Some("lock" | "ini" | "conf" | "config" | "env") => TreeIconKind::Config,
@@ -664,7 +657,7 @@ mod tests {
         TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect,
         apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
         build_preview_table_model, build_tree_panel_data, build_tree_projection,
-        build_tree_render_state,
+        build_tree_render_state, icon_kind_for_extension,
     };
     use crate::domain::{Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
@@ -809,7 +802,9 @@ mod tests {
             .find(|row| row.node_id.as_ref() == "src/lib.rs")
             .expect("lib row");
         assert_eq!(lib.preview_file_id, Some(2));
-        assert_eq!(lib.icon_kind, TreeIconKind::Code);
+        assert_eq!(lib.preview_chars, Some(12));
+        assert_eq!(lib.preview_tokens, Some(4));
+        assert_eq!(lib.icon_kind, TreeIconKind::Rust);
         assert_eq!(render.selected_row_ix, Some(2));
     }
 
@@ -889,9 +884,10 @@ mod tests {
 
         assert_eq!(src.child_folder_count, 1);
         assert_eq!(src.child_file_count, 2);
-        assert_eq!(nested.guide_continuations, vec![true]);
-        assert_eq!(nested_file.guide_continuations, vec![true, false]);
-        assert_eq!(main.guide_continuations, vec![false]);
+        assert_eq!(nested.depth, 1);
+        assert_eq!(nested_file.depth, 2);
+        assert_eq!(nested_file.preview_chars, Some(12));
+        assert_eq!(main.preview_tokens, Some(3));
     }
 
     #[test]
@@ -922,8 +918,8 @@ mod tests {
                 files: 2,
             }
         );
-        assert_eq!(render.rows[1].guide_continuations, vec![true]);
-        assert_eq!(render.rows[2].guide_continuations, vec![false]);
+        assert_eq!(render.rows[1].depth, 1);
+        assert_eq!(render.rows[2].depth, 1);
     }
 
     #[test]
@@ -1009,15 +1005,30 @@ mod tests {
 
     #[test]
     fn tree_icon_mapping_promotes_common_file_types_to_dedicated_kinds() {
-        assert_eq!(icon_kind_for_extension(Some("rs".into())), TreeIconKind::Rust);
-        assert_eq!(icon_kind_for_extension(Some("toml".into())), TreeIconKind::Toml);
-        assert_eq!(icon_kind_for_extension(Some("json".into())), TreeIconKind::Json);
+        assert_eq!(
+            icon_kind_for_extension(Some("rs".into())),
+            TreeIconKind::Rust
+        );
+        assert_eq!(
+            icon_kind_for_extension(Some("toml".into())),
+            TreeIconKind::Toml
+        );
+        assert_eq!(
+            icon_kind_for_extension(Some("json".into())),
+            TreeIconKind::Json
+        );
         assert_eq!(
             icon_kind_for_extension(Some("md".into())),
             TreeIconKind::Markdown
         );
-        assert_eq!(icon_kind_for_extension(Some("ts".into())), TreeIconKind::Code);
-        assert_eq!(icon_kind_for_extension(Some("txt".into())), TreeIconKind::Document);
+        assert_eq!(
+            icon_kind_for_extension(Some("ts".into())),
+            TreeIconKind::Code
+        );
+        assert_eq!(
+            icon_kind_for_extension(Some("txt".into())),
+            TreeIconKind::Document
+        );
     }
 
     fn sample_result() -> ProcessResult {

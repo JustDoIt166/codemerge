@@ -24,26 +24,21 @@ pub(super) struct TreeRowPalette {
     selected: bool,
     icon_role: TreeAccentRole,
     badge_tone: TreeChipTone,
-    extension_tone: TreeChipTone,
     highlight_tone: TreeChipTone,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(super) struct ResolvedTreeRowPalette {
+    pub row_bg: Hsla,
+    pub row_hover_bg: Hsla,
     pub label_fg: Hsla,
     pub secondary_fg: Hsla,
     pub chevron_fg: Hsla,
-    pub selection_bar_bg: Hsla,
-    pub icon_bg: Hsla,
     pub icon_fg: Hsla,
     pub badge_bg: Hsla,
     pub badge_fg: Hsla,
-    pub extension_bg: Hsla,
-    pub extension_fg: Hsla,
     pub match_bg: Hsla,
     pub match_fg: Hsla,
-    guide_base: Hsla,
-    guide_opacities: [f32; 4],
 }
 
 impl TreeRowPalette {
@@ -57,9 +52,16 @@ impl TreeRowPalette {
             TreeAccentRole::Neutral
         } else {
             match icon_kind {
-                TreeIconKind::FolderOpen | TreeIconKind::Document => TreeAccentRole::Primary,
-                TreeIconKind::FolderClosed | TreeIconKind::Config => TreeAccentRole::Warning,
-                TreeIconKind::Code | TreeIconKind::Data => TreeAccentRole::Accent,
+                TreeIconKind::FolderOpen
+                | TreeIconKind::Document
+                | TreeIconKind::Toml
+                | TreeIconKind::Markdown => TreeAccentRole::Primary,
+                TreeIconKind::FolderClosed | TreeIconKind::Config | TreeIconKind::Rust => {
+                    TreeAccentRole::Warning
+                }
+                TreeIconKind::Json | TreeIconKind::Code | TreeIconKind::Data => {
+                    TreeAccentRole::Accent
+                }
                 TreeIconKind::Media => TreeAccentRole::Danger,
                 TreeIconKind::Text => TreeAccentRole::Muted,
             }
@@ -71,7 +73,6 @@ impl TreeRowPalette {
             TreeChipTone::Accent
         };
 
-        let extension_tone = TreeChipTone::Neutral;
         let highlight_tone = if is_filter_match && match_kind.is_some() {
             TreeChipTone::Accent
         } else {
@@ -82,98 +83,64 @@ impl TreeRowPalette {
             selected,
             icon_role,
             badge_tone,
-            extension_tone,
             highlight_tone,
         }
     }
 
     pub(super) fn resolve(self, theme: &Theme) -> ResolvedTreeRowPalette {
-        let (icon_bg, icon_fg) = resolve_icon_colors(self.icon_role, self.selected, theme);
+        let icon_fg = resolve_icon_color(self.icon_role, self.selected, theme);
         let (badge_bg, badge_fg) = resolve_chip_colors(self.badge_tone, self.selected, theme);
-        let (extension_bg, extension_fg) =
-            resolve_extension_colors(self.extension_tone, self.selected, theme);
         let (match_bg, match_fg) = resolve_match_colors(self.highlight_tone, theme);
 
         ResolvedTreeRowPalette {
-            label_fg: theme.foreground,
-            secondary_fg: if self.selected {
-                theme.muted_foreground.opacity(0.92)
-            } else {
-                theme.muted_foreground
-            },
-            chevron_fg: if self.selected {
-                theme.muted_foreground.opacity(0.78)
-            } else {
-                theme.muted_foreground.opacity(0.7)
-            },
-            selection_bar_bg: if self.selected {
-                theme.primary.opacity(0.72)
+            row_bg: if self.selected {
+                theme.primary.opacity(0.09)
             } else {
                 theme.transparent
             },
-            icon_bg,
+            row_hover_bg: if self.selected {
+                theme.primary.opacity(0.12)
+            } else {
+                theme.secondary.opacity(0.52)
+            },
+            label_fg: theme.foreground,
+            secondary_fg: if self.selected {
+                theme.foreground.opacity(0.72)
+            } else {
+                theme.muted_foreground.opacity(0.84)
+            },
+            chevron_fg: if self.selected {
+                theme.foreground.opacity(0.72)
+            } else {
+                theme.muted_foreground.opacity(0.74)
+            },
             icon_fg,
             badge_bg,
             badge_fg,
-            extension_bg,
-            extension_fg,
             match_bg,
             match_fg,
-            guide_base: if self.selected {
-                theme.list_active_border
-            } else {
-                theme.muted_foreground
-            },
-            guide_opacities: if self.selected {
-                [0.38, 0.3, 0.22, 0.16]
-            } else {
-                [0.26, 0.2, 0.16, 0.12]
-            },
         }
     }
 }
 
-impl ResolvedTreeRowPalette {
-    pub(super) fn guide_color(&self, depth: usize) -> Hsla {
-        self.guide_base.opacity(match depth {
-            0 => self.guide_opacities[0],
-            1 => self.guide_opacities[1],
-            2 => self.guide_opacities[2],
-            _ => self.guide_opacities[3],
-        })
-    }
-}
-
-fn resolve_icon_colors(role: TreeAccentRole, selected: bool, theme: &Theme) -> (Hsla, Hsla) {
+fn resolve_icon_color(role: TreeAccentRole, selected: bool, theme: &Theme) -> Hsla {
     if selected {
-        return (
-            theme.secondary.opacity(0.72),
-            theme.foreground.opacity(0.86),
-        );
+        return theme.foreground.opacity(0.9);
     }
 
     match role {
-        TreeAccentRole::Neutral => (
-            theme.secondary.opacity(0.6),
-            theme.muted_foreground.opacity(0.9),
-        ),
-        TreeAccentRole::Primary => (theme.primary.opacity(0.09), theme.primary.opacity(0.88)),
-        TreeAccentRole::Warning => (theme.warning.opacity(0.09), theme.warning.opacity(0.86)),
-        TreeAccentRole::Accent => (theme.accent.opacity(0.09), theme.accent.opacity(0.88)),
-        TreeAccentRole::Danger => (theme.danger.opacity(0.08), theme.danger.opacity(0.84)),
-        TreeAccentRole::Muted => (
-            theme.secondary.opacity(0.5),
-            theme.muted_foreground.opacity(0.86),
-        ),
+        TreeAccentRole::Neutral => theme.muted_foreground.opacity(0.9),
+        TreeAccentRole::Primary => theme.primary.opacity(0.88),
+        TreeAccentRole::Warning => theme.warning.opacity(0.86),
+        TreeAccentRole::Accent => theme.accent.opacity(0.88),
+        TreeAccentRole::Danger => theme.danger.opacity(0.84),
+        TreeAccentRole::Muted => theme.muted_foreground.opacity(0.86),
     }
 }
 
 fn resolve_chip_colors(tone: TreeChipTone, selected: bool, theme: &Theme) -> (Hsla, Hsla) {
     if selected {
-        return (
-            theme.secondary.opacity(0.86),
-            theme.muted_foreground.opacity(0.92),
-        );
+        return (theme.secondary.opacity(0.82), theme.foreground.opacity(0.8));
     }
 
     match tone {
@@ -185,30 +152,13 @@ fn resolve_chip_colors(tone: TreeChipTone, selected: bool, theme: &Theme) -> (Hs
     }
 }
 
-fn resolve_extension_colors(tone: TreeChipTone, selected: bool, theme: &Theme) -> (Hsla, Hsla) {
-    if selected {
-        return (
-            theme.secondary.opacity(0.92),
-            theme.muted_foreground.opacity(0.92),
-        );
-    }
-
-    match tone {
-        TreeChipTone::Neutral => (
-            theme.secondary.opacity(0.58),
-            theme.muted_foreground.opacity(0.9),
-        ),
-        TreeChipTone::Accent => (theme.accent.opacity(0.12), theme.accent.opacity(0.9)),
-    }
-}
-
 fn resolve_match_colors(tone: TreeChipTone, theme: &Theme) -> (Hsla, Hsla) {
     match tone {
         TreeChipTone::Neutral => (
-            theme.secondary.opacity(0.58),
+            theme.secondary.opacity(0.42),
             theme.muted_foreground.opacity(0.9),
         ),
-        TreeChipTone::Accent => (theme.primary.opacity(0.14), theme.primary),
+        TreeChipTone::Accent => (theme.primary.opacity(0.12), theme.primary.opacity(0.96)),
     }
 }
 
@@ -242,16 +192,17 @@ mod tests {
             TreeRowPalette::new(true, TreeIconKind::Code, true, Some(FilterMatchKind::Label))
                 .resolve(&theme);
 
+        assert_eq!(resolved.row_bg, theme.primary.opacity(0.09));
+        assert_eq!(resolved.row_hover_bg, theme.primary.opacity(0.12));
         assert_eq!(resolved.label_fg, theme.foreground);
-        assert_eq!(resolved.secondary_fg, theme.muted_foreground.opacity(0.92));
-        assert_eq!(resolved.chevron_fg, theme.muted_foreground.opacity(0.78));
-        assert_eq!(resolved.icon_fg, theme.foreground.opacity(0.86));
-        assert_eq!(resolved.badge_fg, theme.muted_foreground.opacity(0.92));
-        assert_eq!(resolved.extension_fg, theme.muted_foreground.opacity(0.92));
+        assert_eq!(resolved.secondary_fg, theme.foreground.opacity(0.72));
+        assert_eq!(resolved.chevron_fg, theme.foreground.opacity(0.72));
+        assert_eq!(resolved.icon_fg, theme.foreground.opacity(0.9));
+        assert_eq!(resolved.badge_fg, theme.foreground.opacity(0.8));
         assert_ne!(resolved.label_fg, theme.primary_foreground);
         assert_ne!(resolved.secondary_fg, theme.primary_foreground);
         assert_ne!(resolved.chevron_fg, theme.primary_foreground);
-        assert_eq!(resolved.match_fg, theme.primary);
+        assert_eq!(resolved.match_fg, theme.primary.opacity(0.96));
     }
 
     #[test]
@@ -265,8 +216,8 @@ mod tests {
         );
         let resolved = palette.resolve(&theme);
 
-        assert_eq!(resolved.match_bg, theme.primary.opacity(0.14));
-        assert_eq!(resolved.match_fg, theme.primary);
+        assert_eq!(resolved.match_bg, theme.primary.opacity(0.12));
+        assert_eq!(resolved.match_fg, theme.primary.opacity(0.96));
         assert_ne!(resolved.badge_fg, theme.primary);
         assert_ne!(resolved.icon_fg, theme.primary);
         assert_ne!(resolved.secondary_fg, theme.primary);
@@ -285,6 +236,18 @@ mod tests {
         assert_eq!(
             TreeRowPalette::new(false, TreeIconKind::Code, false, None).icon_role,
             TreeAccentRole::Accent
+        );
+        assert_eq!(
+            TreeRowPalette::new(false, TreeIconKind::Rust, false, None).icon_role,
+            TreeAccentRole::Warning
+        );
+        assert_eq!(
+            TreeRowPalette::new(false, TreeIconKind::Json, false, None).icon_role,
+            TreeAccentRole::Accent
+        );
+        assert_eq!(
+            TreeRowPalette::new(false, TreeIconKind::Toml, false, None).icon_role,
+            TreeAccentRole::Primary
         );
         assert_eq!(
             TreeRowPalette::new(false, TreeIconKind::Media, false, None).icon_role,
@@ -307,7 +270,16 @@ mod tests {
 
         assert_eq!(palette.icon_role, TreeAccentRole::Neutral);
         assert_eq!(palette.badge_tone, TreeChipTone::Neutral);
-        assert_eq!(palette.extension_tone, TreeChipTone::Neutral);
         assert_eq!(palette.highlight_tone, TreeChipTone::Accent);
+    }
+
+    #[test]
+    fn unselected_palette_keeps_row_chrome_minimal() {
+        let theme = sample_theme();
+        let resolved = TreeRowPalette::new(false, TreeIconKind::Rust, false, None).resolve(&theme);
+
+        assert_eq!(resolved.row_bg, theme.transparent);
+        assert_eq!(resolved.row_hover_bg, theme.secondary.opacity(0.52));
+        assert_eq!(resolved.secondary_fg, theme.muted_foreground.opacity(0.84));
     }
 }
