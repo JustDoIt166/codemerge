@@ -86,6 +86,7 @@ cargo test --locked
 - CI 位于 `.github/workflows/ci.yml`
 - Release workflow 位于 `.github/workflows/release.yml`
 - Linux 产物包含 `.deb`
+- Linux `.deb` 会安装应用启动器到 `usr/share/applications/codemerge.desktop`，并安装图标到 `usr/share/icons/hicolor/scalable/apps/codemerge.svg`
 - `assets/` 属于源码资源目录，必须随仓库一起提交；运行时 SVG 图标与 Windows `assets/app.ico` 都从这里读取
 - Windows 构建直接复用仓库内的 `assets/app.ico`，用于嵌入可执行文件与安装包图标
 

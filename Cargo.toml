@@ -47,5 +47,7 @@ section = "utils"
 priority = "optional"
 assets = [
   ["target/release/codemerge", "usr/bin/codemerge", "755"],
+  ["packaging/linux/codemerge.desktop", "usr/share/applications/codemerge.desktop", "644"],
+  ["assets/fonts/logo.svg", "usr/share/icons/hicolor/scalable/apps/codemerge.svg", "644"],
   ["README.md", "usr/share/doc/codemerge/README.md", "644"],
 ]

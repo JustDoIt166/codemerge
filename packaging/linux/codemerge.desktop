@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=CodeMerge
+Comment=Desktop file merge tool for Linux and Windows
+Exec=codemerge
+Icon=codemerge
+Terminal=false
+Categories=Utility;Development;
+StartupNotify=true
