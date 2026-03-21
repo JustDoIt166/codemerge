@@ -18,6 +18,7 @@ impl Workspace {
         &mut self,
         file_id: u32,
         preview_path: std::path::PathBuf,
+        include_full_text: bool,
         cx: &mut Context<Self>,
     ) {
         let preview_state = self.preview.read(cx).state();
@@ -28,7 +29,7 @@ impl Workspace {
         }
 
         let request = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview.open_preview(file_id, preview_path);
+            let request = preview.open_preview(file_id, preview_path, include_full_text);
             preview_cx.notify();
             request
         });
@@ -56,6 +57,7 @@ impl Workspace {
         self.load_preview_path(
             super::MERGED_CONTENT_PREVIEW_FILE_ID,
             merged_content_path,
+            true,
             cx,
         );
     }
@@ -581,7 +583,7 @@ impl Workspace {
         else {
             return;
         };
-        self.load_preview_path(file_id, entry.preview_blob_path.clone(), cx);
+        self.load_preview_path(file_id, entry.preview_blob_path.clone(), false, cx);
     }
 
     fn request_queued_preview_range(&mut self, cx: &mut Context<Self>) {

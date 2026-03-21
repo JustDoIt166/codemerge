@@ -220,6 +220,7 @@ struct PreviewPaneView {
     preview: Entity<PreviewModel>,
     result: Entity<ResultModel>,
     settings: Entity<SettingsModel>,
+    merged_content_input: Entity<InputState>,
     scroll_handle: UniformListScrollHandle,
     last_requested_load_range: Range<usize>,
     render_cache_range: Range<usize>,
@@ -229,6 +230,7 @@ struct PreviewPaneView {
     last_synced_visible_range: Option<Range<usize>>,
     scheduled_visible_sync: bool,
     last_scroll_anchor: usize,
+    merged_content_revision: u64,
     last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
@@ -308,6 +310,13 @@ impl Workspace {
             cx.new(|_| ProcessModel::new(tr(cfg.language, "status_ready").to_string()));
         let result_model = cx.new(|_| ResultModel::new());
         let preview_model = cx.new(|_| PreviewModel::new());
+        let merged_content_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .code_editor("text")
+                .searchable(false)
+                .soft_wrap(false)
+                .rows(24)
+        });
         let workspace_entity = cx.entity();
         let input_panel_view = cx.new(|cx| {
             InputPanelView::new(
@@ -361,6 +370,7 @@ impl Workspace {
                 preview_model.clone(),
                 result_model.clone(),
                 settings_model.clone(),
+                merged_content_input.clone(),
                 cx,
             )
         });
@@ -1022,6 +1032,7 @@ impl PreviewPaneView {
         preview: Entity<PreviewModel>,
         result: Entity<ResultModel>,
         settings: Entity<SettingsModel>,
+        merged_content_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
@@ -1056,6 +1067,7 @@ impl PreviewPaneView {
             preview,
             result,
             settings,
+            merged_content_input,
             scroll_handle: UniformListScrollHandle::new(),
             last_requested_load_range: 0..0,
             render_cache_range: 0..0,
@@ -1065,6 +1077,7 @@ impl PreviewPaneView {
             last_synced_visible_range: None,
             scheduled_visible_sync: false,
             last_scroll_anchor: 0,
+            merged_content_revision: 0,
             last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
@@ -1124,8 +1137,8 @@ impl Render for TreePaneView {
 }
 
 impl Render for PreviewPaneView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.render_preview_pane(cx)
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_preview_pane(window, cx)
     }
 }
 
@@ -1194,19 +1207,20 @@ mod tests {
 
         let preview = cx.new(|_| PreviewModel::new());
         preview.update(cx, |preview: &mut PreviewModel, _| {
-            let request = preview.open_preview(7, path.clone());
+            let request = preview.open_preview(7, path.clone(), false);
             let revision = match request {
                 PreviewRequest::Open { revision, .. } => revision,
                 _ => unreachable!(),
             };
             let document = index_document(&path).expect("index document");
-            let _ = preview.apply_event(PreviewEvent::Opened {
-                revision,
-                file_id: 7,
-                document,
-                loaded_range: 0..512,
-                lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
-            });
+                let _ = preview.apply_event(PreviewEvent::Opened {
+                    revision,
+                    file_id: 7,
+                    document,
+                    loaded_range: 0..512,
+                    lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
+                    full_text: None,
+                });
         });
 
         let start = Instant::now();
@@ -1389,6 +1403,29 @@ mod tests {
     }
 
     #[gpui::test]
+    fn preview_lines_outside_render_cache_fall_back_to_placeholders(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_placeholder_gap", 1_024);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.refresh_render_cache(0..64, cx);
+                let rows = view.render_lines_for(320..340, cx);
+
+                assert_eq!(rows.len(), 20);
+                assert!(rows.iter().all(|row| row.missing));
+                assert_eq!(rows[0].line_number.to_string(), "321");
+            });
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
     fn preview_scroll_perf_reports_batched_metrics(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
@@ -1455,10 +1492,14 @@ mod tests {
             .expect("preview open event")
         {
             PreviewEvent::Opened {
-                file_id, document, ..
+                file_id,
+                document,
+                full_text,
+                ..
             } => {
                 assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
                 assert_eq!(document.path(), path.as_path());
+                assert_eq!(full_text.as_deref(), Some(fs::read_to_string(&path).expect("read merged").as_str()));
             }
             other => panic!("unexpected event: {other:?}"),
         }
@@ -1547,7 +1588,7 @@ mod tests {
         file_id: u32,
     ) {
         preview.update(cx, |preview: &mut PreviewModel, _| {
-            let request = preview.open_preview(file_id, path.to_path_buf());
+            let request = preview.open_preview(file_id, path.to_path_buf(), false);
             let revision = match request {
                 PreviewRequest::Open { revision, .. } => revision,
                 _ => unreachable!(),
@@ -1562,6 +1603,7 @@ mod tests {
                     .clone()
                     .map(|ix| format!("line-{ix}"))
                     .collect(),
+                full_text: None,
             });
         });
     }

@@ -1142,15 +1142,21 @@ impl PreviewPaneView {
         self.last_scroll_anchor = 0;
     }
 
-    pub(super) fn render_preview_pane(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_preview_pane(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let language = self.settings.read(cx).language();
         let result_state = self.result.read(cx).state().clone();
-        let (preview_error, preview_document, selected_preview_id) = {
+        let (preview_error, preview_document, selected_preview_id, preview_text, preview_revision) = {
             let preview = self.preview.read(cx);
             (
                 preview.state().preview_error.clone(),
                 preview.preview_document().cloned(),
                 preview.selected_preview_file_id(),
+                preview.preview_text(),
+                preview.preview_revision(),
             )
         };
         let selected_preview = selected_preview_id
@@ -1186,6 +1192,7 @@ impl PreviewPaneView {
                 .unwrap_or_else(|| document.path().display().to_string())
         };
         let line_count = document.line_count();
+        let is_merged_content = selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID);
         self.flush_pending_visible_range(cx);
         if self.render_cache_range.is_empty() && line_count > 0 {
             let initial =
@@ -1221,49 +1228,90 @@ impl PreviewPaneView {
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(cx.theme().radius)
-                    .child(
+                    .child(if is_merged_content {
+                        if let Some(text) = preview_text {
+                            self.sync_merged_content_input(text, preview_revision, window, cx);
+                            Input::new(&self.merged_content_input)
+                                .appearance(false)
+                                .disabled(true)
+                                .h_full()
+                                .into_any_element()
+                        } else {
+                            empty_box(
+                                tr(language, "preview_empty"),
+                                tr(language, "preview_empty_hint"),
+                                IconName::File,
+                                cx,
+                            )
+                            .into_any_element()
+                        }
+                    } else {
                         uniform_list(
                             "preview-lines",
                             line_count,
                             cx.processor(
                                 move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
-                                    view.queue_visible_range_sync(visible_range.clone(), app_cx);
-                                    let muted = app_cx.theme().muted_foreground;
-                                    let mono = app_cx.theme().mono_font_family.clone();
-                                    let rows = view.render_lines_for(visible_range);
+                                view.queue_visible_range_sync(visible_range.clone(), app_cx);
+                                let muted = app_cx.theme().muted_foreground;
+                                let mono = app_cx.theme().mono_font_family.clone();
+                                let rows = view.render_lines_for(visible_range, app_cx);
 
-                                    rows.into_iter()
-                                        .map(|row| {
-                                            h_flex()
-                                                .gap_3()
-                                                .px_3()
-                                                .h(preview_line_height())
-                                                .font_family(mono.clone())
-                                                .child(
-                                                    div()
-                                                        .w(px(64.))
-                                                        .text_right()
-                                                        .text_color(muted)
-                                                        .child(row.line_number),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .when(row.missing, |this| {
-                                                            this.text_color(muted.opacity(0.75))
-                                                        })
-                                                        .child(row.text),
-                                                )
-                                        })
-                                        .collect()
+                                rows.into_iter()
+                                    .map(|row| {
+                                        h_flex()
+                                            .w_full()
+                                            .gap_3()
+                                            .px_3()
+                                            .h(preview_line_height())
+                                            .overflow_hidden()
+                                            .font_family(mono.clone())
+                                            .child(
+                                                div()
+                                                    .w(px(64.))
+                                                    .flex_none()
+                                                    .text_right()
+                                                    .text_color(muted)
+                                                    .whitespace_nowrap()
+                                                    .child(row.line_number),
+                                            )
+                                            .child(
+                                                div()
+                                                    .flex_1()
+                                                    .min_w(px(0.))
+                                                    .overflow_hidden()
+                                                    .whitespace_nowrap()
+                                                    .when(row.missing, |this| {
+                                                        this.text_color(muted.opacity(0.75))
+                                                    })
+                                                    .child(row.text),
+                                            )
+                                    })
+                                    .collect()
                                 },
                             ),
                         )
                         .track_scroll(self.scroll_handle.clone())
                         .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .p_2(),
-                    ),
+                        .p_2()
+                        .into_any_element()
+                    }),
             )
+    }
+
+    fn sync_merged_content_input(
+        &mut self,
+        text: gpui::SharedString,
+        preview_revision: u64,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.merged_content_revision == preview_revision {
+            return;
+        }
+        self.merged_content_input.update(cx, |input, input_cx| {
+            input.set_value(text, window, input_cx);
+        });
+        self.merged_content_revision = preview_revision;
     }
 
     pub(super) fn queue_visible_range_sync(
@@ -1414,18 +1462,21 @@ impl PreviewPaneView {
         }
     }
 
-    fn render_lines_for(
+    pub(super) fn render_lines_for(
         &self,
         visible_range: std::ops::Range<usize>,
+        cx: &App,
     ) -> Vec<crate::ui::preview_model::PreviewRenderLine> {
+        let preview = self.preview.read(cx);
         visible_range
-            .filter_map(|ix| {
+            .map(|ix| {
                 if ix < self.render_cache_range.start || ix >= self.render_cache_range.end {
-                    return None;
+                    return preview.build_render_line(ix);
                 }
                 self.render_cache
                     .get(ix.saturating_sub(self.render_cache_range.start))
                     .cloned()
+                    .unwrap_or_else(|| preview.build_render_line(ix))
             })
             .collect()
     }

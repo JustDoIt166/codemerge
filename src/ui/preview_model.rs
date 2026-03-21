@@ -47,6 +47,7 @@ impl PreviewModel {
                 document,
                 loaded_range,
                 lines,
+                full_text,
             } => {
                 if revision != self.state.preview_revision
                     || self.state.selected_preview_file_id != Some(file_id)
@@ -54,6 +55,7 @@ impl PreviewModel {
                     return PreviewEventEffect::Ignored;
                 }
                 self.state.preview_document = Some(document);
+                self.state.preview_text = full_text.map(SharedString::from);
                 self.state.preview_error = None;
                 self.state.preview_requested_range = None;
                 self.state.queued_preview_range = None;
@@ -144,7 +146,12 @@ impl PreviewModel {
         self.state.preview_rx.take()
     }
 
-    pub fn open_preview(&mut self, file_id: u32, path: PathBuf) -> PreviewRequest {
+    pub fn open_preview(
+        &mut self,
+        file_id: u32,
+        path: PathBuf,
+        include_full_text: bool,
+    ) -> PreviewRequest {
         self.state.preview_revision += 1;
         self.state.selected_preview_file_id = Some(file_id);
         self.state.preview_error = None;
@@ -152,6 +159,7 @@ impl PreviewModel {
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.queued_preview_range = None;
         self.state.preview_document = None;
+        self.state.preview_text = None;
         self.state.clear_loaded_chunks();
         self.state.bump_render_revision();
 
@@ -160,6 +168,7 @@ impl PreviewModel {
             file_id,
             path,
             initial_range: 0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2,
+            include_full_text,
         }
     }
 
@@ -173,6 +182,14 @@ impl PreviewModel {
 
     pub fn preview_document(&self) -> Option<&PreviewDocument> {
         self.state.preview_document.as_ref()
+    }
+
+    pub fn preview_text(&self) -> Option<SharedString> {
+        self.state.preview_text.clone()
+    }
+
+    pub fn preview_revision(&self) -> u64 {
+        self.state.preview_revision
     }
 
     pub fn line_at(&self, ix: usize) -> Option<SharedString> {
@@ -291,7 +308,7 @@ mod tests {
         let path = root.join("preview.txt");
         fs::write(&path, "a\nb\nc").expect("write preview");
         let mut model = PreviewModel::new();
-        let request = model.open_preview(7, path.clone());
+        let request = model.open_preview(7, path.clone(), false);
         let revision = match request {
             PreviewRequest::Open { revision, .. } => revision,
             _ => unreachable!(),
@@ -303,6 +320,7 @@ mod tests {
             document,
             loaded_range: 0..2,
             lines: vec!["a".into(), "b".into()],
+            full_text: None,
         });
         assert!(matches!(effect, PreviewEventEffect::ScrollTop));
         assert!(model.preview_document().is_some());
@@ -333,7 +351,7 @@ mod tests {
         )
         .expect("write preview");
         let mut model = PreviewModel::new();
-        let request = model.open_preview(7, path.clone());
+        let request = model.open_preview(7, path.clone(), false);
         let revision = match request {
             PreviewRequest::Open { revision, .. } => revision,
             _ => unreachable!(),
@@ -345,6 +363,7 @@ mod tests {
             document,
             loaded_range: 0..128,
             lines: (0..128).map(|ix| format!("line-{ix}")).collect(),
+            full_text: None,
         });
 
         assert!(matches!(
@@ -395,7 +414,7 @@ mod tests {
         .expect("write preview");
 
         let mut model = PreviewModel::new();
-        let request = model.open_preview(9, path.clone());
+        let request = model.open_preview(9, path.clone(), false);
         let revision = match request {
             PreviewRequest::Open { revision, .. } => revision,
             _ => unreachable!(),
@@ -407,6 +426,7 @@ mod tests {
             document,
             loaded_range: 0..128,
             lines: (0..128).map(|ix| format!("line-{ix}")).collect(),
+            full_text: None,
         });
 
         assert!(matches!(

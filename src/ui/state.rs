@@ -149,6 +149,7 @@ pub struct PreviewPanelState {
     pub preview_requested_range: Option<Range<usize>>,
     pub queued_preview_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
+    pub preview_text: Option<SharedString>,
     pub preview_error: Option<String>,
     pub preview_chunks: Vec<PreviewChunk>,
     pub render_revision: u64,
