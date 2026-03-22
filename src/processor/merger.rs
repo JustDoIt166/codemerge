@@ -22,14 +22,14 @@ pub fn render_prefix(format: OutputFormat, tree: &str) -> String {
             out.push_str("\n]]></directory_structure>\n<files>\n");
         }
         OutputFormat::PlainText => {
-            out.push_str("---------------- Directory Structure ----------------\n");
+            out.push_str("Directory Structure:\n");
             out.push_str(tree);
-            out.push_str("\n\n---------------- Files ----------------\n");
+            out.push_str("\n\n");
         }
         OutputFormat::Markdown => {
             out.push_str("# Directory Structure\n\n```text\n");
             out.push_str(tree);
-            out.push_str("\n```\n\n# Files\n\n");
+            out.push_str("\n```\n\n");
         }
     }
     out
@@ -58,16 +58,16 @@ pub fn render_file_entry(format: OutputFormat, file: &MergedFile) -> String {
         }
         OutputFormat::PlainText => {
             out.push_str(&format!(
-                "\nFile: {}\nChars: {} Tokens: {}\n",
+                "================\nFile: {}\nChars: {}\nTokens: {}\n================\n",
                 file.path, file.chars, file.tokens
             ));
             out.push_str(&file.content);
-            out.push('\n');
+            out.push_str("\n\n");
         }
         OutputFormat::Markdown => {
             let lang = lang_from_path(&file.path);
             out.push_str(&format!(
-                "## {}\n\n- chars: {}\n- tokens: {}\n\n```{}\n{}\n```\n\n",
+                "# {}\n\n- chars: {}\n- tokens: {}\n\n```{}\n{}\n```\n\n",
                 file.path, file.chars, file.tokens, lang, file.content
             ));
         }

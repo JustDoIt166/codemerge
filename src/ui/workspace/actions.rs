@@ -9,7 +9,7 @@ use gpui_component::{
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{BlacklistItemKind, PreviewTableDelegate, Workspace};
-use crate::domain::{FileEntry, ResultTab};
+use crate::domain::{FileEntry, OutputFormat, ResultTab};
 use crate::services::preview::load_text;
 use crate::services::process::ProcessRequest;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
@@ -729,6 +729,21 @@ impl Workspace {
             selection.set_dedupe_exact_path(*checked);
             selection_cx.notify();
         });
+    }
+
+    pub(super) fn set_output_format(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
+        let format = match *ix {
+            1 => OutputFormat::Xml,
+            2 => OutputFormat::PlainText,
+            3 => OutputFormat::Markdown,
+            _ => OutputFormat::Default,
+        };
+        self.clear_pending_confirmation(cx);
+        self.settings.update(cx, |settings, settings_cx| {
+            settings.set_output_format(format);
+            settings_cx.notify();
+        });
+        self.persist_settings_async(cx);
     }
 
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {

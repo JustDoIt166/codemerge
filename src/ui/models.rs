@@ -149,6 +149,10 @@ impl SettingsModel {
             self.state.folder_blacklist.retain(|item| item != ".git");
         }
     }
+
+    pub fn set_output_format(&mut self, format: crate::domain::OutputFormat) {
+        self.state.options.output_format = format;
+    }
 }
 
 pub struct ProcessModel {
@@ -424,6 +428,15 @@ mod tests {
             snapshot.ext_blacklist,
             vec![".log".to_string(), ".tmp".to_string()]
         );
+    }
+
+    #[test]
+    fn settings_model_updates_output_format() {
+        let mut settings = SettingsModel::from_config(AppConfigV1::default());
+
+        settings.set_output_format(OutputFormat::Xml);
+
+        assert_eq!(settings.snapshot().options.output_format, OutputFormat::Xml);
     }
 
     #[test]

@@ -24,7 +24,7 @@ fn token_count_works() {
 }
 
 #[test]
-fn merge_formats_non_empty() {
+fn merge_formats_match_expected_structure() {
     let files = vec![merger::MergedFile {
         path: "src/main.rs".to_string(),
         chars: 12,
@@ -38,9 +38,17 @@ fn merge_formats_non_empty() {
     let m = merger::merge_content(OutputFormat::Markdown, "root/", &files);
 
     assert!(d.contains("Directory Structure"));
+    assert!(d.contains("文件路径: src/main.rs"));
+    assert!(d.contains("字符数: 12 | Token估算: 6"));
     assert!(x.contains("<codemerge>"));
+    assert!(x.contains("<directory_structure><![CDATA[\nroot/\n]]></directory_structure>"));
+    assert!(x.contains("<file path=\"src/main.rs\" chars=\"12\" tokens=\"6\"><![CDATA["));
     assert!(p.contains("File: src/main.rs"));
+    assert!(p.contains("================"));
+    assert!(p.contains("Directory Structure:\nroot/"));
     assert!(m.contains("# Directory Structure"));
+    assert!(m.contains("# src/main.rs"));
+    assert!(m.contains("```rust"));
 }
 
 #[test]

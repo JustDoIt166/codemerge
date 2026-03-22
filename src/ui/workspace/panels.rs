@@ -30,7 +30,7 @@ use super::{
     MERGED_CONTENT_PREVIEW_FILE_ID, PreviewPaneView, TreePaneView, TreeViewMode, Workspace,
     fixed_list_sizes, preview_line_height, workspace_panel_min_height,
 };
-use crate::domain::{ProcessStatus, ResultTab};
+use crate::domain::{OutputFormat, ProcessStatus, ResultTab};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
@@ -267,6 +267,25 @@ impl Workspace {
                     IconName::Settings2,
                     cx,
                 ))
+                .child(
+                    v_flex()
+                        .gap_2()
+                        .child(section_caption(tr(language, "format"), IconName::File, cx))
+                        .child(
+                            TabBar::new("output-format")
+                                .selected_index(match settings.options.output_format {
+                                    OutputFormat::Default => 0,
+                                    OutputFormat::Xml => 1,
+                                    OutputFormat::PlainText => 2,
+                                    OutputFormat::Markdown => 3,
+                                })
+                                .on_click(cx.listener(Self::set_output_format))
+                                .child(Tab::new().label(tr(language, "format_default")))
+                                .child(Tab::new().label(tr(language, "format_xml")))
+                                .child(Tab::new().label(tr(language, "format_plain")))
+                                .child(Tab::new().label(tr(language, "format_markdown"))),
+                        ),
+                )
                 .child(
                     Checkbox::new("compress")
                         .checked(settings.options.compress)
@@ -1251,42 +1270,42 @@ impl PreviewPaneView {
                             line_count,
                             cx.processor(
                                 move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
-                                view.queue_visible_range_sync(visible_range.clone(), app_cx);
-                                let muted = app_cx.theme().muted_foreground;
-                                let mono = app_cx.theme().mono_font_family.clone();
-                                let rows = view.render_lines_for(visible_range, app_cx);
+                                    view.queue_visible_range_sync(visible_range.clone(), app_cx);
+                                    let muted = app_cx.theme().muted_foreground;
+                                    let mono = app_cx.theme().mono_font_family.clone();
+                                    let rows = view.render_lines_for(visible_range, app_cx);
 
-                                rows.into_iter()
-                                    .map(|row| {
-                                        h_flex()
-                                            .w_full()
-                                            .gap_3()
-                                            .px_3()
-                                            .h(preview_line_height())
-                                            .overflow_hidden()
-                                            .font_family(mono.clone())
-                                            .child(
-                                                div()
-                                                    .w(px(64.))
-                                                    .flex_none()
-                                                    .text_right()
-                                                    .text_color(muted)
-                                                    .whitespace_nowrap()
-                                                    .child(row.line_number),
-                                            )
-                                            .child(
-                                                div()
-                                                    .flex_1()
-                                                    .min_w(px(0.))
-                                                    .overflow_hidden()
-                                                    .whitespace_nowrap()
-                                                    .when(row.missing, |this| {
-                                                        this.text_color(muted.opacity(0.75))
-                                                    })
-                                                    .child(row.text),
-                                            )
-                                    })
-                                    .collect()
+                                    rows.into_iter()
+                                        .map(|row| {
+                                            h_flex()
+                                                .w_full()
+                                                .gap_3()
+                                                .px_3()
+                                                .h(preview_line_height())
+                                                .overflow_hidden()
+                                                .font_family(mono.clone())
+                                                .child(
+                                                    div()
+                                                        .w(px(64.))
+                                                        .flex_none()
+                                                        .text_right()
+                                                        .text_color(muted)
+                                                        .whitespace_nowrap()
+                                                        .child(row.line_number),
+                                                )
+                                                .child(
+                                                    div()
+                                                        .flex_1()
+                                                        .min_w(px(0.))
+                                                        .overflow_hidden()
+                                                        .whitespace_nowrap()
+                                                        .when(row.missing, |this| {
+                                                            this.text_color(muted.opacity(0.75))
+                                                        })
+                                                        .child(row.text),
+                                                )
+                                        })
+                                        .collect()
                                 },
                             ),
                         )

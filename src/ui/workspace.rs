@@ -1213,14 +1213,14 @@ mod tests {
                 _ => unreachable!(),
             };
             let document = index_document(&path).expect("index document");
-                let _ = preview.apply_event(PreviewEvent::Opened {
-                    revision,
-                    file_id: 7,
-                    document,
-                    loaded_range: 0..512,
-                    lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
-                    full_text: None,
-                });
+            let _ = preview.apply_event(PreviewEvent::Opened {
+                revision,
+                file_id: 7,
+                document,
+                loaded_range: 0..512,
+                lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
+                full_text: None,
+            });
         });
 
         let start = Instant::now();
@@ -1499,7 +1499,10 @@ mod tests {
             } => {
                 assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
                 assert_eq!(document.path(), path.as_path());
-                assert_eq!(full_text.as_deref(), Some(fs::read_to_string(&path).expect("read merged").as_str()));
+                assert_eq!(
+                    full_text.as_deref(),
+                    Some(fs::read_to_string(&path).expect("read merged").as_str())
+                );
             }
             other => panic!("unexpected event: {other:?}"),
         }

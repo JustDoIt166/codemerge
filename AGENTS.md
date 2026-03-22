@@ -55,3 +55,4 @@
 - 继续降低 `ui/workspace.rs` 系列文件复杂度。
 - 维持配置恢复、取消处理、预览资源清理的稳定性。
 - 在引入新功能前先补齐可观测的测试与文档。
+查找组件文档 https://docs.rs/gpui-component/latest/gpui_component 选择合适的组件
