@@ -209,14 +209,17 @@ impl PreviewModel {
     }
 
     pub fn build_render_line(&self, ix: usize) -> PreviewRenderLine {
-        let loaded = self.line_at(ix);
-        let text = loaded
-            .clone()
-            .unwrap_or_else(|| SharedString::from("\u{2026}"));
-        PreviewRenderLine {
-            line_number: SharedString::from((ix + 1).to_string()),
-            missing: loaded.is_none(),
-            text,
+        match self.line_at(ix) {
+            Some(text) => PreviewRenderLine {
+                line_number: SharedString::from((ix + 1).to_string()),
+                missing: false,
+                text,
+            },
+            None => PreviewRenderLine {
+                line_number: SharedString::from((ix + 1).to_string()),
+                missing: true,
+                text: SharedString::from("\u{2026}"),
+            },
         }
     }
 

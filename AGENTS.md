@@ -9,23 +9,35 @@
 - `src/domain.rs`
   - 只放稳定领域类型、配置结构、枚举和默认值。
   - 不放 UI 渲染逻辑、文件系统副作用和异步流程控制。
+  - 允许放置 UI 相关但纯粹的数据结构（如 `TreeNodeViewModel`、`PreviewRowViewModel`）。
 - `src/processor/*`
   - 只负责文件遍历、读取、压缩、合并、统计等纯处理逻辑。
-  - 变更这里时优先补 `tests/processor_tests.rs`。
+  - 变更这里时优先补充相关模块内联测试（`#[cfg(test)]`）。
 - `src/services/*`
   - 负责流程编排、后台任务、配置持久化、预览加载、树结构组装。
   - 配置、后台任务、临时文件生命周期变更必须带测试。
 - `src/ui/*`
   - 负责状态驱动、视图装配、事件转发和用户通知。
   - 复杂状态转换优先下沉到 `ui/workspace/model.rs` 或 `services/*`，不要直接堆在点击事件里。
+  - `src/ui/workspace/` 已拆分为：
+    - `actions.rs` – 交互事件处理
+    - `background.rs` – 后台轮询与状态同步
+    - `model.rs` – 树、预览表、黑名单等视图模型
+    - `panels.rs` – 各面板渲染逻辑
+    - `tree_palette.rs` – 树节点样式
+    - `view.rs` – 通用视图组件
+  - 新增 UI 逻辑应优先放入对应子模块，避免扩大 `workspace.rs`。
 - `src/utils/*`
   - 只放跨层通用能力，例如配置路径、i18n、路径处理、临时文件。
+- `src/ui/perf.rs`
+  - 内置轻量性能计数器，用于记录视图刷新、树同步、预览请求等指标。
+  - 在调试或性能敏感变更时，应利用这些计数器验证影响。
 
 ## 开发约束
 - 代码搜索优先使用 `ace-tool` 做语义定位，再决定是否读具体文件。
 - 改动前先确认当前工作区是否有用户未提交变更，不得擅自回滚。
 - 新功能优先扩展 `services` 或纯函数模块；只有确实属于展示层时才进入 `ui`。
-- 避免新增 `unwrap`/`expect` 到生产路径；失败应转成 `AppError` 或显式降级。
+- 避免新增 `unwrap`/`expect` 到生产路径；失败应转成 `AppError` 或显式降级。若确需使用，必须提供充分理由并在审查时强调。
 - 配置加载必须区分“文件不存在 / 内容损坏 / 读写失败”。
 - 涉及临时文件或后台任务时，必须考虑取消、失败和重复执行后的清理行为。
 - 文案变更时同步维护中英文，保持 `tr()` key 稳定且语义明确。
@@ -35,7 +47,7 @@
   - `cargo fmt --all --check`
   - `cargo clippy --all-targets -- -D warnings`
   - `cargo test --locked`
-- 下列改动必须补测试：
+- 下列改动必须补测试（内联 `#[cfg(test)]`）：
   - 配置存储与恢复
   - 预检/处理/预览的状态转换
   - 临时目录创建与清理
@@ -52,7 +64,9 @@
 - 提交信息使用动词开头，聚焦结果，不写空泛描述。
 
 ## 本仓库的当前优先级
-- 继续降低 `ui/workspace.rs` 系列文件复杂度。
+- 继续降低 `ui/workspace.rs` 系列文件复杂度（已拆分为子模块，但仍需维护）。
 - 维持配置恢复、取消处理、预览资源清理的稳定性。
 - 在引入新功能前先补齐可观测的测试与文档。
-查找组件文档 https://docs.rs/gpui-component/latest/gpui_component 选择合适的组件
+
+## 组件文档
+- 查找组件文档：https://docs.rs/gpui-component/latest/gpui_component （使用时注意使用skill）

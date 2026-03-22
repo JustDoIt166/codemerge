@@ -223,11 +223,21 @@ impl PreviewPanelState {
     }
 
     pub fn line_at(&self, ix: usize) -> Option<SharedString> {
-        self.preview_chunks
-            .iter()
-            .find(|chunk| chunk.range.start <= ix && ix < chunk.range.end)
-            .and_then(|chunk| chunk.lines.get(ix.checked_sub(chunk.range.start)?))
-            .cloned()
+        // Chunks are sorted by range.start — use binary search.
+        let pos = self
+            .preview_chunks
+            .binary_search_by(|chunk| {
+                if ix < chunk.range.start {
+                    std::cmp::Ordering::Greater
+                } else if ix >= chunk.range.end {
+                    std::cmp::Ordering::Less
+                } else {
+                    std::cmp::Ordering::Equal
+                }
+            })
+            .ok()?;
+        let chunk = &self.preview_chunks[pos];
+        chunk.lines.get(ix - chunk.range.start).cloned()
     }
 
     pub fn queue_preview_range(&mut self, range: Range<usize>) {

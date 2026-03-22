@@ -1430,18 +1430,26 @@ impl PreviewPaneView {
         if self.render_cache_revision == render_revision && self.render_cache_range == visible {
             return;
         }
+        let range_changed = self.render_cache_range != visible;
+        let revision_changed = self.render_cache_revision != render_revision;
         let overlaps = self.render_cache_range.start < visible.end
             && visible.start < self.render_cache_range.end
             && !self.render_cache.is_empty();
-        if self.render_cache_range != visible {
-            if overlaps && self.render_cache_revision == render_revision {
-                self.patch_render_cache_range(visible.clone(), cx);
-                perf::record_preview_render_cache_partial_update();
-            } else {
-                self.render_cache = self.preview.read(cx).build_render_lines(visible.clone());
-                perf::record_preview_render_cache_rebuild();
+
+        if range_changed && overlaps {
+            // Reuse the overlapping portion, build only the delta edges.
+            self.patch_render_cache_range(visible.clone(), cx);
+            if revision_changed {
+                // Some cached lines may have stale text — refresh them in-place.
+                self.patch_render_cache_contents(cx);
             }
+            perf::record_preview_render_cache_partial_update();
+        } else if range_changed {
+            // No overlap — full rebuild is unavoidable.
+            self.render_cache = self.preview.read(cx).build_render_lines(visible.clone());
+            perf::record_preview_render_cache_rebuild();
         } else {
+            // Same range, only revision changed — patch existing entries in-place.
             self.patch_render_cache_contents(cx);
             perf::record_preview_render_cache_partial_update();
         }
@@ -1461,7 +1469,8 @@ impl PreviewPaneView {
         if overlap_start < overlap_end {
             let start_ix = overlap_start.saturating_sub(self.render_cache_range.start);
             let end_ix = overlap_end.saturating_sub(self.render_cache_range.start);
-            next_cache.extend(self.render_cache[start_ix..end_ix].iter().cloned());
+            // Move (drain) instead of clone to avoid redundant ref-count bumps.
+            next_cache.extend(self.render_cache.drain(start_ix..end_ix));
         }
         if overlap_end < visible.end {
             next_cache.extend(preview.build_render_lines_partial(overlap_end..visible.end));
@@ -1474,9 +1483,15 @@ impl PreviewPaneView {
         let preview = self.preview.read(cx);
         for (offset, line) in self.render_cache.iter_mut().enumerate() {
             let ix = self.render_cache_range.start + offset;
-            let next = preview.build_render_line(ix);
-            if *line != next {
-                *line = next;
+            let loaded = preview.line_at(ix);
+            // Only rebuild when underlying text actually changed.
+            let text_matches = match (&loaded, line.missing) {
+                (Some(text), false) => *text == line.text,
+                (None, true) => true,
+                _ => false,
+            };
+            if !text_matches {
+                *line = preview.build_render_line(ix);
             }
         }
     }
@@ -1486,16 +1501,28 @@ impl PreviewPaneView {
         visible_range: std::ops::Range<usize>,
         cx: &App,
     ) -> Vec<crate::ui::preview_model::PreviewRenderLine> {
+        // Fast path: entire visible range is within the render cache.
+        if visible_range.start >= self.render_cache_range.start
+            && visible_range.end <= self.render_cache_range.end
+            && !self.render_cache.is_empty()
+        {
+            let offset = visible_range.start - self.render_cache_range.start;
+            let len = visible_range.end - visible_range.start;
+            return self.render_cache[offset..offset + len].to_vec();
+        }
+
         let preview = self.preview.read(cx);
         visible_range
             .map(|ix| {
-                if ix < self.render_cache_range.start || ix >= self.render_cache_range.end {
-                    return preview.build_render_line(ix);
+                if ix >= self.render_cache_range.start && ix < self.render_cache_range.end {
+                    if let Some(line) = self
+                        .render_cache
+                        .get(ix - self.render_cache_range.start)
+                    {
+                        return line.clone();
+                    }
                 }
-                self.render_cache
-                    .get(ix.saturating_sub(self.render_cache_range.start))
-                    .cloned()
-                    .unwrap_or_else(|| preview.build_render_line(ix))
+                preview.build_render_line(ix)
             })
             .collect()
     }
