@@ -2,7 +2,7 @@
 name = "codemerge"
 version = "6.0.0"
 edition = "2024"
-description = "Desktop file merge tool for Linux and Windows."
+description = "Desktop file merge tool for Linux, macOS, and Windows."
 license = "MIT"
 repository = "https://github.com/hellotime/codemerge"
 

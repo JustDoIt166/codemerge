@@ -130,7 +130,7 @@ fn collect_candidates_can_ignore_git_directory() {
 
     let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
     assert!(rels.contains(&"visible.txt".to_string()));
-    assert!(!rels.iter().any(|rel| rel.starts_with(".git/")));
+    assert!(!rels.iter().any(|rel: &String| rel.starts_with(".git/")));
 }
 
 #[test]

@@ -125,12 +125,60 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-macos:
+    name: Build macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-13
+            arch: amd64
+          - runner: macos-14
+            arch: arm64
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tracked assets
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f assets/app.ico
+          test -f assets/fonts/logo.svg
+          test -d assets/icons
+          test -n "$(find assets/icons -maxdepth 1 -type f | head -n1)"
+
+      - name: Build binary
+        run: cargo build --release --locked
+
+      - name: Build and collect macOS artifacts
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="${GITHUB_REF_NAME#v}"
+          bash scripts/package-macos.sh "$VERSION" "${{ matrix.arch }}"
+
+      - name: Upload macOS artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-${{ matrix.arch }}
+          path: dist/*
+          if-no-files-found: error
+
   release:
     name: Create GitHub Release
     runs-on: ubuntu-latest
     needs:
       - build-linux
       - build-windows
+      - build-macos
     steps:
       - name: Download all artifacts
         uses: actions/download-artifact@v4
@@ -146,3 +194,5 @@ jobs:
           files: |
             release-assets/linux-amd64/*
             release-assets/windows-amd64/*
+            release-assets/macos-amd64/*
+            release-assets/macos-arm64/*

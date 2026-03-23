@@ -190,8 +190,9 @@ pub(super) fn resolve_window_chrome_mode(
     decorations: Decorations,
     is_windows: bool,
     is_linux: bool,
+    is_macos: bool,
 ) -> WindowChromeMode {
-    if is_windows {
+    if is_windows || is_macos {
         return WindowChromeMode::CustomTitleBar;
     }
 
@@ -1051,7 +1052,7 @@ mod tests {
     #[test]
     fn window_chrome_mode_matches_platform_and_decorations() {
         assert_eq!(
-            resolve_window_chrome_mode(Decorations::Server, true, false),
+            resolve_window_chrome_mode(Decorations::Server, true, false, false),
             WindowChromeMode::CustomTitleBar
         );
         assert_eq!(
@@ -1061,12 +1062,17 @@ mod tests {
                 },
                 false,
                 true,
+                false,
             ),
             WindowChromeMode::CustomTitleBar
         );
         assert_eq!(
-            resolve_window_chrome_mode(Decorations::Server, false, true),
+            resolve_window_chrome_mode(Decorations::Server, false, true, false),
             WindowChromeMode::CompactHeaderFallback
+        );
+        assert_eq!(
+            resolve_window_chrome_mode(Decorations::Server, false, false, true),
+            WindowChromeMode::CustomTitleBar
         );
     }
 

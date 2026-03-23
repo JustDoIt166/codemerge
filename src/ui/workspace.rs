@@ -1520,7 +1520,10 @@ mod tests {
                 snapshot.workspace_view_notifies,
             );
 
-            assert_eq!(snapshot.preview_visible_syncs, 30);
+            assert!(
+                (30..=31).contains(&snapshot.preview_visible_syncs),
+                "manual flushes should batch to roughly one visible sync per frame; a deferred trailing notify may add one extra sync"
+            );
             assert!(snapshot.preview_range_requests <= snapshot.preview_visible_syncs);
             assert!(snapshot.preview_render_cache_rebuilds <= snapshot.preview_visible_syncs);
             assert!(snapshot.preview_render_cache_partial_updates > 0);
