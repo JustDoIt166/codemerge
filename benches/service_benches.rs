@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -37,13 +37,9 @@ fn bench_build_tree_index(c: &mut Criterion) {
         let (_dir, root) = support::make_file_tree(scale);
         let candidates = support::candidate_files(&root, scale);
         let nodes = tree::build_tree_nodes(&candidates);
-        group.bench_with_input(
-            BenchmarkId::from_parameter(scale),
-            &nodes,
-            |b, nodes| {
-                b.iter(|| tree::build_tree_index(nodes));
-            },
-        );
+        group.bench_with_input(BenchmarkId::from_parameter(scale), &nodes, |b, nodes| {
+            b.iter(|| tree::build_tree_index(nodes));
+        });
     }
     group.finish();
 }

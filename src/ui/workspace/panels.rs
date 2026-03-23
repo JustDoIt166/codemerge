@@ -5,7 +5,7 @@ use gpui::{
     prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable, Icon, IconName, Sizable, Size, StyledExt as _,
+    ActiveTheme as _, Disableable, IconName, Sizable, Size,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -59,54 +59,6 @@ impl Workspace {
                     .label(tr(language, "cancel"))
                     .disabled(!is_processing)
                     .on_click(cx.listener(Self::cancel_process)),
-            )
-    }
-
-    pub(super) fn render_header(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.language(cx);
-        h_flex()
-            .justify_between()
-            .items_center()
-            .child(
-                h_flex()
-                    .gap_3()
-                    .items_center()
-                    .child(
-                        div()
-                            .flex()
-                            .w(px(44.))
-                            .h(px(44.))
-                            .rounded(px(14.))
-                            .bg(cx.theme().primary)
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                Icon::new(IconName::GalleryVerticalEnd)
-                                    .text_color(cx.theme().primary_foreground)
-                                    .with_size(Size::Medium),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .child(div().text_xl().font_semibold().child("CodeMerge"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(cx.theme().muted_foreground)
-                                    .child(tr(language, "app_subtitle")),
-                            ),
-                    ),
-            )
-            .child(
-                Button::new("toggle-language")
-                    .outline()
-                    .icon(IconName::Globe)
-                    .label(match language {
-                        crate::domain::Language::Zh => "EN",
-                        crate::domain::Language::En => "中文",
-                    })
-                    .on_click(cx.listener(Self::toggle_language)),
             )
     }
 
@@ -360,6 +312,7 @@ impl Workspace {
         let process = process.state();
         let result = self.result.read(cx);
         let result = result.state().result.as_ref();
+        let archive_summary = super::model::summarize_archive_entries(result);
         let result_stats = result.map(|result| result.stats.clone());
         let merged_file_size_hint = result
             .and_then(|result| result.merged_content_path.as_ref())
@@ -452,6 +405,21 @@ impl Workspace {
                 process.ui_status,
                 cx,
             ))
+            .when(archive_summary.entries > 0, |this| {
+                this.child(render_info_block(
+                    tr(language, "archive_sources"),
+                    format!(
+                        "{} {} · {} {}",
+                        archive_summary.archives,
+                        tr(language, "archive_files"),
+                        archive_summary.entries,
+                        tr(language, "archive_entries")
+                    ),
+                    true,
+                    IconName::File,
+                    cx,
+                ))
+            })
             .child(
                 v_flex()
                     .gap_2()
@@ -1180,6 +1148,7 @@ impl PreviewPaneView {
         };
         let selected_preview = selected_preview_id
             .and_then(|id| result_state.preview_rows.iter().find(|row| row.id == id));
+        let selected_archive = selected_preview.and_then(|row| row.archive.clone());
 
         if let Some(error) = preview_error.as_ref() {
             let preview_failure_title = selected_preview
@@ -1226,6 +1195,18 @@ impl PreviewPaneView {
             .flex_1()
             .min_h(px(0.))
             .child(render_kv(tr(language, "table_path"), file_path, cx))
+            .when_some(selected_archive.as_ref(), |this, archive| {
+                this.child(render_kv(
+                    tr(language, "archive_path"),
+                    archive.archive_path.clone(),
+                    cx,
+                ))
+                .child(render_kv(
+                    tr(language, "archive_entry_path"),
+                    archive.entry_path.clone(),
+                    cx,
+                ))
+            })
             .child(
                 h_flex()
                     .gap_3()
@@ -1514,13 +1495,11 @@ impl PreviewPaneView {
         let preview = self.preview.read(cx);
         visible_range
             .map(|ix| {
-                if ix >= self.render_cache_range.start && ix < self.render_cache_range.end {
-                    if let Some(line) = self
-                        .render_cache
-                        .get(ix - self.render_cache_range.start)
-                    {
-                        return line.clone();
-                    }
+                if ix >= self.render_cache_range.start
+                    && ix < self.render_cache_range.end
+                    && let Some(line) = self.render_cache.get(ix - self.render_cache_range.start)
+                {
+                    return line.clone();
                 }
                 preview.build_render_line(ix)
             })

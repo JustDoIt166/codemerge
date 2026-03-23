@@ -100,9 +100,12 @@ pub fn start_with_options(
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
     use std::time::Duration;
 
     use tempfile::tempdir;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
 
     use super::{PreflightEvent, PreflightRequest, start_with_options};
     use crate::processor::walker::WalkerOptions;
@@ -186,5 +189,97 @@ mod tests {
         let stats = stats.expect("completed stats");
         assert_eq!(stats.to_process_files, 3);
         assert_eq!(stats.scanned_entries, 3);
+    }
+
+    #[test]
+    fn start_with_options_keeps_explicit_selected_file_even_if_blacklisted() {
+        let dir = tempdir().expect("tempdir");
+        let file_path = dir.path().join("blocked.log");
+        fs::write(&file_path, "selected file").expect("write selected file");
+
+        let rx = start_with_options(
+            PreflightRequest {
+                revision: 3,
+                selected_folder: None,
+                selected_files: vec![file_path],
+                folder_blacklist: vec!["blocked.log".to_string()],
+                ext_blacklist: vec![".log".to_string()],
+            },
+            WalkerOptions {
+                use_gitignore: false,
+                ignore_git: false,
+            },
+        );
+
+        let stats = loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("preflight event");
+            match event {
+                PreflightEvent::Completed { stats, .. } => break stats,
+                PreflightEvent::Failed { error, .. } => panic!("unexpected failure: {error}"),
+                PreflightEvent::Started { .. } | PreflightEvent::Progress { .. } => {}
+            }
+        };
+
+        assert_eq!(stats.to_process_files, 1);
+        assert_eq!(stats.skipped_files, 0);
+        assert_eq!(stats.total_files, 1);
+        assert_eq!(stats.scanned_entries, 1);
+    }
+
+    #[test]
+    fn start_with_options_selected_zip_honors_blacklist_inside_archive() {
+        let dir = tempdir().expect("tempdir");
+        let zip_path = dir.path().join("bundle.zip");
+        write_test_zip(
+            &zip_path,
+            &[
+                ("src/lib.rs", "pub fn zipped() {}\n"),
+                ("README.md", "# zipped\n"),
+                ("assets/logo.png", "binary"),
+            ],
+        );
+
+        let rx = start_with_options(
+            PreflightRequest {
+                revision: 4,
+                selected_folder: None,
+                selected_files: vec![zip_path],
+                folder_blacklist: vec!["src".to_string()],
+                ext_blacklist: vec![".png".to_string()],
+            },
+            WalkerOptions {
+                use_gitignore: false,
+                ignore_git: false,
+            },
+        );
+
+        let stats = loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("preflight event");
+            match event {
+                PreflightEvent::Completed { stats, .. } => break stats,
+                PreflightEvent::Failed { error, .. } => panic!("unexpected failure: {error}"),
+                PreflightEvent::Started { .. } | PreflightEvent::Progress { .. } => {}
+            }
+        };
+
+        assert_eq!(stats.to_process_files, 1);
+        assert_eq!(stats.skipped_files, 2);
+        assert_eq!(stats.total_files, 3);
+        assert_eq!(stats.scanned_entries, 3);
+    }
+
+    fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("create zip");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, content) in files {
+            zip.start_file(name, options).expect("start file");
+            zip.write_all(content.as_bytes()).expect("write entry");
+        }
+        zip.finish().expect("finish zip");
     }
 }

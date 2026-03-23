@@ -111,6 +111,13 @@ pub struct PreviewFileEntry {
     pub tokens: usize,
     pub preview_blob_path: PathBuf,
     pub byte_len: u64,
+    pub archive: Option<ArchiveEntrySource>,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct ArchiveEntrySource {
+    pub archive_path: String,
+    pub entry_path: String,
 }
 
 #[derive(Debug, Clone)]
@@ -128,6 +135,7 @@ pub struct PreviewRowViewModel {
     pub display_path: String,
     pub chars: usize,
     pub tokens: usize,
+    pub archive: Option<ArchiveEntrySource>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -213,11 +221,28 @@ pub fn default_folder_blacklist() -> Vec<String> {
 pub fn default_ext_blacklist() -> Vec<String> {
     [
         ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico", ".mp3", ".wav", ".ogg",
-        ".flac", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".pdf", ".zip", ".rar", ".7z",
-        ".tar", ".gz", ".xz", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".ttf", ".woff",
-        ".woff2", ".eot", ".otf", ".db", ".sqlite",
+        ".flac", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".pdf", ".rar", ".7z", ".tar",
+        ".gz", ".xz", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".ttf", ".woff", ".woff2",
+        ".eot", ".otf", ".db", ".sqlite",
     ]
     .iter()
     .map(|v| (*v).to_string())
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AppConfigV1, default_ext_blacklist};
+
+    #[test]
+    fn default_ext_blacklist_keeps_zip_available() {
+        let blacklist = default_ext_blacklist();
+        assert!(!blacklist.iter().any(|ext| ext == ".zip"));
+        assert!(
+            !AppConfigV1::default()
+                .ext_blacklist
+                .iter()
+                .any(|ext| ext == ".zip")
+        );
+    }
 }

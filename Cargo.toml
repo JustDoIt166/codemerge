@@ -27,6 +27,7 @@ serde_json = "1.0.145"
 tempfile = "3.25.0"
 tokio = { version = "1.49.0", features = ["fs", "io-util", "rt", "rt-multi-thread", "sync", "time"] }
 tokio-util = "0.7.17"
+zip = { version = "8.4.0", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 criterion = { version = "0.5", features = ["html_reports"] }
@@ -45,6 +46,10 @@ harness = false
 
 [target.'cfg(windows)'.build-dependencies]
 winres = "0.1.12"
+
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6.2"
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = 3

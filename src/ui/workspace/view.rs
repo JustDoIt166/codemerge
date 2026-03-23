@@ -13,6 +13,7 @@ use super::model::{
     BlacklistSectionViewModel, BlacklistTagViewModel, FilterMatchKind, TreeCountSummary,
     TreeRowViewModel,
 };
+pub(super) use super::model::{process_status_message, process_status_title};
 use super::tree_palette::{ResolvedTreeRowPalette, TreeRowPalette};
 use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
@@ -166,7 +167,7 @@ pub(super) fn render_tree_row(
     } else {
         IconName::ChevronRight
     });
-    let badge = tree_filter_badge(row, language);
+    let badges = tree_badges(row, language);
     let palette = TreeRowPalette::new(selected, row.icon_kind, row.is_filter_match, row.match_kind)
         .resolve(cx.theme());
     let row_indent = px((row.depth as f32) * 20.);
@@ -225,17 +226,19 @@ pub(super) fn render_tree_row(
                                         row.match_range.as_ref(),
                                         &palette,
                                     )))
-                                    .when_some(badge, |this, badge| {
-                                        this.child(
-                                            div()
-                                                .text_xs()
-                                                .px(px(7.))
-                                                .py(px(2.))
-                                                .rounded(px(6.))
-                                                .bg(palette.badge_bg)
-                                                .text_color(palette.badge_fg)
-                                                .child(badge),
-                                        )
+                                    .when(!badges.is_empty(), |this| {
+                                        this.child(h_flex().gap_1().children(
+                                            badges.into_iter().map(|badge| {
+                                                div()
+                                                    .text_xs()
+                                                    .px(px(7.))
+                                                    .py(px(2.))
+                                                    .rounded(px(6.))
+                                                    .bg(palette.badge_bg)
+                                                    .text_color(palette.badge_fg)
+                                                    .child(badge)
+                                            }),
+                                        ))
                                     }),
                             )
                             .child(
@@ -290,6 +293,17 @@ fn tree_filter_badge(row: &TreeRowViewModel, language: Language) -> Option<Strin
         row.matched_descendants,
         tr(language, "tree_hits")
     ))
+}
+
+fn tree_badges(row: &TreeRowViewModel, language: Language) -> Vec<String> {
+    let mut badges = Vec::new();
+    if row.archive.is_some() {
+        badges.push(tr(language, "archive_badge").to_string());
+    }
+    if let Some(filter_badge) = tree_filter_badge(row, language) {
+        badges.push(filter_badge);
+    }
+    badges
 }
 
 fn render_match_label(
@@ -884,45 +898,6 @@ pub(super) fn tab_icon_badge(icon: IconName, warm: bool, cx: &App) -> gpui::Div 
         cx.theme().primary.opacity(0.14)
     };
     accent_icon_badge(icon, fg, bg)
-}
-
-pub(super) fn process_status_title(status: ProcessUiStatus, language: Language) -> &'static str {
-    match status {
-        ProcessUiStatus::Idle => tr(language, "status_idle"),
-        ProcessUiStatus::Preflight => tr(language, "status_preflight"),
-        ProcessUiStatus::Running => tr(language, "status_running"),
-        ProcessUiStatus::Completed => tr(language, "status_completed"),
-        ProcessUiStatus::Cancelled => tr(language, "status_cancelled"),
-        ProcessUiStatus::Error => tr(language, "status_error"),
-    }
-}
-
-pub(super) fn process_status_message(
-    process: &crate::ui::state::ProcessState,
-    language: Language,
-    merged_file_size_hint: Option<String>,
-) -> String {
-    match process.ui_status {
-        ProcessUiStatus::Idle => tr(language, "status_idle_hint").to_string(),
-        ProcessUiStatus::Preflight => format!(
-            "{} {}",
-            tr(language, "status_preflight_hint"),
-            process.preflight.scanned_entries
-        ),
-        ProcessUiStatus::Running => process.processing_current_file.clone(),
-        ProcessUiStatus::Completed => {
-            let base = tr(language, "status_completed_hint").to_string();
-            match merged_file_size_hint {
-                Some(size) => format!("{base} ({size})"),
-                None => base,
-            }
-        }
-        ProcessUiStatus::Cancelled => tr(language, "status_cancelled_hint").to_string(),
-        ProcessUiStatus::Error => process
-            .last_error
-            .clone()
-            .unwrap_or_else(|| tr(language, "status_error_hint").to_string()),
-    }
 }
 
 pub(super) fn format_size(size: u64) -> String {

@@ -1,5 +1,6 @@
 mod actions;
 mod background;
+mod chrome;
 mod model;
 mod panels;
 mod tree_palette;
@@ -11,13 +12,14 @@ use std::{hash::Hash, hash::Hasher, ops::Range};
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId, FocusHandle, Focusable,
     InteractiveElement, ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task,
-    Timer, UniformListScrollHandle, Window, px, size,
+    Timer, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
-    WindowExt as _,
+    ActiveTheme as _, Sizable, Size, WindowExt as _, h_flex,
     input::InputState,
     notification::NotificationType,
     table::{Column, TableDelegate, TableState},
+    tag::{Tag, TagVariant},
     tree::TreeState,
 };
 
@@ -52,6 +54,7 @@ pub(crate) enum BlacklistItemKind {
 }
 
 pub(super) struct PreviewTableDelegate {
+    language: Language,
     columns: Vec<Column>,
     rows: Vec<PreviewRowViewModel>,
 }
@@ -59,6 +62,7 @@ pub(super) struct PreviewTableDelegate {
 impl PreviewTableDelegate {
     fn new(language: Language) -> Self {
         Self {
+            language,
             columns: vec![
                 Column::new("path", tr(language, "table_path")).width(420.),
                 Column::new("chars", tr(language, "table_chars"))
@@ -73,6 +77,7 @@ impl PreviewTableDelegate {
     }
 
     fn set_language(&mut self, language: Language) {
+        self.language = language;
         self.columns[0].name = tr(language, "table_path").into();
         self.columns[1].name = tr(language, "table_chars").into();
         self.columns[2].name = tr(language, "table_tokens").into();
@@ -106,11 +111,34 @@ impl TableDelegate for PreviewTableDelegate {
         row_ix: usize,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
         let row = &self.rows[row_ix];
         match col_ix {
-            0 => SharedString::from(row.display_path.clone()).into_any_element(),
+            0 => h_flex()
+                .gap_2()
+                .items_center()
+                .min_w(px(0.))
+                .when(row.archive.is_some(), |this| {
+                    this.child(
+                        Tag::new()
+                            .with_variant(TagVariant::Custom {
+                                color: cx.theme().primary.opacity(0.14),
+                                foreground: cx.theme().foreground,
+                                border: cx.theme().primary.opacity(0.32),
+                            })
+                            .with_size(Size::Small)
+                            .rounded_full()
+                            .child(tr(self.language, "archive_badge")),
+                    )
+                })
+                .child(
+                    div()
+                        .min_w(px(0.))
+                        .truncate()
+                        .child(SharedString::from(row.display_path.clone())),
+                )
+                .into_any_element(),
             1 => row.chars.to_string().into_any_element(),
             _ => row.tokens.to_string().into_any_element(),
         }
@@ -677,6 +705,24 @@ impl Workspace {
                     result.stats.total_chars,
                     result.stats.total_tokens,
                     result.preview_files.len(),
+                    model::summarize_archive_entries(Some(result)),
+                    result
+                        .preview_files
+                        .iter()
+                        .map(|entry| {
+                            (
+                                entry.display_path.clone(),
+                                entry
+                                    .archive
+                                    .as_ref()
+                                    .map(|archive| archive.archive_path.clone()),
+                                entry
+                                    .archive
+                                    .as_ref()
+                                    .map(|archive| archive.entry_path.clone()),
+                            )
+                        })
+                        .collect::<Vec<_>>(),
                 )
             })
             .hash(&mut hasher);
@@ -724,6 +770,22 @@ impl Workspace {
             self.tree_panel.total_summary,
             self.tree_panel.filter_input.read(cx).value().to_string(),
             result.result.as_ref().map(|result| result.tree_nodes.len()),
+            result.result.as_ref().map(|result| {
+                result
+                    .preview_files
+                    .iter()
+                    .map(|entry| {
+                        (
+                            entry.display_path.clone(),
+                            entry.archive.is_some(),
+                            entry
+                                .archive
+                                .as_ref()
+                                .map(|archive| archive.archive_path.clone()),
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }),
             result
                 .result
                 .as_ref()
@@ -1154,13 +1216,12 @@ impl Render for Workspace {
             .id("codemerge-root")
             .track_focus(&self.focus_handle)
             .size_full()
-            .p_4()
-            .gap_4()
-            .child(self.render_header(cx))
+            .child(self.render_window_chrome(window, cx))
             .child(
                 gpui::div()
                     .flex_1()
                     .min_h(px(0.))
+                    .p_4()
                     .child(self.render_main_content(window, cx)),
             )
     }
@@ -1556,6 +1617,7 @@ mod tests {
                     tokens: 3,
                     preview_blob_path: PathBuf::from("a"),
                     byte_len: 10,
+                    archive: None,
                 },
                 PreviewFileEntry {
                     id: 2,
@@ -1564,6 +1626,7 @@ mod tests {
                     tokens: 4,
                     preview_blob_path: PathBuf::from("b"),
                     byte_len: 12,
+                    archive: None,
                 },
             ],
             preview_blob_dir: None,

@@ -1,4 +1,4 @@
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 
 #[path = "support/mod.rs"]
 mod support;
@@ -12,13 +12,9 @@ fn bench_index_document(c: &mut Criterion) {
     let mut group = c.benchmark_group("preview_index_document");
     for &line_count in &[100usize, 1_000, 10_000, 100_000] {
         let (_dir, path) = support::make_preview_file(line_count);
-        group.bench_with_input(
-            BenchmarkId::new("lines", line_count),
-            &path,
-            |b, path| {
-                b.iter(|| preview::index_document(path).expect("index document"));
-            },
-        );
+        group.bench_with_input(BenchmarkId::new("lines", line_count), &path, |b, path| {
+            b.iter(|| preview::index_document(path).expect("index document"));
+        });
     }
     group.finish();
 }

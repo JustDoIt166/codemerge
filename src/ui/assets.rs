@@ -31,3 +31,33 @@ impl AssetSource for AppAssets {
             .unwrap_or_default())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use std::str;
+
+    use super::AppAssets;
+    use gpui::AssetSource;
+
+    #[test]
+    fn window_control_icons_are_embedded_and_themeable() {
+        let assets = AppAssets;
+
+        for path in [
+            "icons/window-minimize.svg",
+            "icons/window-maximize.svg",
+            "icons/window-restore.svg",
+            "icons/window-close.svg",
+        ] {
+            let svg = AssetSource::load(&assets, path)
+                .expect("asset lookup should succeed")
+                .unwrap_or_else(|| panic!("missing embedded asset: {path}"));
+
+            let svg = str::from_utf8(svg.as_ref()).expect("embedded asset should be valid utf-8");
+            assert!(
+                svg.contains("currentColor"),
+                "window control icon should follow theme text color: {path}"
+            );
+        }
+    }
+}

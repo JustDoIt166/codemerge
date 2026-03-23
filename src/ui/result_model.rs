@@ -69,6 +69,7 @@ mod tests {
             display_path: "file.rs".into(),
             chars: 1,
             tokens: 1,
+            archive: None,
         }]);
 
         model.set_result(ProcessResult {
@@ -85,6 +86,7 @@ mod tests {
                 tokens: 1,
                 preview_blob_path: PathBuf::from("preview.txt"),
                 byte_len: 1,
+                archive: None,
             }],
             preview_blob_dir: None,
         });

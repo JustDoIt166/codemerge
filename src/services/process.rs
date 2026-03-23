@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
@@ -7,12 +7,13 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
-    FileDetail, Language, PreviewFileEntry, ProcessRecord, ProcessResult, ProcessStatus,
-    ProcessingMode, ProcessingOptions,
+    ArchiveEntrySource, FileDetail, Language, PreviewFileEntry, ProcessRecord, ProcessResult,
+    ProcessStatus, ProcessingMode, ProcessingOptions,
 };
 use crate::error::AppError;
+use crate::processor::archive::read_zip_entry_text;
 use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
-use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text};
+use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text_blocking};
 use crate::processor::stats::ProcessingStats;
 use crate::processor::walker::{
     CandidateFile, WalkerOptions, WalkerOutput, collect_candidates_with_progress,
@@ -219,6 +220,7 @@ async fn run_process_with_walker(
                 merged,
                 chars,
                 tokens,
+                archive,
             } => {
                 stats.processed_files += 1;
                 stats.total_chars += chars;
@@ -243,6 +245,7 @@ async fn run_process_with_walker(
                     tokens,
                     preview_blob_path: blob_path,
                     byte_len: merged.content.len() as u64,
+                    archive,
                 });
                 let _ = tx.send(ProcessEvent::Record(ProcessRecord {
                     file_name: detail.path.clone(),
@@ -299,24 +302,36 @@ enum FileProcessOutcome {
         merged: MergedFile,
         chars: usize,
         tokens: usize,
+        archive: Option<ArchiveEntrySource>,
     },
 }
 
 async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProcessOutcome {
     let absolute = file.absolute;
     let relative = file.relative;
-    let raw = match read_text(&absolute).await {
-        Ok(v) => v,
-        Err(e) => {
-            return FileProcessOutcome::Skipped {
-                file: relative,
-                reason: format!("read failed: {e}"),
-            };
-        }
-    };
+    let archive_entry = file.archive_entry;
+    let archive_path = file.archive_path;
     let rel_for_error = relative.clone();
     match tokio::task::spawn_blocking(move || {
-        let (compressed, _warn) = compress_by_extension(&absolute, &raw, compress);
+        let archive = archive_entry_source(archive_path.as_deref(), &relative);
+        let raw = match archive_entry.as_deref() {
+            Some(entry_name) => read_zip_entry_text(&absolute, entry_name),
+            None => read_text_blocking(&absolute),
+        };
+        let raw = match raw {
+            Ok(content) => content,
+            Err(error) => {
+                return FileProcessOutcome::Skipped {
+                    file: relative,
+                    reason: format!("read failed: {error}"),
+                };
+            }
+        };
+        let compression_path = archive_entry
+            .as_deref()
+            .map(Path::new)
+            .unwrap_or(absolute.as_path());
+        let (compressed, _warn) = compress_by_extension(compression_path, &raw, compress);
         let (chars, tokens) = count_chars_tokens(&compressed);
         FileProcessOutcome::Processed {
             detail: FileDetail {
@@ -332,6 +347,7 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
             },
             chars,
             tokens,
+            archive,
         }
     })
     .await
@@ -342,6 +358,24 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
             error: format!("process failed: {e}"),
         },
     }
+}
+
+fn archive_entry_source(
+    archive_path: Option<&str>,
+    display_path: &str,
+) -> Option<ArchiveEntrySource> {
+    let archive_path = archive_path?;
+    let entry_path = display_path
+        .strip_prefix(archive_path)?
+        .strip_prefix('/')?
+        .to_string();
+    if entry_path.is_empty() {
+        return None;
+    }
+    Some(ArchiveEntrySource {
+        archive_path: archive_path.to_string(),
+        entry_path,
+    })
 }
 
 fn file_concurrency_limit(total_files: usize) -> usize {
@@ -357,10 +391,15 @@ fn file_concurrency_limit(total_files: usize) -> usize {
 #[cfg(test)]
 mod tests {
     use std::fs;
+    use std::io::Write;
+    use std::time::Duration;
 
     use tempfile::tempdir;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
 
-    use super::cleanup_failed_run;
+    use super::{ProcessEvent, ProcessRequest, cleanup_failed_run, start};
+    use crate::domain::{Language, OutputFormat, ProcessingMode, ProcessingOptions};
     use crate::utils::temp_file::{
         make_temp_preview_dir_in, make_temp_process_dir, make_temp_result_path_in,
     };
@@ -386,5 +425,76 @@ mod tests {
 
         cleanup_failed_run(&process_dir);
         cleanup_failed_run(&process_dir);
+    }
+
+    #[test]
+    fn start_selected_zip_honors_blacklist_inside_archive() {
+        let dir = tempdir().expect("tempdir");
+        let zip_path = dir.path().join("bundle.zip");
+        write_test_zip(
+            &zip_path,
+            &[
+                ("src/lib.rs", "pub fn from_zip() -> bool { true }\n"),
+                ("README.md", "# zipped\n"),
+                ("assets/logo.png", "binary"),
+            ],
+        );
+
+        let handle = start(ProcessRequest {
+            selected_folder: None,
+            selected_files: vec![zip_path],
+            folder_blacklist: vec!["src".to_string()],
+            ext_blacklist: vec![".png".to_string()],
+            options: ProcessingOptions {
+                compress: false,
+                use_gitignore: false,
+                ignore_git: false,
+                output_format: OutputFormat::Default,
+                mode: ProcessingMode::Full,
+            },
+            language: Language::Zh,
+        });
+
+        let result = loop {
+            match handle
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("process event")
+            {
+                ProcessEvent::Completed(result) => break result,
+                ProcessEvent::Failed(error) => panic!("unexpected failure: {error}"),
+                ProcessEvent::Cancelled => panic!("unexpected cancellation"),
+                ProcessEvent::Scanning { .. } | ProcessEvent::Record(_) => {}
+            }
+        };
+
+        assert_eq!(result.file_details.len(), 1);
+        assert_eq!(result.preview_files.len(), 1);
+        assert!(!result.tree_string.contains("bundle.zip/assets/logo.png"));
+        assert!(!result.tree_string.contains("bundle.zip/src/lib.rs"));
+        assert_eq!(
+            result.preview_files[0]
+                .archive
+                .as_ref()
+                .map(|archive| (archive.archive_path.as_str(), archive.entry_path.as_str())),
+            Some(("bundle.zip", "README.md"))
+        );
+        let merged_path = result.merged_content_path.expect("merged path");
+        let merged = fs::read_to_string(merged_path).expect("read merged");
+        assert!(merged.contains("文件路径: bundle.zip/README.md"));
+        assert!(!merged.contains("文件路径: bundle.zip/src/lib.rs"));
+        assert!(!merged.contains("pub fn from_zip() -> bool { true }"));
+        assert!(!merged.contains("文件路径: bundle.zip/assets/logo.png"));
+    }
+
+    fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+        let file = fs::File::create(path).expect("create zip");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        for (name, content) in files {
+            zip.start_file(name, options).expect("start file");
+            zip.write_all(content.as_bytes()).expect("write zip entry");
+        }
+        zip.finish().expect("finish zip");
     }
 }

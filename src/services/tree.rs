@@ -187,14 +187,20 @@ mod tests {
             CandidateFile {
                 absolute: PathBuf::from("a"),
                 relative: "src/main.rs".to_string(),
+                archive_entry: None,
+                archive_path: None,
             },
             CandidateFile {
                 absolute: PathBuf::from("b"),
                 relative: "src/lib.rs".to_string(),
+                archive_entry: None,
+                archive_path: None,
             },
             CandidateFile {
                 absolute: PathBuf::from("c"),
                 relative: "README.md".to_string(),
+                archive_entry: None,
+                archive_path: None,
             },
         ]);
 

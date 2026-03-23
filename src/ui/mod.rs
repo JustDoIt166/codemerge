@@ -17,7 +17,7 @@ pub fn run() {
         gpui_component::init(cx);
         cx.activate(true);
         cx.spawn(async move |cx| {
-            cx.open_window(WindowOptions::default(), |window, cx| {
+            cx.open_window(main_window_options(), |window, cx| {
                 #[cfg(debug_assertions)]
                 window.toggle_inspector(cx);
 
@@ -28,4 +28,20 @@ pub fn run() {
         })
         .detach();
     });
+}
+
+fn main_window_options() -> WindowOptions {
+    let mut options = WindowOptions::default();
+
+    #[cfg(target_os = "windows")]
+    {
+        options.titlebar = Some(gpui_component::TitleBar::title_bar_options());
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        options.window_decorations = Some(gpui::WindowDecorations::Client);
+    }
+
+    options
 }

@@ -1,7 +1,10 @@
 use codemerge::domain::OutputFormat;
 use codemerge::processor::{merger, reader, walker};
 use std::fs;
+use std::io::Write;
 use tempfile::tempdir;
+use zip::CompressionMethod;
+use zip::write::SimpleFileOptions;
 
 #[test]
 fn parse_gitignore_ignores_comments_empty_and_negation() {
@@ -128,4 +131,97 @@ fn collect_candidates_can_ignore_git_directory() {
     let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
     assert!(rels.contains(&"visible.txt".to_string()));
     assert!(!rels.iter().any(|rel| rel.starts_with(".git/")));
+}
+
+#[test]
+fn collect_candidates_keeps_explicit_selected_file_even_if_blacklisted() {
+    let dir = tempdir().expect("create temp dir");
+    let file_path = dir.path().join("blocked.log");
+    fs::write(&file_path, "selected file").expect("write selected file");
+
+    let out = walker::collect_candidates(
+        None,
+        std::slice::from_ref(&file_path),
+        &[String::from("blocked.log")],
+        &[String::from(".log")],
+        walker::WalkerOptions {
+            use_gitignore: false,
+            ignore_git: false,
+        },
+    );
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert_eq!(rels, vec!["blocked.log".to_string()]);
+    assert_eq!(out.skipped, 0);
+}
+
+#[test]
+fn collect_candidates_selected_zip_honors_blacklist_inside_archive() {
+    let dir = tempdir().expect("create temp dir");
+    let root = dir.path();
+    let zip_path = root.join("bundle.zip");
+    write_test_zip(
+        &zip_path,
+        &[
+            ("src/lib.rs", "pub fn zipped() {}\n"),
+            ("README.md", "# zipped\n"),
+            ("assets/logo.png", "binary"),
+        ],
+    );
+
+    let out = walker::collect_candidates(
+        None,
+        std::slice::from_ref(&zip_path),
+        &[String::from("src")],
+        &[String::from(".png")],
+        walker::WalkerOptions {
+            use_gitignore: false,
+            ignore_git: false,
+        },
+    );
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert_eq!(rels, vec!["bundle.zip/README.md".to_string()]);
+    assert_eq!(out.skipped, 2);
+}
+
+#[test]
+fn collect_candidates_folder_scan_still_honors_blacklist_inside_archive() {
+    let dir = tempdir().expect("create temp dir");
+    let root = dir.path();
+    let zip_path = root.join("bundle.zip");
+    write_test_zip(
+        &zip_path,
+        &[
+            ("src/lib.rs", "pub fn zipped() {}\n"),
+            ("README.md", "# zipped\n"),
+            ("assets/logo.png", "binary"),
+        ],
+    );
+
+    let out = walker::collect_candidates(
+        Some(&root.to_path_buf()),
+        &[],
+        &[String::from("src")],
+        &[String::from(".png")],
+        walker::WalkerOptions {
+            use_gitignore: false,
+            ignore_git: false,
+        },
+    );
+
+    let rels: Vec<_> = out.candidates.into_iter().map(|c| c.relative).collect();
+    assert_eq!(rels, vec!["bundle.zip/README.md".to_string()]);
+    assert_eq!(out.skipped, 2);
+}
+
+fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {
+    let file = fs::File::create(path).expect("create zip");
+    let mut zip = zip::ZipWriter::new(file);
+    let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+    for (name, content) in files {
+        zip.start_file(name, options).expect("start file");
+        zip.write_all(content.as_bytes()).expect("write zip entry");
+    }
+    zip.finish().expect("finish zip");
 }

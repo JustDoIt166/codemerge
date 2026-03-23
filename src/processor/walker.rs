@@ -5,10 +5,14 @@ use std::sync::{Arc, Mutex};
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
-#[derive(Debug, Clone)]
+use crate::processor::archive::{is_zip_path, list_zip_file_entries};
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CandidateFile {
     pub absolute: PathBuf,
     pub relative: String,
+    pub archive_entry: Option<String>,
+    pub archive_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -95,7 +99,7 @@ where
 
             Box::new(move |entry| match entry {
                 Ok(entry) => {
-                    if process_entry(
+                    let scanned_delta = process_entry(
                         &entry,
                         &root,
                         &folder_blacklist_set,
@@ -103,9 +107,12 @@ where
                         options.ignore_git,
                         &candidates_acc,
                         &skipped_acc,
-                    ) {
-                        let scanned = scanned_acc.fetch_add(1, Ordering::Relaxed) + 1;
-                        if scanned.is_multiple_of(200) {
+                    );
+                    if scanned_delta > 0 {
+                        let scanned_before =
+                            scanned_acc.fetch_add(scanned_delta, Ordering::Relaxed);
+                        let scanned = scanned_before + scanned_delta;
+                        if scanned / 200 > scanned_before / 200 {
                             let current_skipped = skipped_acc.load(Ordering::Relaxed);
                             let current_candidates =
                                 candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
@@ -128,8 +135,8 @@ where
     }
 
     for path in selected_files {
-        scanned_total += 1;
         if !path.is_file() {
+            scanned_total += 1;
             skipped += 1;
             on_progress(scanned_total, candidates.len(), skipped);
             continue;
@@ -139,21 +146,18 @@ where
             .file_name()
             .map(|v| v.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
-        if should_skip(
-            &rel,
+        // Explicitly selected file paths bypass root-level blacklist matching.
+        let result = collect_path_candidates(
+            path,
+            rel,
             &folder_blacklist_set,
             &ext_blacklist_set,
             options.ignore_git,
-        ) {
-            skipped += 1;
-            on_progress(scanned_total, candidates.len(), skipped);
-            continue;
-        }
-
-        candidates.push(CandidateFile {
-            absolute: path.clone(),
-            relative: rel,
-        });
+            true,
+        );
+        scanned_total += result.scanned;
+        skipped += result.skipped;
+        candidates.extend(result.candidates);
         on_progress(scanned_total, candidates.len(), skipped);
     }
     candidates.sort_by(|a, b| a.relative.cmp(&b.relative));
@@ -175,9 +179,9 @@ fn process_entry(
     ignore_git: bool,
     candidates: &Arc<Mutex<Vec<CandidateFile>>>,
     skipped: &Arc<AtomicUsize>,
-) -> bool {
+) -> usize {
     if !entry.file_type().is_some_and(|ft| ft.is_file()) {
-        return false;
+        return 0;
     }
 
     let path = entry.path().to_path_buf();
@@ -187,18 +191,23 @@ fn process_entry(
         .to_string_lossy()
         .replace('\\', "/");
 
-    if should_skip(&rel, folder_blacklist, ext_blacklist, ignore_git) {
-        skipped.fetch_add(1, Ordering::Relaxed);
-        return true;
+    let result = collect_path_candidates(
+        &path,
+        rel,
+        folder_blacklist,
+        ext_blacklist,
+        ignore_git,
+        false,
+    );
+    if result.skipped > 0 {
+        skipped.fetch_add(result.skipped, Ordering::Relaxed);
     }
-
-    if let Ok(mut locked) = candidates.lock() {
-        locked.push(CandidateFile {
-            absolute: path,
-            relative: rel,
-        });
+    if !result.candidates.is_empty()
+        && let Ok(mut locked) = candidates.lock()
+    {
+        locked.extend(result.candidates);
     }
-    true
+    result.scanned
 }
 
 fn should_skip(
@@ -252,6 +261,84 @@ fn build_tree(selected_folder: Option<&PathBuf>, candidates: &[CandidateFile]) -
             lines.join("\n")
         }
     }
+}
+
+#[derive(Default)]
+struct CandidateCollection {
+    candidates: Vec<CandidateFile>,
+    skipped: usize,
+    scanned: usize,
+}
+
+fn collect_path_candidates(
+    path: &Path,
+    relative: String,
+    folder_blacklist: &HashSet<String>,
+    ext_blacklist: &HashSet<String>,
+    ignore_git: bool,
+    bypass_blacklist: bool,
+) -> CandidateCollection {
+    if !bypass_blacklist && should_skip(&relative, folder_blacklist, ext_blacklist, ignore_git) {
+        return CandidateCollection {
+            skipped: 1,
+            scanned: 1,
+            ..CandidateCollection::default()
+        };
+    }
+
+    if !is_zip_path(path) {
+        return CandidateCollection {
+            candidates: vec![CandidateFile {
+                absolute: path.to_path_buf(),
+                relative,
+                archive_entry: None,
+                archive_path: None,
+            }],
+            scanned: 1,
+            skipped: 0,
+        };
+    }
+
+    let entries = match list_zip_file_entries(path) {
+        Ok(entries) => entries,
+        Err(_) => {
+            return CandidateCollection {
+                skipped: 1,
+                scanned: 1,
+                ..CandidateCollection::default()
+            };
+        }
+    };
+    if entries.is_empty() {
+        return CandidateCollection {
+            skipped: 1,
+            scanned: 1,
+            ..CandidateCollection::default()
+        };
+    }
+
+    let mut result = CandidateCollection::default();
+    for entry in entries {
+        result.scanned += 1;
+        let combined_relative = format!("{relative}/{}", entry.display_name);
+        if should_skip(
+            &combined_relative,
+            folder_blacklist,
+            ext_blacklist,
+            ignore_git,
+        ) {
+            result.skipped += 1;
+            continue;
+        }
+        result.candidates.push(CandidateFile {
+            absolute: path.to_path_buf(),
+            relative: combined_relative,
+            archive_entry: Some(entry.archive_name),
+            archive_path: Some(relative.clone()),
+        });
+    }
+
+    result
 }
 
 pub fn normalize_ext(input: &str) -> String {

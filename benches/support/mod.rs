@@ -1,3 +1,5 @@
+#![allow(dead_code)]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -24,7 +26,7 @@ pub fn make_file_tree(n: usize) -> (TempDir, PathBuf) {
     let root = dir.path().to_path_buf();
 
     let modules = (n as f64).sqrt().ceil() as usize;
-    let per_module = (n + modules - 1) / modules;
+    let per_module = n.div_ceil(modules);
 
     let mut created = 0usize;
     for m in 0..modules {
@@ -33,7 +35,7 @@ pub fn make_file_tree(n: usize) -> (TempDir, PathBuf) {
         }
         let module_dir = root.join(format!("module_{m}"));
         let subs = (per_module as f64).sqrt().ceil() as usize;
-        let per_sub = (per_module + subs - 1) / subs;
+        let per_sub = per_module.div_ceil(subs);
 
         for s in 0..subs {
             if created >= n {
@@ -160,6 +162,8 @@ fn collect_files_recursive(
             candidates.push(CandidateFile {
                 absolute: path,
                 relative: rel,
+                archive_entry: None,
+                archive_path: None,
             });
         }
     }
@@ -192,7 +196,13 @@ pub fn merged_files(n: usize) -> Vec<MergedFile> {
             let chars = content.len();
             let tokens = chars / 5; // rough estimate
             MergedFile {
-                path: format!("module_{}/sub_{}/file_{}.{}", i / 100, (i / 10) % 10, i % 10, ext),
+                path: format!(
+                    "module_{}/sub_{}/file_{}.{}",
+                    i / 100,
+                    (i / 10) % 10,
+                    i % 10,
+                    ext
+                ),
                 chars,
                 tokens,
                 content,

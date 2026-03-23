@@ -2,11 +2,13 @@ use std::collections::{BTreeSet, HashMap};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
-use gpui::SharedString;
+use gpui::{Decorations, SharedString};
 use gpui_component::{Icon, IconName, tree::TreeItem};
 
 use super::BlacklistItemKind;
-use crate::domain::{Language, PreviewFileEntry, PreviewRowViewModel, ProcessResult};
+use crate::domain::{
+    ArchiveEntrySource, Language, PreviewFileEntry, PreviewRowViewModel, ProcessResult,
+};
 use crate::services::preflight::PreflightEvent;
 use crate::services::tree::{IndexedTreeNode, TreeIndex};
 use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
@@ -22,6 +24,12 @@ impl TreeCountSummary {
     pub fn total(self) -> usize {
         self.folders + self.files
     }
+}
+
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) struct ArchiveResultSummary {
+    pub archives: usize,
+    pub entries: usize,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -76,6 +84,7 @@ pub(super) struct TreeRowViewModel {
     pub preview_file_id: Option<u32>,
     pub preview_chars: Option<usize>,
     pub preview_tokens: Option<usize>,
+    pub archive: Option<ArchiveEntrySource>,
     pub child_file_count: usize,
     pub child_folder_count: usize,
     pub icon_kind: TreeIconKind,
@@ -145,6 +154,136 @@ pub(super) struct BlacklistSectionViewModel {
     pub title: SharedString,
     pub count: usize,
     pub items: Vec<BlacklistTagViewModel>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowChromeMode {
+    CustomTitleBar,
+    CompactHeaderFallback,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WorkspaceChromeTone {
+    Neutral,
+    Accent,
+    Success,
+    Warning,
+    Danger,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum WindowZoomAction {
+    Maximize,
+    Restore,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(super) struct WorkspaceChromeViewModel {
+    pub title: SharedString,
+    pub status_label: SharedString,
+    pub status_message: SharedString,
+    pub status_tone: WorkspaceChromeTone,
+    pub language_button_label: SharedString,
+}
+
+pub(super) fn resolve_window_chrome_mode(
+    decorations: Decorations,
+    is_windows: bool,
+    is_linux: bool,
+) -> WindowChromeMode {
+    if is_windows {
+        return WindowChromeMode::CustomTitleBar;
+    }
+
+    if is_linux {
+        return match decorations {
+            Decorations::Client { .. } => WindowChromeMode::CustomTitleBar,
+            Decorations::Server => WindowChromeMode::CompactHeaderFallback,
+        };
+    }
+
+    WindowChromeMode::CompactHeaderFallback
+}
+
+pub(super) fn build_workspace_chrome_view_model(
+    process: &ProcessState,
+    language: Language,
+    merged_file_size_hint: Option<String>,
+) -> WorkspaceChromeViewModel {
+    WorkspaceChromeViewModel {
+        title: SharedString::from("CodeMerge"),
+        status_label: SharedString::from(process_status_title(process.ui_status, language)),
+        status_message: SharedString::from(process_status_message(
+            process,
+            language,
+            merged_file_size_hint,
+        )),
+        status_tone: workspace_chrome_tone(process.ui_status),
+        language_button_label: SharedString::from(match language {
+            Language::Zh => "EN",
+            Language::En => "中文",
+        }),
+    }
+}
+
+pub(super) fn resolve_window_zoom_action(
+    is_maximized: bool,
+    is_fullscreen: bool,
+) -> WindowZoomAction {
+    if is_maximized || is_fullscreen {
+        WindowZoomAction::Restore
+    } else {
+        WindowZoomAction::Maximize
+    }
+}
+
+pub(super) fn process_status_title(status: ProcessUiStatus, language: Language) -> &'static str {
+    match status {
+        ProcessUiStatus::Idle => tr(language, "status_idle"),
+        ProcessUiStatus::Preflight => tr(language, "status_preflight"),
+        ProcessUiStatus::Running => tr(language, "status_running"),
+        ProcessUiStatus::Completed => tr(language, "status_completed"),
+        ProcessUiStatus::Cancelled => tr(language, "status_cancelled"),
+        ProcessUiStatus::Error => tr(language, "status_error"),
+    }
+}
+
+pub(super) fn process_status_message(
+    process: &ProcessState,
+    language: Language,
+    merged_file_size_hint: Option<String>,
+) -> String {
+    match process.ui_status {
+        ProcessUiStatus::Idle => tr(language, "status_idle_hint").to_string(),
+        ProcessUiStatus::Preflight => format!(
+            "{} {}",
+            tr(language, "status_preflight_hint"),
+            process.preflight.scanned_entries
+        ),
+        ProcessUiStatus::Running => process.processing_current_file.clone(),
+        ProcessUiStatus::Completed => {
+            let base = tr(language, "status_completed_hint").to_string();
+            match merged_file_size_hint {
+                Some(size) => format!("{base} ({size})"),
+                None => base,
+            }
+        }
+        ProcessUiStatus::Cancelled => tr(language, "status_cancelled_hint").to_string(),
+        ProcessUiStatus::Error => process
+            .last_error
+            .clone()
+            .unwrap_or_else(|| tr(language, "status_error_hint").to_string()),
+    }
+}
+
+fn workspace_chrome_tone(status: ProcessUiStatus) -> WorkspaceChromeTone {
+    match status {
+        ProcessUiStatus::Idle => WorkspaceChromeTone::Neutral,
+        ProcessUiStatus::Preflight | ProcessUiStatus::Running => WorkspaceChromeTone::Accent,
+        ProcessUiStatus::Completed => WorkspaceChromeTone::Success,
+        ProcessUiStatus::Cancelled => WorkspaceChromeTone::Warning,
+        ProcessUiStatus::Error => WorkspaceChromeTone::Danger,
+    }
 }
 
 #[cfg_attr(not(test), allow(dead_code))]
@@ -217,6 +356,7 @@ pub(super) fn build_preview_table_model(
                     display_path: entry.display_path.clone(),
                     chars: entry.chars,
                     tokens: entry.tokens,
+                    archive: entry.archive.clone(),
                 })
                 .collect::<Vec<_>>()
         })
@@ -234,6 +374,27 @@ pub(super) fn build_preview_table_model(
         rows,
         selected_row_ix,
         next_selected_file_id,
+    }
+}
+
+pub(super) fn summarize_archive_entries(result: Option<&ProcessResult>) -> ArchiveResultSummary {
+    let Some(result) = result else {
+        return ArchiveResultSummary::default();
+    };
+
+    let mut archives = BTreeSet::new();
+    let mut entries = 0usize;
+    for preview in &result.preview_files {
+        let Some(archive) = preview.archive.as_ref() else {
+            continue;
+        };
+        archives.insert(archive.archive_path.clone());
+        entries += 1;
+    }
+
+    ArchiveResultSummary {
+        archives: archives.len(),
+        entries,
     }
 }
 
@@ -408,7 +569,7 @@ fn build_tree_projection_node(
         preview: context
             .preview_files
             .get(node.relative_path.as_str())
-            .copied(),
+            .cloned(),
         child_file_count: node.stats.descendant_files,
         child_folder_count: node.stats.descendant_folders,
         is_filter_match: filter_match.is_some(),
@@ -429,6 +590,7 @@ fn preview_file_map(preview_files: &[PreviewFileEntry]) -> HashMap<String, Previ
                     id: entry.id,
                     chars: entry.chars,
                     tokens: entry.tokens,
+                    archive: entry.archive.clone(),
                 },
             )
         })
@@ -450,11 +612,12 @@ struct TreeProjectionContext<'a> {
     preview_files: &'a HashMap<String, PreviewFileMeta>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct PreviewFileMeta {
     id: u32,
     chars: usize,
     tokens: usize,
+    archive: Option<ArchiveEntrySource>,
 }
 
 #[derive(Clone, Debug)]
@@ -529,9 +692,13 @@ fn append_visible_tree_rows(
         is_folder: node.is_folder,
         depth,
         extension: node.extension.clone().map(SharedString::from),
-        preview_file_id: node.preview.map(|preview| preview.id),
-        preview_chars: node.preview.map(|preview| preview.chars),
-        preview_tokens: node.preview.map(|preview| preview.tokens),
+        preview_file_id: node.preview.as_ref().map(|preview| preview.id),
+        preview_chars: node.preview.as_ref().map(|preview| preview.chars),
+        preview_tokens: node.preview.as_ref().map(|preview| preview.tokens),
+        archive: node
+            .preview
+            .as_ref()
+            .and_then(|preview| preview.archive.clone()),
         child_file_count: node.child_file_count,
         child_folder_count: node.child_folder_count,
         icon_kind: node.icon_kind(context),
@@ -653,16 +820,23 @@ mod tests {
     use std::collections::BTreeSet;
     use std::path::PathBuf;
 
+    use gpui::Decorations;
+
     use super::{
-        TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect,
-        apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
-        build_preview_table_model, build_tree_panel_data, build_tree_projection,
-        build_tree_render_state, icon_kind_for_extension,
+        TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect, WindowChromeMode,
+        WindowZoomAction, WorkspaceChromeTone, apply_preflight_event, apply_tree_interaction,
+        build_blacklist_sections, build_preview_table_model, build_tree_panel_data,
+        build_tree_projection, build_tree_render_state, build_workspace_chrome_view_model,
+        icon_kind_for_extension, process_status_message, process_status_title,
+        resolve_window_chrome_mode, resolve_window_zoom_action, summarize_archive_entries,
     };
-    use crate::domain::{Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode};
+    use crate::domain::{
+        ArchiveEntrySource, Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode,
+    };
     use crate::processor::stats::ProcessingStats;
     use crate::services::preflight::PreflightEvent;
     use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
+    use crate::utils::i18n::tr;
 
     #[test]
     fn stale_preflight_event_does_not_override_current_state() {
@@ -693,12 +867,19 @@ mod tests {
 
     #[test]
     fn preview_table_keeps_selected_row_when_filter_matches() {
-        let result = sample_result();
+        let result = sample_archive_result();
         let model = build_preview_table_model(Some(&result), "lib", Some(2));
 
         assert_eq!(model.rows.len(), 1);
         assert_eq!(model.selected_row_ix, Some(0));
         assert_eq!(model.next_selected_file_id, Some(2));
+        assert_eq!(
+            model.rows[0].archive,
+            Some(ArchiveEntrySource {
+                archive_path: "bundle.zip".to_string(),
+                entry_path: "src/lib.rs".to_string(),
+            })
+        );
     }
 
     #[test]
@@ -717,6 +898,7 @@ mod tests {
                 tokens: 4,
                 preview_blob_path: PathBuf::from("b"),
                 byte_len: 12,
+                archive: None,
             }],
             preview_blob_dir: None,
         };
@@ -786,7 +968,7 @@ mod tests {
 
     #[test]
     fn tree_panel_projection_links_preview_file_and_icons() {
-        let result = sample_result();
+        let result = sample_archive_result();
         let data = build_tree_panel_data(Some(&result));
         let expanded = data
             .as_ref()
@@ -794,18 +976,34 @@ mod tests {
             .unwrap_or_default();
 
         let projection = build_tree_projection(data.as_ref(), "");
-        let render = build_tree_render_state(&projection, false, &expanded, Some("src/lib.rs"));
+        let render =
+            build_tree_render_state(&projection, false, &expanded, Some("bundle.zip/src/lib.rs"));
 
         let lib = render
             .rows
             .iter()
-            .find(|row| row.node_id.as_ref() == "src/lib.rs")
+            .find(|row| row.node_id.as_ref() == "bundle.zip/src/lib.rs")
             .expect("lib row");
         assert_eq!(lib.preview_file_id, Some(2));
         assert_eq!(lib.preview_chars, Some(12));
         assert_eq!(lib.preview_tokens, Some(4));
+        assert_eq!(
+            lib.archive,
+            Some(ArchiveEntrySource {
+                archive_path: "bundle.zip".to_string(),
+                entry_path: "src/lib.rs".to_string(),
+            })
+        );
         assert_eq!(lib.icon_kind, TreeIconKind::Rust);
         assert_eq!(render.selected_row_ix, Some(2));
+    }
+
+    #[test]
+    fn archive_summary_counts_distinct_archives_and_entries() {
+        let summary = summarize_archive_entries(Some(&sample_archive_result()));
+
+        assert_eq!(summary.archives, 1);
+        assert_eq!(summary.entries, 1);
     }
 
     #[test]
@@ -848,6 +1046,109 @@ mod tests {
 
         assert_eq!(render_a.structure_signature, render_b.structure_signature);
         assert_ne!(render_a.selected_row_ix, render_b.selected_row_ix);
+    }
+
+    #[test]
+    fn window_chrome_mode_matches_platform_and_decorations() {
+        assert_eq!(
+            resolve_window_chrome_mode(Decorations::Server, true, false),
+            WindowChromeMode::CustomTitleBar
+        );
+        assert_eq!(
+            resolve_window_chrome_mode(
+                Decorations::Client {
+                    tiling: Default::default(),
+                },
+                false,
+                true,
+            ),
+            WindowChromeMode::CustomTitleBar
+        );
+        assert_eq!(
+            resolve_window_chrome_mode(Decorations::Server, false, true),
+            WindowChromeMode::CompactHeaderFallback
+        );
+    }
+
+    #[test]
+    fn window_zoom_action_uses_restore_for_fullscreen_and_maximized() {
+        assert_eq!(
+            resolve_window_zoom_action(false, false),
+            WindowZoomAction::Maximize
+        );
+        assert_eq!(
+            resolve_window_zoom_action(true, false),
+            WindowZoomAction::Restore
+        );
+        assert_eq!(
+            resolve_window_zoom_action(false, true),
+            WindowZoomAction::Restore
+        );
+    }
+
+    #[test]
+    fn chrome_view_model_maps_all_statuses_to_labels_and_tones() {
+        let cases = [
+            (ProcessUiStatus::Idle, WorkspaceChromeTone::Neutral),
+            (ProcessUiStatus::Preflight, WorkspaceChromeTone::Accent),
+            (ProcessUiStatus::Running, WorkspaceChromeTone::Accent),
+            (ProcessUiStatus::Completed, WorkspaceChromeTone::Success),
+            (ProcessUiStatus::Cancelled, WorkspaceChromeTone::Warning),
+            (ProcessUiStatus::Error, WorkspaceChromeTone::Danger),
+        ];
+
+        for (status, expected_tone) in cases {
+            let mut process = ProcessState {
+                ui_status: status,
+                processing_current_file: "current".to_string(),
+                ..ProcessState::default()
+            };
+            if status == ProcessUiStatus::Preflight {
+                process.preflight.scanned_entries = 42;
+            }
+            if status == ProcessUiStatus::Error {
+                process.last_error = Some("boom".to_string());
+            }
+
+            let vm = build_workspace_chrome_view_model(&process, Language::En, None);
+
+            assert_eq!(
+                vm.status_label.as_ref(),
+                process_status_title(status, Language::En)
+            );
+            assert_eq!(
+                vm.status_message.as_ref(),
+                process_status_message(&process, Language::En, None)
+            );
+            assert_eq!(vm.status_tone, expected_tone);
+        }
+    }
+
+    #[test]
+    fn chrome_view_model_localizes_language_button_and_completed_message() {
+        let process = ProcessState {
+            ui_status: ProcessUiStatus::Completed,
+            ..ProcessState::default()
+        };
+
+        let zh = build_workspace_chrome_view_model(&process, Language::Zh, Some("1.2 MB".into()));
+        let en = build_workspace_chrome_view_model(&process, Language::En, Some("1.2 MB".into()));
+
+        assert_eq!(zh.title.as_ref(), "CodeMerge");
+        assert_eq!(zh.language_button_label.as_ref(), "EN");
+        assert_eq!(en.language_button_label.as_ref(), "中文");
+        assert_eq!(
+            zh.status_label.as_ref(),
+            tr(Language::Zh, "status_completed")
+        );
+        assert_eq!(
+            zh.status_message.as_ref(),
+            format!("{} (1.2 MB)", tr(Language::Zh, "status_completed_hint"))
+        );
+        assert_eq!(
+            en.status_message.as_ref(),
+            format!("{} (1.2 MB)", tr(Language::En, "status_completed_hint"))
+        );
     }
 
     #[test]
@@ -1077,6 +1378,7 @@ mod tests {
                     tokens: 3,
                     preview_blob_path: PathBuf::from("a"),
                     byte_len: 10,
+                    archive: None,
                 },
                 PreviewFileEntry {
                     id: 2,
@@ -1085,8 +1387,51 @@ mod tests {
                     tokens: 4,
                     preview_blob_path: PathBuf::from("b"),
                     byte_len: 12,
+                    archive: None,
                 },
             ],
+            preview_blob_dir: None,
+        }
+    }
+
+    fn sample_archive_result() -> ProcessResult {
+        ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: vec![TreeNode {
+                id: "bundle.zip".to_string(),
+                label: "bundle.zip".to_string(),
+                relative_path: "bundle.zip".to_string(),
+                is_folder: true,
+                children: vec![TreeNode {
+                    id: "bundle.zip/src".to_string(),
+                    label: "src".to_string(),
+                    relative_path: "bundle.zip/src".to_string(),
+                    is_folder: true,
+                    children: vec![TreeNode {
+                        id: "bundle.zip/src/lib.rs".to_string(),
+                        label: "lib.rs".to_string(),
+                        relative_path: "bundle.zip/src/lib.rs".to_string(),
+                        is_folder: false,
+                        children: Vec::new(),
+                    }],
+                }],
+            }],
+            merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".to_string(),
+            file_details: Vec::new(),
+            preview_files: vec![PreviewFileEntry {
+                id: 2,
+                display_path: "bundle.zip/src/lib.rs".to_string(),
+                chars: 12,
+                tokens: 4,
+                preview_blob_path: PathBuf::from("b"),
+                byte_len: 12,
+                archive: Some(ArchiveEntrySource {
+                    archive_path: "bundle.zip".to_string(),
+                    entry_path: "src/lib.rs".to_string(),
+                }),
+            }],
             preview_blob_dir: None,
         }
     }
@@ -1143,6 +1488,7 @@ mod tests {
                     tokens: 3,
                     preview_blob_path: PathBuf::from("a"),
                     byte_len: 10,
+                    archive: None,
                 },
                 PreviewFileEntry {
                     id: 2,
@@ -1151,6 +1497,7 @@ mod tests {
                     tokens: 4,
                     preview_blob_path: PathBuf::from("b"),
                     byte_len: 12,
+                    archive: None,
                 },
             ],
             preview_blob_dir: None,

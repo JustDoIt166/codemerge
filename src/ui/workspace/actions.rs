@@ -5,6 +5,13 @@ use gpui_component::{
     notification::NotificationType,
     table::{TableEvent, TableState},
 };
+#[cfg(target_os = "windows")]
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+#[cfg(target_os = "windows")]
+use windows::Win32::{
+    Foundation::HWND,
+    UI::WindowsAndMessaging::{SW_RESTORE, ShowWindowAsync},
+};
 
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
@@ -154,6 +161,46 @@ impl Workspace {
             cx,
         );
         cx.notify();
+    }
+
+    pub(super) fn minimize_window_chrome(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.minimize_window();
+    }
+
+    pub(super) fn toggle_zoom_window_chrome(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        match model::resolve_window_zoom_action(window.is_maximized(), window.is_fullscreen()) {
+            model::WindowZoomAction::Maximize => window.zoom_window(),
+            model::WindowZoomAction::Restore => {
+                if window.is_fullscreen() {
+                    window.toggle_fullscreen();
+                } else {
+                    let _ = restore_normal_window(window);
+                }
+            }
+        }
+        window.refresh();
+    }
+
+    pub(super) fn close_window_chrome(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        window.remove_window();
     }
 
     pub(super) fn select_folder(
@@ -946,4 +993,27 @@ impl Workspace {
         })
         .detach();
     }
+}
+
+#[cfg(target_os = "windows")]
+fn restore_normal_window(window: &Window) -> bool {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return false;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return false;
+    };
+
+    unsafe {
+        ShowWindowAsync(
+            HWND(handle.hwnd.get() as *mut core::ffi::c_void),
+            SW_RESTORE,
+        )
+    }
+    .as_bool()
+}
+
+#[cfg(not(target_os = "windows"))]
+fn restore_normal_window(_: &Window) -> bool {
+    false
 }

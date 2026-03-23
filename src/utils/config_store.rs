@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::domain::AppConfigV1;
+use crate::domain::{AppConfigV1, default_ext_blacklist};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -44,7 +44,7 @@ pub fn load_config_report_from_path(path: &Path) -> ConfigLoadReport {
     match std::fs::read_to_string(path) {
         Ok(content) => match serde_json::from_str(&content) {
             Ok(config) => ConfigLoadReport {
-                config,
+                config: migrate_config(config),
                 issue: None,
                 path: Some(path.to_path_buf()),
             },
@@ -99,6 +99,25 @@ pub fn save_config_to_path(cfg: &AppConfigV1, path: &Path) -> AppResult<()> {
     temp.persist(path)
         .map_err(|err| AppError::new(format!("persist config failed: {err}")))?;
     Ok(())
+}
+
+fn migrate_config(mut config: AppConfigV1) -> AppConfigV1 {
+    if config.ext_blacklist == legacy_default_ext_blacklist() {
+        config.ext_blacklist = default_ext_blacklist();
+    }
+    config
+}
+
+fn legacy_default_ext_blacklist() -> Vec<String> {
+    [
+        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico", ".mp3", ".wav", ".ogg",
+        ".flac", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".pdf", ".zip", ".rar", ".7z",
+        ".tar", ".gz", ".xz", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".ttf", ".woff",
+        ".woff2", ".eot", ".otf", ".db", ".sqlite",
+    ]
+    .iter()
+    .map(|v| (*v).to_string())
+    .collect()
 }
 
 #[cfg(test)]
@@ -191,5 +210,45 @@ mod tests {
         let report = load_config_report_from_path(dir.path());
 
         assert!(matches!(report.issue, Some(ConfigLoadIssue::ReadFailed(_))));
+    }
+
+    #[test]
+    fn load_migrates_legacy_default_zip_blacklist() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        let config = AppConfigV1 {
+            ext_blacklist: super::legacy_default_ext_blacklist(),
+            ..AppConfigV1::default()
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&config).expect("serialize config"),
+        )
+        .expect("write config");
+
+        let report = load_config_report_from_path(&path);
+
+        assert_eq!(report.issue, None);
+        assert!(!report.config.ext_blacklist.iter().any(|ext| ext == ".zip"));
+    }
+
+    #[test]
+    fn load_preserves_custom_zip_blacklist_choice() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("config.json");
+        let config = AppConfigV1 {
+            ext_blacklist: vec![".zip".to_string(), ".log".to_string()],
+            ..AppConfigV1::default()
+        };
+        std::fs::write(
+            &path,
+            serde_json::to_string_pretty(&config).expect("serialize config"),
+        )
+        .expect("write config");
+
+        let report = load_config_report_from_path(&path);
+
+        assert_eq!(report.issue, None);
+        assert_eq!(report.config.ext_blacklist, config.ext_blacklist);
     }
 }

@@ -13,6 +13,11 @@ pub async fn read_text(path: &Path) -> Result<String, String> {
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
+pub fn read_text_blocking(path: &Path) -> Result<String, String> {
+    let bytes = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+    Ok(String::from_utf8_lossy(&bytes).to_string())
+}
+
 pub fn count_chars_tokens(content: &str) -> (usize, usize) {
     let chars = content.chars().count();
     let tokens = TOKEN_RE.find_iter(content).count();
