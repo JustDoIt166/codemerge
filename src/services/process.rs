@@ -137,6 +137,7 @@ async fn run_process_with_walker(
     let tree_nodes = build_tree_nodes(&walker.candidates);
     let suggested_result_name = suggested_merge_result_name(
         request.selected_folder.as_deref(),
+        &request.selected_files,
         request.options.output_format,
     );
     let mut stats = ProcessingStats {
