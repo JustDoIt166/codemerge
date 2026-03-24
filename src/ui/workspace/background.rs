@@ -14,7 +14,7 @@ use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
-    fn sync_tree_selection_for_preview_file(
+    pub(super) fn sync_tree_selection_for_preview_file(
         &mut self,
         file_id: u32,
         cx: &mut Context<Self>,
@@ -387,6 +387,7 @@ impl Workspace {
             self.tree_panel.render_state.structure_signature != render_state.structure_signature;
         let selected_changed =
             self.tree_panel.render_state.selected_row_ix != render_state.selected_row_ix;
+        self.suppress_tree_interaction_sync.set(true);
         self.tree_panel.state.update(cx, |state, tree_cx| {
             if replace_items {
                 perf::record_tree_set_items();
@@ -395,6 +396,10 @@ impl Workspace {
             if replace_items || selected_changed {
                 state.set_selected_index(render_state.selected_row_ix, tree_cx);
             }
+        });
+        let tree_interaction_guard = self.suppress_tree_interaction_sync.clone();
+        cx.defer(move |_| {
+            tree_interaction_guard.set(false);
         });
         self.tree_panel.render_state = render_state;
     }
@@ -485,6 +490,7 @@ impl Workspace {
                 result_cx.notify();
             }
         });
+        self.suppress_preview_table_events = true;
         self.preview_table.update(cx, |table, cx| {
             let prev_rows = table.delegate().rows.clone();
             table.delegate_mut().rows = table_model.rows;
@@ -499,6 +505,7 @@ impl Workspace {
                 cx.notify();
             }
         });
+        self.suppress_preview_table_events = false;
     }
 
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
@@ -550,6 +557,9 @@ impl Workspace {
     }
 
     pub(super) fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.suppress_tree_interaction_sync.get() {
+            return false;
+        }
         let next = self.current_tree_interaction_snapshot(cx);
         let effect = model::apply_tree_interaction(
             &mut self.state.workspace.tree_panel,

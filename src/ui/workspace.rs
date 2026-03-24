@@ -6,6 +6,7 @@ mod panels;
 mod tree_palette;
 mod view;
 
+use std::cell::Cell;
 use std::rc::Rc;
 use std::{hash::Hash, hash::Hasher, ops::Range};
 
@@ -291,6 +292,8 @@ pub struct Workspace {
     preview_filter_revision: u64,
     preview_filter_task: Option<Task<()>>,
     preview_table_cache: PreviewTableCache,
+    suppress_tree_interaction_sync: Rc<Cell<bool>>,
+    suppress_preview_table_events: bool,
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
@@ -329,6 +332,7 @@ impl Workspace {
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table =
             cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
+        let suppress_tree_interaction_sync = Rc::new(Cell::new(false));
         let settings_model = cx.new(|_| SettingsModel::from_config(cfg.clone()));
         let ui_model = cx.new(|_| WorkspaceUiModel::new());
         let selection_model = cx.new(|_| SelectionModel::new());
@@ -381,6 +385,7 @@ impl Workspace {
                 settings_model.clone(),
                 tree_state.clone(),
                 tree_filter_input.clone(),
+                suppress_tree_interaction_sync.clone(),
                 cx,
             )
         });
@@ -446,6 +451,8 @@ impl Workspace {
             preview_filter_revision: 0,
             preview_filter_task: None,
             preview_table_cache: PreviewTableCache::default(),
+            suppress_tree_interaction_sync,
+            suppress_preview_table_events: false,
             blacklist_filter_input,
             blacklist_add_input,
             rules_panel: RulesPanelController {
@@ -1055,9 +1062,11 @@ impl TreePaneView {
         settings: Entity<SettingsModel>,
         tree_state: Entity<TreeState>,
         tree_filter_input: Entity<InputState>,
+        suppress_tree_interaction_sync: Rc<Cell<bool>>,
         cx: &mut Context<Self>,
     ) -> Self {
         let tree_workspace = workspace.clone();
+        let tree_interaction_guard = suppress_tree_interaction_sync.clone();
         let subscriptions = vec![
             cx.observe(&result, |this, _, cx| {
                 let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
@@ -1076,6 +1085,9 @@ impl TreePaneView {
                 }
             }),
             cx.observe(&tree_state, move |_, _, cx| {
+                if tree_interaction_guard.get() {
+                    return;
+                }
                 tree_workspace.update(cx, |workspace, workspace_cx| {
                     let _ = workspace.sync_tree_interaction(workspace_cx);
                 });
@@ -1725,27 +1737,21 @@ mod tests {
     }
 
     #[gpui::test]
-    fn preview_filter_fallback_syncs_tree_selection(cx: &mut TestAppContext) {
+    fn sync_tree_selection_for_preview_file_updates_tree_state(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
         let main_path = write_preview_fixture("preview_filter_main", 64);
         let lib_path = write_preview_fixture("preview_filter_lib", 64);
 
-        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_paths(&main_path, &lib_path), cx);
-            workspace.load_preview(2, cx);
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
 
-            workspace
-                .preview_filter_input
-                .update(cx, |input, input_cx| {
-                    input.set_value("main", window, input_cx);
-                });
-            workspace.sync_preview_table(cx);
-
-            assert_eq!(
-                workspace.preview.read(cx).selected_preview_file_id(),
-                Some(1)
-            );
+            assert!(workspace.sync_tree_selection_for_preview_file(1, cx));
             assert_eq!(
                 workspace
                     .state

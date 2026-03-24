@@ -141,6 +141,9 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        if self.suppress_preview_table_events {
+            return;
+        }
         if let TableEvent::SelectRow(ix) | TableEvent::DoubleClickedRow(ix) = event
             && let Some(row) = table.read(cx).delegate().rows.get(*ix)
             && self.preview.read(cx).selected_preview_file_id() != Some(row.id)
@@ -419,8 +422,13 @@ impl Workspace {
             process.clear_runtime(status_ready);
             process_cx.notify();
         });
+        self.suppress_tree_interaction_sync.set(true);
         self.tree_panel.state.update(cx, |state, tree_cx| {
             state.set_selected_index(None, tree_cx);
+        });
+        let tree_interaction_guard = self.suppress_tree_interaction_sync.clone();
+        cx.defer(move |_| {
+            tree_interaction_guard.set(false);
         });
         self.tree_panel.data = None;
         self.tree_panel.projection = model::TreeProjectionState::default();
