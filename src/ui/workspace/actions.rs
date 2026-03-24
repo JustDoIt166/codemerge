@@ -94,6 +94,10 @@ impl Workspace {
         });
     }
 
+    pub(super) fn handle_preview_filter_change(&mut self, cx: &mut Context<Self>) {
+        self.schedule_preview_table_sync(cx);
+    }
+
     pub(super) fn on_preview_filter_event(
         &mut self,
         _: &Entity<InputState>,
@@ -102,8 +106,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
-            self.clear_preview_state(cx);
-            self.schedule_preview_table_sync(cx);
+            self.handle_preview_filter_change(cx);
         }
     }
 
@@ -140,8 +143,9 @@ impl Workspace {
     ) {
         if let TableEvent::SelectRow(ix) | TableEvent::DoubleClickedRow(ix) = event
             && let Some(row) = table.read(cx).delegate().rows.get(*ix)
+            && self.preview.read(cx).selected_preview_file_id() != Some(row.id)
         {
-            self.load_preview(row.id, cx);
+            self.open_preview_file_from_results(row.id, true, cx);
         }
     }
 
@@ -874,6 +878,20 @@ impl Workspace {
         };
         self.ui.update(cx, |ui, ui_cx| {
             if ui.set_narrow_content_tab(tab) {
+                ui_cx.notify();
+            }
+        });
+    }
+
+    pub(super) fn toggle_content_file_list_collapsed(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.ui.update(cx, |ui, ui_cx| {
+            let collapsed = !ui.state().content_file_list_collapsed;
+            if ui.set_content_file_list_collapsed(collapsed) {
                 ui_cx.notify();
             }
         });

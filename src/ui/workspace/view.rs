@@ -508,6 +508,16 @@ pub(super) fn card(cx: &App) -> Card {
     Card::new()
 }
 
+pub(super) fn flow_card(cx: &App) -> Div {
+    div()
+        .w_full()
+        .p_4()
+        .border_1()
+        .border_color(cx.theme().border)
+        .bg(cx.theme().background)
+        .rounded(cx.theme().radius)
+}
+
 pub(super) fn panel_viewport(content: AnyElement, min_height: gpui::Pixels) -> gpui::Div {
     div().size_full().min_h(px(0.)).overflow_hidden().child(
         div()

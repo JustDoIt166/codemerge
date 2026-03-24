@@ -248,7 +248,6 @@ struct PreviewPaneView {
     preview: Entity<PreviewModel>,
     result: Entity<ResultModel>,
     settings: Entity<SettingsModel>,
-    merged_content_input: Entity<InputState>,
     scroll_handle: UniformListScrollHandle,
     last_requested_load_range: Range<usize>,
     render_cache_range: Range<usize>,
@@ -258,7 +257,6 @@ struct PreviewPaneView {
     last_synced_visible_range: Option<Range<usize>>,
     scheduled_visible_sync: bool,
     last_scroll_anchor: usize,
-    merged_content_revision: u64,
     last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
@@ -338,13 +336,6 @@ impl Workspace {
             cx.new(|_| ProcessModel::new(tr(cfg.language, "status_ready").to_string()));
         let result_model = cx.new(|_| ResultModel::new());
         let preview_model = cx.new(|_| PreviewModel::new());
-        let merged_content_input = cx.new(|cx| {
-            InputState::new(window, cx)
-                .code_editor("text")
-                .searchable(false)
-                .soft_wrap(false)
-                .rows(24)
-        });
         let workspace_entity = cx.entity();
         let input_panel_view = cx.new(|cx| {
             InputPanelView::new(
@@ -378,6 +369,7 @@ impl Workspace {
                 workspace_entity.clone(),
                 result_model.clone(),
                 settings_model.clone(),
+                ui_model.clone(),
                 preview_filter_input.clone(),
                 cx,
             )
@@ -398,7 +390,6 @@ impl Workspace {
                 preview_model.clone(),
                 result_model.clone(),
                 settings_model.clone(),
-                merged_content_input.clone(),
                 cx,
             )
         });
@@ -676,6 +667,7 @@ impl Workspace {
             selection.selected_files,
             selection.gitignore_file,
             selection.gitignore_rules,
+            ui.selected_files_panel_height,
             ui.pending_confirmation,
         ))
     }
@@ -746,6 +738,7 @@ impl Workspace {
     fn results_panel_invalidation_key(&self, cx: &App) -> u64 {
         let result = self.result.read(cx).state();
         let filter = self.preview_filter_input.read(cx).value().to_string();
+        let ui = self.ui.read(cx).state();
         Self::hash_value(&(
             self.settings.read(cx).language(),
             result.active_tab,
@@ -756,6 +749,7 @@ impl Workspace {
                     result.merged_content_path.is_some(),
                 )
             }),
+            ui.content_file_list_collapsed,
             filter,
         ))
     }
@@ -796,20 +790,27 @@ impl Workspace {
 
     fn preview_pane_invalidation_key(&self, cx: &App) -> u64 {
         let preview = self.preview.read(cx);
-        let result = self.result.read(cx).state();
         let state = preview.state();
         Self::hash_value(&(
             self.settings.read(cx).language(),
             preview.render_revision(),
             state.selected_preview_file_id,
             state.preview_error.as_deref(),
-            result.preview_rows.clone(),
         ))
     }
 
     fn workspace_panel_invalidation_key(&self, kind: WorkspacePanelKind, cx: &App) -> u64 {
         let ui = self.ui.read(cx).state();
-        Self::hash_value(&(self.settings.read(cx).language(), ui, kind))
+        match kind {
+            WorkspacePanelKind::Right => {
+                Self::hash_value(&(self.settings.read(cx).language(), ui.side_panel_tab, kind))
+            }
+            WorkspacePanelKind::CompactContent => Self::hash_value(&(
+                self.settings.read(cx).language(),
+                ui.narrow_content_tab,
+                kind,
+            )),
+        }
     }
 }
 
@@ -1001,6 +1002,7 @@ impl ResultsPanelView {
         workspace: Entity<Workspace>,
         result: Entity<ResultModel>,
         settings: Entity<SettingsModel>,
+        ui: Entity<WorkspaceUiModel>,
         preview_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
@@ -1014,6 +1016,14 @@ impl ResultsPanelView {
                 }
             }),
             cx.observe(&settings, |this, _, cx| {
+                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
+                if this.last_invalidation_key != key {
+                    this.last_invalidation_key = key;
+                    perf::record_workspace_view_notify();
+                    cx.notify();
+                }
+            }),
+            cx.observe(&ui, |this, _, cx| {
                 let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
                 if this.last_invalidation_key != key {
                     this.last_invalidation_key = key;
@@ -1094,7 +1104,6 @@ impl PreviewPaneView {
         preview: Entity<PreviewModel>,
         result: Entity<ResultModel>,
         settings: Entity<SettingsModel>,
-        merged_content_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
@@ -1129,7 +1138,6 @@ impl PreviewPaneView {
             preview,
             result,
             settings,
-            merged_content_input,
             scroll_handle: UniformListScrollHandle::new(),
             last_requested_load_range: 0..0,
             render_cache_range: 0..0,
@@ -1139,7 +1147,6 @@ impl PreviewPaneView {
             last_synced_visible_range: None,
             scheduled_visible_sync: false,
             last_scroll_anchor: 0,
-            merged_content_revision: 0,
             last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
@@ -1235,12 +1242,12 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::Workspace;
+    use super::{Workspace, WorkspacePanelKind};
     use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
     use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
     use crate::ui::{perf, preview_model::PreviewModel};
-    use gpui::{AppContext as _, Entity, TestAppContext};
+    use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
@@ -1268,7 +1275,7 @@ mod tests {
 
         let preview = cx.new(|_| PreviewModel::new());
         preview.update(cx, |preview: &mut PreviewModel, _| {
-            let request = preview.open_preview(7, path.clone(), false);
+            let request = preview.open_preview(7, path.clone());
             let revision = match request {
                 PreviewRequest::Open { revision, .. } => revision,
                 _ => unreachable!(),
@@ -1280,7 +1287,6 @@ mod tests {
                 document,
                 loaded_range: 0..512,
                 lines: (0..512).map(|ix| format!("line-{ix}")).collect(),
-                full_text: None,
             });
         });
 
@@ -1337,6 +1343,66 @@ mod tests {
             let second_key = workspace.tree_pane_invalidation_key(cx);
 
             assert_ne!(first_key, second_key);
+        });
+    }
+
+    #[gpui::test]
+    fn results_panel_invalidation_key_tracks_content_file_list_fold(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let first_key = workspace.results_panel_invalidation_key(cx);
+            workspace.ui.update(cx, |ui, ui_cx| {
+                let changed = ui.set_content_file_list_collapsed(true);
+                assert!(changed);
+                ui_cx.notify();
+            });
+            let second_key = workspace.results_panel_invalidation_key(cx);
+
+            assert_ne!(first_key, second_key);
+        });
+    }
+
+    #[gpui::test]
+    fn input_panel_invalidation_key_tracks_selected_files_panel_height_changes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let first_key = workspace.input_panel_invalidation_key(cx);
+            workspace.ui.update(cx, |ui, ui_cx| {
+                let changed = ui.set_selected_files_panel_height(320);
+                assert!(changed);
+                ui_cx.notify();
+            });
+            let second_key = workspace.input_panel_invalidation_key(cx);
+
+            assert_ne!(first_key, second_key);
+        });
+    }
+
+    #[gpui::test]
+    fn workspace_panel_invalidation_key_ignores_selected_files_panel_height_changes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let first_key =
+                workspace.workspace_panel_invalidation_key(WorkspacePanelKind::Right, cx);
+            workspace.ui.update(cx, |ui, ui_cx| {
+                let changed = ui.set_selected_files_panel_height(320);
+                assert!(changed);
+                ui_cx.notify();
+            });
+            let second_key =
+                workspace.workspace_panel_invalidation_key(WorkspacePanelKind::Right, cx);
+
+            assert_eq!(first_key, second_key);
         });
     }
 
@@ -1556,22 +1622,151 @@ mod tests {
             .expect("preview open event")
         {
             PreviewEvent::Opened {
-                file_id,
-                document,
-                full_text,
-                ..
+                file_id, document, ..
             } => {
                 assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
                 assert_eq!(document.path(), path.as_path());
-                assert_eq!(
-                    full_text.as_deref(),
-                    Some(fs::read_to_string(&path).expect("read merged").as_str())
-                );
             }
             other => panic!("unexpected event: {other:?}"),
         }
 
         let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn merged_content_preview_uses_virtualized_render_cache(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("merged_content_virtualized", 512);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            seed_preview_model(
+                &workspace.preview,
+                &path,
+                cx,
+                0..128,
+                super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            );
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.refresh_render_cache(0..64, cx);
+                let rows = view.render_lines_for(0..3, cx);
+
+                assert_eq!(
+                    rows.iter()
+                        .map(|row| row.text.to_string())
+                        .collect::<Vec<_>>(),
+                    vec![
+                        "line-0".to_string(),
+                        "line-1".to_string(),
+                        "line-2".to_string(),
+                    ]
+                );
+                assert!(rows.iter().all(|row| !row.missing));
+            });
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn merged_content_preview_survives_preview_table_sync(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("merged_content_sync", 128);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            seed_preview_model(
+                &workspace.preview,
+                &path,
+                cx,
+                0..64,
+                super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            );
+
+            workspace.sync_preview_table(cx);
+
+            let preview = workspace.preview.read(cx);
+            assert_eq!(
+                preview.selected_preview_file_id(),
+                Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
+            );
+            assert!(preview.preview_document().is_some());
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_filter_change_keeps_current_preview_until_sync(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_filter_preserve", 64);
+
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            workspace.set_result(sample_result_with_second_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..32, 2);
+
+            workspace
+                .preview_filter_input
+                .update(cx, |input, input_cx| {
+                    input.set_value("src", window, input_cx);
+                });
+            workspace.handle_preview_filter_change(cx);
+
+            let preview = workspace.preview.read(cx);
+            assert_eq!(preview.selected_preview_file_id(), Some(2));
+            assert!(preview.preview_document().is_some());
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_filter_fallback_syncs_tree_selection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let main_path = write_preview_fixture("preview_filter_main", 64);
+        let lib_path = write_preview_fixture("preview_filter_lib", 64);
+
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            workspace.set_result(sample_result_with_paths(&main_path, &lib_path), cx);
+            workspace.load_preview(2, cx);
+
+            workspace
+                .preview_filter_input
+                .update(cx, |input, input_cx| {
+                    input.set_value("main", window, input_cx);
+                });
+            workspace.sync_preview_table(cx);
+
+            assert_eq!(
+                workspace.preview.read(cx).selected_preview_file_id(),
+                Some(1)
+            );
+            assert_eq!(
+                workspace
+                    .state
+                    .workspace
+                    .tree_panel
+                    .selected_node_id
+                    .as_deref(),
+                Some("src/main.rs")
+            );
+            assert!(
+                workspace
+                    .state
+                    .workspace
+                    .tree_panel
+                    .expanded_ids
+                    .contains("src")
+            );
+        });
+
+        let _ = fs::remove_file(main_path);
+        let _ = fs::remove_file(lib_path);
     }
 
     fn sample_result() -> ProcessResult {
@@ -1642,6 +1837,22 @@ mod tests {
         result
     }
 
+    fn sample_result_with_second_path(path: &std::path::Path) -> ProcessResult {
+        let mut result = sample_result();
+        result.preview_files[1].preview_blob_path = path.to_path_buf();
+        result
+    }
+
+    fn sample_result_with_paths(
+        main_path: &std::path::Path,
+        lib_path: &std::path::Path,
+    ) -> ProcessResult {
+        let mut result = sample_result();
+        result.preview_files[0].preview_blob_path = main_path.to_path_buf();
+        result.preview_files[1].preview_blob_path = lib_path.to_path_buf();
+        result
+    }
+
     fn sample_result_with_merged_content_path(path: &std::path::Path) -> ProcessResult {
         let mut result = sample_result();
         result.merged_content_path = Some(path.to_path_buf());
@@ -1657,7 +1868,7 @@ mod tests {
         file_id: u32,
     ) {
         preview.update(cx, |preview: &mut PreviewModel, _| {
-            let request = preview.open_preview(file_id, path.to_path_buf(), false);
+            let request = preview.open_preview(file_id, path.to_path_buf());
             let revision = match request {
                 PreviewRequest::Open { revision, .. } => revision,
                 _ => unreachable!(),
@@ -1672,7 +1883,6 @@ mod tests {
                     .clone()
                     .map(|ix| format!("line-{ix}"))
                     .collect(),
-                full_text: None,
             });
         });
     }

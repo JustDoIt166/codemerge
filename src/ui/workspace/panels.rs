@@ -1,8 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, IntoElement, ListSizingBehavior, ParentElement, Styled, Window, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    App, AppContext as _, Context, DragMoveEvent, Empty, InteractiveElement, IntoElement,
+    ListSizingBehavior, ParentElement, Render, StatefulInteractiveElement as _, Styled, Window,
+    div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable, IconName, Sizable, Size,
@@ -16,12 +17,13 @@ use gpui_component::{
     scroll::ScrollableElement,
     tab::Tab,
     tab::TabBar,
+    table::Table,
     tree::tree,
     v_flex, v_virtual_list,
 };
 
 use super::view::{
-    activity_row, card, empty_box, format_duration, format_tree_summary, panel_frame,
+    activity_row, card, empty_box, flow_card, format_duration, format_tree_summary, panel_frame,
     panel_viewport, process_status_message, process_status_title, render_blacklist_section,
     render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
     section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
@@ -35,6 +37,18 @@ use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
+
+#[derive(Clone)]
+struct SelectedFilesResizeDrag {
+    start_height: u16,
+    start_y: gpui::Pixels,
+}
+
+impl Render for SelectedFilesResizeDrag {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 impl Workspace {
     fn render_process_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -69,6 +83,8 @@ impl Workspace {
         let language = settings.language;
         let has_inputs = self.has_inputs(cx);
         let selected_files = Rc::new(selection.selected_files.clone());
+        let selected_files_panel_height = px(f32::from(ui_state.selected_files_panel_height));
+        let resize_ui = self.ui.clone();
         let folder_label = self
             .selection_snapshot(cx)
             .selected_folder
@@ -91,10 +107,10 @@ impl Workspace {
                 }
             });
 
-        card(cx).size_full().child(
+        flow_card(cx).child(
             v_flex()
                 .gap_4()
-                .size_full()
+                .w_full()
                 .child(section_title(
                     tr(language, "panel_inputs"),
                     IconName::PanelLeft,
@@ -154,25 +170,72 @@ impl Workspace {
                             .into_any_element()
                         } else {
                             let rows = selected_files.clone();
-                            div()
-                                .h(px(180.))
-                                .border_1()
-                                .border_color(cx.theme().border)
-                                .rounded(px(12.))
-                                .bg(cx.theme().secondary.opacity(0.22))
+                            let resize_ui_for_drag = resize_ui.clone();
+                            let resize_handle = h_flex()
+                                .id("selected-files-resize-handle")
+                                .w_full()
+                                .h(px(18.))
+                                .justify_center()
+                                .items_center()
+                                .cursor_row_resize()
+                                .on_drag(
+                                    ui_state.selected_files_panel_height,
+                                    move |start_height: &u16,
+                                          position: gpui::Point<gpui::Pixels>,
+                                          _: &mut Window,
+                                          cx: &mut App| {
+                                        cx.stop_propagation();
+                                        cx.new(|_| SelectedFilesResizeDrag {
+                                            start_height: *start_height,
+                                            start_y: position.y,
+                                        })
+                                    },
+                                )
+                                .on_drag_move(
+                                    move |event: &DragMoveEvent<SelectedFilesResizeDrag>,
+                                          _: &mut Window,
+                                          cx: &mut App| {
+                                        let drag = event.drag(cx);
+                                        let delta =
+                                            f32::from(event.event.position.y - drag.start_y);
+                                        let next_height =
+                                            (f32::from(drag.start_height) + delta).round().max(0.0)
+                                                as u16;
+                                        resize_ui_for_drag.update(cx, |ui, ui_cx| {
+                                            if ui.set_selected_files_panel_height(next_height) {
+                                                ui_cx.notify();
+                                            }
+                                        });
+                                    },
+                                );
+                            v_flex()
+                                .gap_1()
                                 .child(
-                                    v_virtual_list(
-                                        cx.entity().clone(),
-                                        "selected-files",
-                                        fixed_list_sizes(rows.len(), px(52.)),
-                                        move |_, visible_range, _, cx| {
-                                            visible_range
-                                                .filter_map(|ix| rows.get(ix))
-                                                .map(|entry| selected_file_row(entry, cx))
-                                                .collect::<Vec<_>>()
-                                        },
-                                    )
-                                    .p_1(),
+                                    div()
+                                        .w_full()
+                                        .min_h(selected_files_panel_height)
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .rounded(px(12.))
+                                        .bg(cx.theme().secondary.opacity(0.22))
+                                        .child(
+                                            v_flex()
+                                                .w_full()
+                                                .children(
+                                                    rows.iter()
+                                                        .map(|entry| selected_file_row(entry, cx)),
+                                                )
+                                                .p_1(),
+                                        ),
+                                )
+                                .child(
+                                    resize_handle.child(
+                                        div()
+                                            .w(px(52.))
+                                            .h(px(4.))
+                                            .rounded(px(999.))
+                                            .bg(cx.theme().border.opacity(0.85)),
+                                    ),
                                 )
                                 .into_any_element()
                         }),
@@ -791,7 +854,24 @@ impl Workspace {
 
     pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
+        let ui_state = self.ui_state(cx);
         let tree_only = self.result_is_tree_only(cx);
+        let result_state = self.result.read(cx).state().clone();
+        let preview_filter_input = self.preview_filter_input.clone();
+        let preview_table = self.preview_table.clone();
+        let filter_active = !preview_filter_input.read(cx).value().trim().is_empty();
+        let has_visible_rows = !result_state.preview_rows.is_empty();
+        let file_list_collapsed = ui_state.content_file_list_collapsed;
+        let file_list_toggle_label = if file_list_collapsed {
+            tr(language, "content_files_expand")
+        } else {
+            tr(language, "content_files_collapse")
+        };
+        let file_list_toggle_icon = if file_list_collapsed {
+            IconName::ChevronDown
+        } else {
+            IconName::ChevronUp
+        };
 
         if tree_only {
             return v_flex()
@@ -811,7 +891,122 @@ impl Workspace {
             .gap_3()
             .size_full()
             .min_h(px(0.))
-            .child(self.preview_pane_view.clone())
+            .child(
+                div()
+                    .flex_none()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(14.))
+                    .bg(cx.theme().secondary.opacity(0.18))
+                    .p_3()
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .justify_between()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(
+                                        h_flex()
+                                            .items_center()
+                                            .gap_3()
+                                            .child(section_caption(
+                                                tr(language, "content_files_title"),
+                                                IconName::File,
+                                                cx,
+                                            ))
+                                            .child(
+                                                div()
+                                                    .text_sm()
+                                                    .text_color(cx.theme().muted_foreground)
+                                                    .child(
+                                                        result_state.preview_rows.len().to_string(),
+                                                    ),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("toggle-content-file-list")
+                                            .ghost()
+                                            .compact()
+                                            .with_size(Size::Small)
+                                            .icon(file_list_toggle_icon)
+                                            .label(file_list_toggle_label)
+                                            .on_click(cx.listener(
+                                                Self::toggle_content_file_list_collapsed,
+                                            )),
+                                    ),
+                            )
+                            .when(!file_list_collapsed, |this| {
+                                this.child(
+                                    Input::new(&preview_filter_input)
+                                        .prefix(IconName::Search)
+                                        .cleanable(true),
+                                )
+                                .child(
+                                    div()
+                                        .h(px(280.))
+                                        .overflow_hidden()
+                                        .border_1()
+                                        .border_color(cx.theme().border)
+                                        .rounded(px(14.))
+                                        .bg(cx.theme().secondary.opacity(0.35))
+                                        .child(if has_visible_rows {
+                                            Table::new(&preview_table)
+                                                .with_size(Size::Small)
+                                                .bordered(false)
+                                                .stripe(true)
+                                                .into_any_element()
+                                        } else {
+                                            empty_box(
+                                                if filter_active {
+                                                    tr(language, "content_no_match")
+                                                } else {
+                                                    tr(language, "content_empty")
+                                                },
+                                                if filter_active {
+                                                    tr(language, "content_no_match_hint")
+                                                } else {
+                                                    tr(language, "content_empty_hint")
+                                                },
+                                                IconName::File,
+                                                cx,
+                                            )
+                                            .into_any_element()
+                                        }),
+                                )
+                            }),
+                    ),
+            )
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(14.))
+                    .bg(cx.theme().secondary.opacity(0.18))
+                    .p_3()
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .size_full()
+                            .min_h(px(0.))
+                            .child(section_caption(
+                                tr(language, "content_preview_title"),
+                                IconName::SquareTerminal,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .overflow_hidden()
+                                    .child(self.preview_pane_view.clone()),
+                            ),
+                    ),
+            )
             .into_any_element()
     }
 
@@ -1131,29 +1326,35 @@ impl PreviewPaneView {
 
     pub(super) fn render_preview_pane(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = self.settings.read(cx).language();
         let result_state = self.result.read(cx).state().clone();
-        let (preview_error, preview_document, selected_preview_id, preview_text, preview_revision) = {
+        let (preview_error, preview_document, selected_preview_id) = {
             let preview = self.preview.read(cx);
             (
                 preview.state().preview_error.clone(),
                 preview.preview_document().cloned(),
                 preview.selected_preview_file_id(),
-                preview.preview_text(),
-                preview.preview_revision(),
             )
         };
         let selected_preview = selected_preview_id
-            .and_then(|id| result_state.preview_rows.iter().find(|row| row.id == id));
-        let selected_archive = selected_preview.and_then(|row| row.archive.clone());
+            .and_then(|id| super::model::preview_file_row(result_state.result.as_ref(), id));
+        let selected_archive = selected_preview
+            .as_ref()
+            .and_then(|row| row.archive.clone());
 
         if let Some(error) = preview_error.as_ref() {
-            let preview_failure_title = selected_preview
-                .map(|row| row.display_path.clone())
-                .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string());
+            let preview_failure_title =
+                if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
+                    tr(language, "tab_merged_content").to_string()
+                } else {
+                    selected_preview
+                        .as_ref()
+                        .map(|row| row.display_path.clone())
+                        .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string())
+                };
             let title = format!(
                 "{}: {}",
                 tr(language, "status_error"),
@@ -1176,11 +1377,11 @@ impl PreviewPaneView {
             tr(language, "tab_merged_content").to_string()
         } else {
             selected_preview
+                .as_ref()
                 .map(|row| row.display_path.clone())
                 .unwrap_or_else(|| document.path().display().to_string())
         };
         let line_count = document.line_count();
-        let is_merged_content = selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID);
         self.flush_pending_visible_range(cx);
         if self.render_cache_range.is_empty() && line_count > 0 {
             let initial =
@@ -1192,7 +1393,7 @@ impl PreviewPaneView {
 
         v_flex()
             .gap_2()
-            .flex_1()
+            .size_full()
             .min_h(px(0.))
             .child(render_kv(tr(language, "table_path"), file_path, cx))
             .when_some(selected_archive.as_ref(), |this, archive| {
@@ -1225,27 +1426,12 @@ impl PreviewPaneView {
                 div()
                     .relative()
                     .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
                     .border_1()
                     .border_color(cx.theme().border)
                     .rounded(cx.theme().radius)
-                    .child(if is_merged_content {
-                        if let Some(text) = preview_text {
-                            self.sync_merged_content_input(text, preview_revision, window, cx);
-                            Input::new(&self.merged_content_input)
-                                .appearance(false)
-                                .disabled(true)
-                                .h_full()
-                                .into_any_element()
-                        } else {
-                            empty_box(
-                                tr(language, "preview_empty"),
-                                tr(language, "preview_empty_hint"),
-                                IconName::File,
-                                cx,
-                            )
-                            .into_any_element()
-                        }
-                    } else {
+                    .child(
                         uniform_list(
                             "preview-lines",
                             line_count,
@@ -1291,27 +1477,11 @@ impl PreviewPaneView {
                             ),
                         )
                         .track_scroll(self.scroll_handle.clone())
+                        .h_full()
                         .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .p_2()
-                        .into_any_element()
-                    }),
+                        .p_2(),
+                    ),
             )
-    }
-
-    fn sync_merged_content_input(
-        &mut self,
-        text: gpui::SharedString,
-        preview_revision: u64,
-        window: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        if self.merged_content_revision == preview_revision {
-            return;
-        }
-        self.merged_content_input.update(cx, |input, input_cx| {
-            input.set_value(text, window, input_cx);
-        });
-        self.merged_content_revision = preview_revision;
     }
 
     pub(super) fn queue_visible_range_sync(

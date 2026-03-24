@@ -47,11 +47,36 @@ pub enum PendingConfirmation {
     ClearBlacklist,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub const DEFAULT_SELECTED_FILES_PANEL_HEIGHT: u16 = 180;
+pub const MIN_SELECTED_FILES_PANEL_HEIGHT: u16 = 120;
+pub const MAX_SELECTED_FILES_PANEL_HEIGHT: u16 = 560;
+
+pub fn clamp_selected_files_panel_height(height: u16) -> u16 {
+    height.clamp(
+        MIN_SELECTED_FILES_PANEL_HEIGHT,
+        MAX_SELECTED_FILES_PANEL_HEIGHT,
+    )
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorkspaceUiState {
     pub side_panel_tab: SidePanelTab,
     pub narrow_content_tab: NarrowContentTab,
+    pub content_file_list_collapsed: bool,
+    pub selected_files_panel_height: u16,
     pub pending_confirmation: Option<PendingConfirmation>,
+}
+
+impl Default for WorkspaceUiState {
+    fn default() -> Self {
+        Self {
+            side_panel_tab: SidePanelTab::default(),
+            narrow_content_tab: NarrowContentTab::default(),
+            content_file_list_collapsed: false,
+            selected_files_panel_height: DEFAULT_SELECTED_FILES_PANEL_HEIGHT,
+            pending_confirmation: None,
+        }
+    }
 }
 
 impl AppState {
@@ -149,7 +174,6 @@ pub struct PreviewPanelState {
     pub preview_requested_range: Option<Range<usize>>,
     pub queued_preview_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
-    pub preview_text: Option<SharedString>,
     pub preview_error: Option<String>,
     pub preview_chunks: Vec<PreviewChunk>,
     pub render_revision: u64,

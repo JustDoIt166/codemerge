@@ -123,7 +123,6 @@ pub(super) struct TreeInteractionSnapshot {
 pub(super) enum TreePanelEffect {
     None,
     RefreshVisibleTree,
-    OpenPreview(u32),
     SwitchToContentAndOpen(u32),
 }
 
@@ -384,6 +383,39 @@ pub(super) fn build_preview_table_model(
         selected_row_ix,
         next_selected_file_id,
     }
+}
+
+pub(super) fn preview_file_row(
+    result: Option<&ProcessResult>,
+    file_id: u32,
+) -> Option<PreviewRowViewModel> {
+    result?
+        .preview_files
+        .iter()
+        .find(|entry| entry.id == file_id)
+        .map(|entry| PreviewRowViewModel {
+            id: entry.id,
+            display_path: entry.display_path.clone(),
+            chars: entry.chars,
+            tokens: entry.tokens,
+            archive: entry.archive.clone(),
+        })
+}
+
+pub(super) fn preview_file_node_id(result: Option<&ProcessResult>, file_id: u32) -> Option<String> {
+    result?
+        .preview_files
+        .iter()
+        .find(|entry| entry.id == file_id)
+        .map(|entry| entry.display_path.clone())
+}
+
+pub(super) fn ancestor_node_ids(node_id: &str) -> BTreeSet<String> {
+    node_id
+        .match_indices('/')
+        .filter(|(ix, _)| *ix > 0)
+        .map(|(ix, _)| node_id[..ix].to_string())
+        .collect()
 }
 
 pub(super) fn summarize_archive_entries(result: Option<&ProcessResult>) -> ArchiveResultSummary {
@@ -833,11 +865,12 @@ mod tests {
 
     use super::{
         TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect, WindowChromeMode,
-        WindowZoomAction, WorkspaceChromeTone, apply_preflight_event, apply_tree_interaction,
-        build_blacklist_sections, build_preview_table_model, build_tree_panel_data,
-        build_tree_projection, build_tree_render_state, build_workspace_chrome_view_model,
-        icon_kind_for_extension, process_status_message, process_status_title,
-        resolve_window_chrome_mode, resolve_window_zoom_action, summarize_archive_entries,
+        WindowZoomAction, WorkspaceChromeTone, ancestor_node_ids, apply_preflight_event,
+        apply_tree_interaction, build_blacklist_sections, build_preview_table_model,
+        build_tree_panel_data, build_tree_projection, build_tree_render_state,
+        build_workspace_chrome_view_model, icon_kind_for_extension, preview_file_row,
+        process_status_message, process_status_title, resolve_window_chrome_mode,
+        resolve_window_zoom_action, summarize_archive_entries,
     };
     use crate::domain::{
         ArchiveEntrySource, Language, PreflightStats, PreviewFileEntry, ProcessResult, TreeNode,
@@ -917,6 +950,31 @@ mod tests {
 
         assert_eq!(model.selected_row_ix, None);
         assert_eq!(model.next_selected_file_id, Some(7));
+    }
+
+    #[test]
+    fn preview_file_row_uses_full_result_metadata() {
+        let result = sample_archive_result();
+
+        let row = preview_file_row(Some(&result), 2).expect("preview row");
+
+        assert_eq!(row.display_path, "bundle.zip/src/lib.rs");
+        assert_eq!(
+            row.archive,
+            Some(ArchiveEntrySource {
+                archive_path: "bundle.zip".to_string(),
+                entry_path: "src/lib.rs".to_string(),
+            })
+        );
+    }
+
+    #[test]
+    fn ancestor_node_ids_collect_parent_chain() {
+        assert_eq!(
+            ancestor_node_ids("bundle.zip/src/lib.rs"),
+            BTreeSet::from(["bundle.zip".to_string(), "bundle.zip/src".to_string()])
+        );
+        assert!(ancestor_node_ids("README.md").is_empty());
     }
 
     #[test]

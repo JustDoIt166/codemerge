@@ -3,7 +3,7 @@ use crate::services::preflight::PreflightEvent;
 use crate::services::process::{ProcessEvent, ProcessHandle};
 use crate::ui::state::{
     NarrowContentTab, PendingConfirmation, ProcessState, ProcessUiStatus, SelectionState,
-    SettingsState, SidePanelTab, WorkspaceUiState,
+    SettingsState, SidePanelTab, WorkspaceUiState, clamp_selected_files_panel_height,
 };
 use crate::utils::i18n::tr;
 
@@ -195,6 +195,19 @@ impl WorkspaceUiModel {
     pub fn set_narrow_content_tab(&mut self, tab: NarrowContentTab) -> bool {
         let changed = self.state.narrow_content_tab != tab;
         self.state.narrow_content_tab = tab;
+        changed
+    }
+
+    pub fn set_content_file_list_collapsed(&mut self, collapsed: bool) -> bool {
+        let changed = self.state.content_file_list_collapsed != collapsed;
+        self.state.content_file_list_collapsed = collapsed;
+        changed
+    }
+
+    pub fn set_selected_files_panel_height(&mut self, height: u16) -> bool {
+        let height = clamp_selected_files_panel_height(height);
+        let changed = self.state.selected_files_panel_height != height;
+        self.state.selected_files_panel_height = height;
         changed
     }
 }
@@ -495,6 +508,9 @@ mod tests {
         assert!(!model.set_narrow_content_tab(NarrowContentTab::Status));
         assert!(model.set_narrow_content_tab(NarrowContentTab::Results));
         assert!(!model.set_narrow_content_tab(NarrowContentTab::Results));
+        assert!(!model.set_content_file_list_collapsed(false));
+        assert!(model.set_content_file_list_collapsed(true));
+        assert!(!model.set_content_file_list_collapsed(true));
     }
 
     #[test]
@@ -505,5 +521,17 @@ mod tests {
         assert!(!model.set_pending_confirmation(PendingConfirmation::ClearInputs));
         assert!(model.clear_pending_confirmation());
         assert!(!model.clear_pending_confirmation());
+    }
+
+    #[test]
+    fn workspace_ui_model_clamps_selected_files_panel_height() {
+        let mut model = WorkspaceUiModel::new();
+
+        assert!(!model.set_selected_files_panel_height(180));
+        assert!(model.set_selected_files_panel_height(40));
+        assert_eq!(model.state().selected_files_panel_height, 120);
+        assert!(model.set_selected_files_panel_height(999));
+        assert_eq!(model.state().selected_files_panel_height, 560);
+        assert!(!model.set_selected_files_panel_height(560));
     }
 }

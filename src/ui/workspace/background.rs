@@ -14,11 +14,54 @@ use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
 
 impl Workspace {
+    fn sync_tree_selection_for_preview_file(
+        &mut self,
+        file_id: u32,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let Some(node_id) =
+            model::preview_file_node_id(self.result.read(cx).state().result.as_ref(), file_id)
+        else {
+            return false;
+        };
+
+        let selected_changed =
+            self.state.workspace.tree_panel.selected_node_id.as_deref() != Some(node_id.as_str());
+        self.state.workspace.tree_panel.selected_node_id = Some(node_id.clone());
+
+        let mut expansion_changed = false;
+        for ancestor in model::ancestor_node_ids(&node_id) {
+            expansion_changed |= self
+                .state
+                .workspace
+                .tree_panel
+                .expanded_ids
+                .insert(ancestor);
+        }
+
+        if selected_changed || expansion_changed {
+            self.sync_tree(cx);
+        }
+
+        selected_changed || expansion_changed
+    }
+
+    pub(super) fn open_preview_file_from_results(
+        &mut self,
+        file_id: u32,
+        sync_tree_selection: bool,
+        cx: &mut Context<Self>,
+    ) {
+        self.load_preview(file_id, cx);
+        if sync_tree_selection {
+            let _ = self.sync_tree_selection_for_preview_file(file_id, cx);
+        }
+    }
+
     fn load_preview_path(
         &mut self,
         file_id: u32,
         preview_path: std::path::PathBuf,
-        include_full_text: bool,
         cx: &mut Context<Self>,
     ) {
         let preview_state = self.preview.read(cx).state();
@@ -29,7 +72,7 @@ impl Workspace {
         }
 
         let request = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview.open_preview(file_id, preview_path, include_full_text);
+            let request = preview.open_preview(file_id, preview_path);
             preview_cx.notify();
             request
         });
@@ -57,7 +100,6 @@ impl Workspace {
         self.load_preview_path(
             super::MERGED_CONTENT_PREVIEW_FILE_ID,
             merged_content_path,
-            true,
             cx,
         );
     }
@@ -366,6 +408,13 @@ impl Workspace {
             .trim()
             .to_ascii_lowercase();
         let current_selected_id = self.preview.read(cx).selected_preview_file_id();
+        let has_merged_content = self
+            .result
+            .read(cx)
+            .state()
+            .result
+            .as_ref()
+            .is_some_and(|result| result.merged_content_path.is_some());
         let result_key = self
             .result
             .read(cx)
@@ -400,6 +449,35 @@ impl Workspace {
             self.preview_table_cache.model = Some(model.clone());
             model
         };
+        let preserve_merged_preview = has_merged_content
+            && current_selected_id == Some(super::MERGED_CONTENT_PREVIEW_FILE_ID);
+        let show_merged_preview = preserve_merged_preview
+            || (has_merged_content && table_model.next_selected_file_id.is_none());
+        let target_row_ix = if show_merged_preview {
+            None
+        } else {
+            table_model
+                .selected_row_ix
+                .or(if table_model.next_selected_file_id.is_some() {
+                    Some(0)
+                } else {
+                    None
+                })
+        };
+        let should_sync_tree_selection = !show_merged_preview
+            && table_model.next_selected_file_id.is_some_and(|file_id| {
+                current_selected_id != Some(file_id)
+                    && (current_selected_id.is_some() || !filter.is_empty())
+            });
+
+        if show_merged_preview {
+            self.load_merged_content_preview(cx);
+        } else if let Some(file_id) = table_model.next_selected_file_id {
+            self.open_preview_file_from_results(file_id, should_sync_tree_selection, cx);
+        } else {
+            self.clear_preview_state(cx);
+        }
+
         let preview_rows = table_model.rows.clone();
         self.result.update(cx, |result, result_cx| {
             if result.state().preview_rows != preview_rows {
@@ -410,31 +488,17 @@ impl Workspace {
         self.preview_table.update(cx, |table, cx| {
             let prev_rows = table.delegate().rows.clone();
             table.delegate_mut().rows = table_model.rows;
-            if let Some(row_ix) =
-                table_model
-                    .selected_row_ix
-                    .or(if table_model.next_selected_file_id.is_some() {
-                        Some(0)
-                    } else {
-                        None
-                    })
-            {
-                table.set_selected_row(row_ix, cx);
-            } else {
+            if let Some(row_ix) = target_row_ix {
+                if table.selected_row() != Some(row_ix) {
+                    table.set_selected_row(row_ix, cx);
+                }
+            } else if table.selected_row().is_some() {
                 table.clear_selection(cx);
             }
             if prev_rows != table.delegate().rows {
                 cx.notify();
             }
         });
-
-        match table_model.next_selected_file_id {
-            Some(file_id) => {
-                let _ =
-                    self.apply_tree_panel_effect(model::TreePanelEffect::OpenPreview(file_id), cx);
-            }
-            None => self.clear_preview_state(cx),
-        }
     }
 
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
@@ -526,10 +590,6 @@ impl Workspace {
                 self.sync_tree(cx);
                 true
             }
-            model::TreePanelEffect::OpenPreview(file_id) => {
-                self.load_preview(file_id, cx);
-                true
-            }
             model::TreePanelEffect::SwitchToContentAndOpen(file_id) => {
                 self.result.update(cx, |result, result_cx| {
                     result.set_active_tab(ResultTab::Content);
@@ -583,7 +643,7 @@ impl Workspace {
         else {
             return;
         };
-        self.load_preview_path(file_id, entry.preview_blob_path.clone(), false, cx);
+        self.load_preview_path(file_id, entry.preview_blob_path.clone(), cx);
     }
 
     fn request_queued_preview_range(&mut self, cx: &mut Context<Self>) {

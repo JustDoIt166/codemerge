@@ -13,7 +13,6 @@ pub enum PreviewRequest {
         file_id: u32,
         path: PathBuf,
         initial_range: Range<usize>,
-        include_full_text: bool,
     },
     LoadRange {
         revision: u64,
@@ -31,7 +30,6 @@ pub enum PreviewEvent {
         document: PreviewDocument,
         loaded_range: Range<usize>,
         lines: Vec<String>,
-        full_text: Option<String>,
     },
     Loaded {
         revision: u64,
@@ -75,29 +73,22 @@ pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
             file_id,
             path,
             initial_range,
-            include_full_text,
         } => {
             let result = (|| {
                 let document = index_document(&path)?;
                 let loaded_range = clamp_range(&document, initial_range);
                 let lines = load_range(&document, loaded_range.clone())?;
-                let full_text = if include_full_text {
-                    Some(load_text(&document)?)
-                } else {
-                    None
-                };
-                Ok::<_, AppError>((document, loaded_range, lines, full_text))
+                Ok::<_, AppError>((document, loaded_range, lines))
             })();
 
             match result {
-                Ok((document, loaded_range, lines, full_text)) => {
+                Ok((document, loaded_range, lines)) => {
                     let _ = tx.send(PreviewEvent::Opened {
                         revision,
                         file_id,
                         document,
                         loaded_range,
                         lines,
-                        full_text,
                     });
                 }
                 Err(error) => {
@@ -285,7 +276,6 @@ mod tests {
                 file_id: 42,
                 path: path.to_path_buf(),
                 initial_range: 1..3,
-                include_full_text: false,
             });
 
             match rx.recv().expect("preview event") {
@@ -295,14 +285,12 @@ mod tests {
                     document,
                     loaded_range,
                     lines,
-                    full_text,
                 } => {
                     assert_eq!(revision, 7);
                     assert_eq!(file_id, 42);
                     assert_eq!(document.line_count(), 4);
                     assert_eq!(loaded_range, 1..3);
                     assert_eq!(lines, vec!["one".to_string(), "two".to_string()]);
-                    assert!(full_text.is_none());
                 }
                 other => panic!("unexpected event: {other:?}"),
             }
