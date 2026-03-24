@@ -37,6 +37,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "close_toast") => "Close",
         (Language::Zh, "remove_tag") => "删除",
         (Language::En, "remove_tag") => "Remove",
+        (Language::Zh, "repository_tooltip") => "打开 GitHub 仓库: ",
+        (Language::En, "repository_tooltip") => "Open GitHub repository: ",
 
         // 文件选择
         (Language::Zh, "select_folder") => "选择文件夹",
@@ -419,6 +421,10 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "copy_failed") => "copy failed: ",
         (Language::Zh, "preview_failed") => "预览加载失败: ",
         (Language::En, "preview_failed") => "preview failed: ",
+        (Language::Zh, "repository_open_failed") => "打开 GitHub 仓库失败，请手动访问: ",
+        (Language::En, "repository_open_failed") => {
+            "Failed to open GitHub repository. Open manually: "
+        }
 
         // 处理消息
         (Language::Zh, "no_input_selected") => "请先选择文件夹或文件",

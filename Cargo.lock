@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "codemerge"
-version = "6.0.0"
+version = "8.1.0"
 dependencies = [
  "anyhow",
  "arboard",
@@ -1195,6 +1195,7 @@ dependencies = [
  "minifier",
  "minify-html",
  "once_cell",
+ "open",
  "raw-window-handle",
  "regex",
  "rfd",

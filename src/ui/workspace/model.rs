@@ -12,7 +12,7 @@ use crate::domain::{
 use crate::services::preflight::PreflightEvent;
 use crate::services::tree::{IndexedTreeNode, TreeIndex};
 use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
-use crate::utils::i18n::tr;
+use crate::utils::{app_metadata, i18n::tr};
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub(super) struct TreeCountSummary {
@@ -183,6 +183,8 @@ pub(super) struct WorkspaceChromeViewModel {
     pub status_label: SharedString,
     pub status_message: SharedString,
     pub status_tone: WorkspaceChromeTone,
+    pub version_label: SharedString,
+    pub repository_tooltip: SharedString,
     pub language_button_label: SharedString,
 }
 
@@ -220,6 +222,12 @@ pub(super) fn build_workspace_chrome_view_model(
             merged_file_size_hint,
         )),
         status_tone: workspace_chrome_tone(process.ui_status),
+        version_label: SharedString::from(app_metadata::version_label()),
+        repository_tooltip: SharedString::from(format!(
+            "{}{}",
+            tr(language, "repository_tooltip"),
+            app_metadata::repository_url()
+        )),
         language_button_label: SharedString::from(match language {
             Language::Zh => "EN",
             Language::En => "中文",
@@ -837,6 +845,7 @@ mod tests {
     use crate::processor::stats::ProcessingStats;
     use crate::services::preflight::PreflightEvent;
     use crate::ui::state::{ProcessState, ProcessUiStatus, TreePanelState};
+    use crate::utils::app_metadata;
     use crate::utils::i18n::tr;
 
     #[test]
@@ -1141,8 +1150,25 @@ mod tests {
         let en = build_workspace_chrome_view_model(&process, Language::En, Some("1.2 MB".into()));
 
         assert_eq!(zh.title.as_ref(), "CodeMerge");
+        assert_eq!(zh.version_label.as_ref(), app_metadata::version_label());
         assert_eq!(zh.language_button_label.as_ref(), "EN");
         assert_eq!(en.language_button_label.as_ref(), "中文");
+        assert_eq!(
+            zh.repository_tooltip.as_ref(),
+            format!(
+                "{}{}",
+                tr(Language::Zh, "repository_tooltip"),
+                app_metadata::repository_url()
+            )
+        );
+        assert_eq!(
+            en.repository_tooltip.as_ref(),
+            format!(
+                "{}{}",
+                tr(Language::En, "repository_tooltip"),
+                app_metadata::repository_url()
+            )
+        );
         assert_eq!(
             zh.status_label.as_ref(),
             tr(Language::Zh, "status_completed")

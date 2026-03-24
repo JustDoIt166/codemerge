@@ -17,9 +17,11 @@ use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{BlacklistItemKind, PreviewTableDelegate, Workspace};
 use crate::domain::{FileEntry, OutputFormat, ResultTab};
+use crate::services::external_link;
 use crate::services::preview::load_text;
 use crate::services::process::ProcessRequest;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
+use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
 use crate::utils::path::filename;
 
@@ -161,6 +163,28 @@ impl Workspace {
             cx,
         );
         cx.notify();
+    }
+
+    pub(super) fn open_repository(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        cx.stop_propagation();
+        let language = self.language(cx);
+        if let Err(err) = external_link::open_repository() {
+            self.push_notice(
+                NotificationType::Error,
+                format!(
+                    "{}{} ({err})",
+                    tr(language, "repository_open_failed"),
+                    app_metadata::repository_url()
+                ),
+                window,
+                cx,
+            );
+        }
     }
 
     pub(super) fn minimize_window_chrome(

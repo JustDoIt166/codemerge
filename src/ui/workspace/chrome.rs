@@ -100,7 +100,7 @@ impl Workspace {
             .items_center()
             .gap_3()
             .child(self.render_chrome_leading_content(chrome, compact, cx))
-            .child(self.render_language_button(chrome, cx))
+            .child(self.render_chrome_actions(chrome, cx))
     }
 
     fn render_chrome_leading_content(
@@ -139,6 +139,59 @@ impl Workspace {
             .on_click(cx.listener(Self::toggle_language))
     }
 
+    fn render_repository_button(
+        &self,
+        chrome: &WorkspaceChromeViewModel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        Button::new("open-repository-chrome")
+            .outline()
+            .compact()
+            .with_size(Size::Small)
+            .icon(IconName::GitHub)
+            .tooltip(chrome.repository_tooltip.clone())
+            .on_click(cx.listener(Self::open_repository))
+    }
+
+    fn render_version_badge(
+        &self,
+        chrome: &WorkspaceChromeViewModel,
+        cx: &App,
+    ) -> impl IntoElement {
+        div()
+            .flex()
+            .flex_shrink_0()
+            .items_center()
+            .px_2()
+            .py_1()
+            .rounded(px(999.))
+            .border_1()
+            .border_color(cx.theme().border.opacity(0.82))
+            .bg(cx.theme().secondary.opacity(0.48))
+            .child(
+                div()
+                    .text_xs()
+                    .font_semibold()
+                    .whitespace_nowrap()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(chrome.version_label.clone()),
+            )
+    }
+
+    fn render_chrome_actions(
+        &mut self,
+        chrome: &WorkspaceChromeViewModel,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
+        h_flex()
+            .flex_shrink_0()
+            .items_center()
+            .gap_2()
+            .child(self.render_version_badge(chrome, cx))
+            .child(self.render_repository_button(chrome, cx))
+            .child(self.render_language_button(chrome, cx))
+    }
+
     fn render_windows_title_bar(
         &mut self,
         window: &mut Window,
@@ -171,7 +224,7 @@ impl Workspace {
                     .px_2()
                     .flex()
                     .items_center()
-                    .child(self.render_language_button(chrome, cx)),
+                    .child(self.render_chrome_actions(chrome, cx)),
             )
             .child(self.render_windows_window_controls(window, cx))
             .into_any_element()
