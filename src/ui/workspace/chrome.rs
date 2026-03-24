@@ -1,25 +1,15 @@
 use gpui::{
     AnyElement, App, Context, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Render, StatefulInteractiveElement as _, Styled, Window, div, prelude::FluentBuilder as _, px,
+    StatefulInteractiveElement as _, Styled, Window, WindowControlArea, div,
+    prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, InteractiveElementExt as _, Sizable, Size, StyledExt as _,
-    TITLE_BAR_HEIGHT, TitleBar, button::Button, h_flex,
+    ActiveTheme as _, Icon, IconName, Sizable, Size, StyledExt as _, TITLE_BAR_HEIGHT, TitleBar,
+    button::Button, h_flex,
 };
 
 use super::Workspace;
 use super::model::{self, WorkspaceChromeTone, WorkspaceChromeViewModel};
-
-#[derive(Default)]
-struct WindowsTitleBarDragState {
-    should_move: bool,
-}
-
-impl Render for WindowsTitleBarDragState {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        div()
-    }
-}
 
 impl Workspace {
     pub(super) fn render_window_chrome(
@@ -155,8 +145,6 @@ impl Workspace {
         chrome: &WorkspaceChromeViewModel,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let drag_state = window.use_state(cx, |_, _| WindowsTitleBarDragState::default());
-
         h_flex()
             .flex_shrink_0()
             .h(TITLE_BAR_HEIGHT)
@@ -172,28 +160,9 @@ impl Workspace {
                     .px_3()
                     .items_center()
                     .gap_3()
-                    .on_double_click(|_, window, _| window.zoom_window())
-                    .on_mouse_down_out(window.listener_for(&drag_state, |state, _, _, _| {
-                        state.should_move = false;
-                    }))
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        window.listener_for(&drag_state, |state, _, _, _| {
-                            state.should_move = true;
-                        }),
-                    )
-                    .on_mouse_up(
-                        MouseButton::Left,
-                        window.listener_for(&drag_state, |state, _, _, _| {
-                            state.should_move = false;
-                        }),
-                    )
-                    .on_mouse_move(window.listener_for(&drag_state, |state, _, window, _| {
-                        if state.should_move {
-                            state.should_move = false;
-                            window.start_window_move();
-                        }
-                    }))
+                    // GPUI 0.2.2 does not implement `start_window_move` on Windows, so
+                    // dragging must use native non-client hit testing instead.
+                    .window_control_area(WindowControlArea::Drag)
                     .child(self.render_chrome_leading_content(chrome, true, cx)),
             )
             .child(

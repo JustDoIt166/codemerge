@@ -63,12 +63,10 @@ fn infer_name_from_files(files: &[impl AsRef<Path>]) -> Option<String> {
     if !is_zip_path(path) {
         return None;
     }
-    let stem = path
-        .file_stem()
+    path.file_stem()
         .map(|s| s.to_string_lossy().to_string())
         .map(|name| sanitize_filename_component(&name))
-        .filter(|name| !name.is_empty());
-    stem
+        .filter(|name| !name.is_empty())
 }
 
 fn sanitize_filename_component(value: &str) -> String {
@@ -195,10 +193,7 @@ mod tests {
 
     #[test]
     fn suggested_merge_result_name_ignores_multiple_zips() {
-        let files = vec![
-            PathBuf::from("a.zip"),
-            PathBuf::from("b.zip"),
-        ];
+        let files = vec![PathBuf::from("a.zip"), PathBuf::from("b.zip")];
         let name = suggested_merge_result_name_for_date(
             None,
             &files,
