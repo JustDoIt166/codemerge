@@ -10,3 +10,4 @@
 target-test/
 trace.log
 .codex-tasks/
+.claude/
