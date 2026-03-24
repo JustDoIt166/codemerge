@@ -9,8 +9,11 @@ use gpui_component::{
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 #[cfg(target_os = "windows")]
 use windows::Win32::{
-    Foundation::HWND,
-    UI::WindowsAndMessaging::{SW_RESTORE, ShowWindowAsync},
+    Foundation::{HWND, LPARAM, WPARAM},
+    UI::Input::KeyboardAndMouse::ReleaseCapture,
+    UI::WindowsAndMessaging::{
+        HTCAPTION, SW_RESTORE, SendMessageW, ShowWindowAsync, WM_NCLBUTTONDOWN,
+    },
 };
 
 use super::model;
@@ -1020,21 +1023,48 @@ impl Workspace {
 }
 
 #[cfg(target_os = "windows")]
-fn restore_normal_window(window: &Window) -> bool {
-    let Ok(handle) = HasWindowHandle::window_handle(window) else {
-        return false;
-    };
-    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+pub(super) fn begin_window_drag(window: &Window) -> bool {
+    let Some(hwnd) = win32_window_handle(window) else {
         return false;
     };
 
     unsafe {
-        ShowWindowAsync(
-            HWND(handle.hwnd.get() as *mut core::ffi::c_void),
-            SW_RESTORE,
-        )
+        let _ = ReleaseCapture();
+        let _ = SendMessageW(
+            hwnd,
+            WM_NCLBUTTONDOWN,
+            Some(WPARAM(HTCAPTION as usize)),
+            Some(LPARAM(0)),
+        );
     }
-    .as_bool()
+
+    true
+}
+
+#[cfg(not(target_os = "windows"))]
+pub(super) fn begin_window_drag(_: &Window) -> bool {
+    false
+}
+
+#[cfg(target_os = "windows")]
+fn restore_normal_window(window: &Window) -> bool {
+    let Some(hwnd) = win32_window_handle(window) else {
+        return false;
+    };
+
+    unsafe { ShowWindowAsync(hwnd, SW_RESTORE) }.as_bool()
+}
+
+#[cfg(target_os = "windows")]
+fn win32_window_handle(window: &Window) -> Option<HWND> {
+    let Ok(handle) = HasWindowHandle::window_handle(window) else {
+        return None;
+    };
+    let RawWindowHandle::Win32(handle) = handle.as_raw() else {
+        return None;
+    };
+
+    Some(HWND(handle.hwnd.get() as *mut core::ffi::c_void))
 }
 
 #[cfg(not(target_os = "windows"))]
