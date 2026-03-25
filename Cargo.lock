@@ -1179,7 +1179,7 @@ dependencies = [
 
 [[package]]
 name = "codemerge"
-version = "8.1.2"
+version = "8.1.3"
 dependencies = [
  "anyhow",
  "arboard",
