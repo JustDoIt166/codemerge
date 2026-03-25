@@ -5,6 +5,8 @@ pub struct ResultState {
     pub result: Option<ProcessResult>,
     pub active_tab: ResultTab,
     pub preview_rows: Vec<PreviewRowViewModel>,
+    pub result_revision: u64,
+    pub preview_rows_revision: u64,
 }
 
 pub struct ResultModel {
@@ -23,13 +25,19 @@ impl ResultModel {
     }
 
     pub fn clear(&mut self) {
-        self.state = ResultState::default();
+        self.state.result = None;
+        self.state.active_tab = ResultTab::Tree;
+        self.state.preview_rows.clear();
+        self.state.result_revision = self.state.result_revision.wrapping_add(1);
+        self.state.preview_rows_revision = self.state.preview_rows_revision.wrapping_add(1);
     }
 
     pub fn set_result(&mut self, result: ProcessResult) {
         self.state.result = Some(result);
         self.state.active_tab = ResultTab::Tree;
         self.state.preview_rows.clear();
+        self.state.result_revision = self.state.result_revision.wrapping_add(1);
+        self.state.preview_rows_revision = self.state.preview_rows_revision.wrapping_add(1);
     }
 
     pub fn set_active_tab(&mut self, tab: ResultTab) {
@@ -38,6 +46,7 @@ impl ResultModel {
 
     pub fn set_preview_rows(&mut self, rows: Vec<PreviewRowViewModel>) {
         self.state.preview_rows = rows;
+        self.state.preview_rows_revision = self.state.preview_rows_revision.wrapping_add(1);
     }
 
     pub fn has_content_result(&self) -> bool {
@@ -114,5 +123,41 @@ mod tests {
 
         assert!(!model.has_content_result());
         assert!(model.is_tree_only_result());
+    }
+
+    #[test]
+    fn revisions_advance_when_result_or_preview_rows_change() {
+        let mut model = ResultModel::new();
+        let initial_result_revision = model.state().result_revision;
+        let initial_preview_rows_revision = model.state().preview_rows_revision;
+
+        model.set_preview_rows(vec![crate::domain::PreviewRowViewModel {
+            id: 1,
+            display_path: "file.rs".into(),
+            chars: 1,
+            tokens: 1,
+            archive: None,
+        }]);
+        assert_eq!(model.state().result_revision, initial_result_revision);
+        assert_eq!(
+            model.state().preview_rows_revision,
+            initial_preview_rows_revision + 1
+        );
+
+        model.set_result(ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            merged_content_path: Some(PathBuf::from("merged.txt")),
+            suggested_result_name: "workspace-20260319.txt".into(),
+            file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
+        });
+        assert_eq!(model.state().result_revision, initial_result_revision + 1);
+        assert_eq!(
+            model.state().preview_rows_revision,
+            initial_preview_rows_revision + 2
+        );
     }
 }

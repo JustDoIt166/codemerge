@@ -749,13 +749,8 @@ impl Workspace {
         Self::hash_value(&(
             self.settings.read(cx).language(),
             result.active_tab,
-            result.preview_rows.clone(),
-            result.result.as_ref().map(|result| {
-                (
-                    result.preview_files.len(),
-                    result.merged_content_path.is_some(),
-                )
-            }),
+            result.result_revision,
+            result.preview_rows_revision,
             ui.content_file_list_collapsed,
             filter,
         ))
@@ -770,27 +765,7 @@ impl Workspace {
             self.tree_panel.render_state.selected_row_ix,
             self.tree_panel.total_summary,
             self.tree_panel.filter_input.read(cx).value().to_string(),
-            result.result.as_ref().map(|result| result.tree_nodes.len()),
-            result.result.as_ref().map(|result| {
-                result
-                    .preview_files
-                    .iter()
-                    .map(|entry| {
-                        (
-                            entry.display_path.clone(),
-                            entry.archive.is_some(),
-                            entry
-                                .archive
-                                .as_ref()
-                                .map(|archive| archive.archive_path.clone()),
-                        )
-                    })
-                    .collect::<Vec<_>>()
-            }),
-            result
-                .result
-                .as_ref()
-                .map(|result| result.tree_string.as_str()),
+            result.result_revision,
             tree_state.selected_index(),
         ))
     }
@@ -1642,6 +1617,48 @@ mod tests {
             other => panic!("unexpected event: {other:?}"),
         }
 
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn content_tab_switch_stays_responsive_with_large_result_metadata(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("merged_content_large_meta", 256);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let mut result = sample_result();
+            result.merged_content_path = Some(path.clone());
+            result.preview_files = (0..20_000)
+                .map(|ix| PreviewFileEntry {
+                    id: (ix + 1) as u32,
+                    display_path: format!("src/file_{ix}.rs"),
+                    chars: ix + 1,
+                    tokens: (ix % 17) + 1,
+                    preview_blob_path: path.clone(),
+                    byte_len: 128,
+                    archive: None,
+                })
+                .collect();
+            workspace.set_result(result, cx);
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        let start = Instant::now();
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            workspace.set_tab(&1, window, cx);
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(400));
         let _ = fs::remove_file(path);
     }
 

@@ -611,9 +611,9 @@ impl Workspace {
 
     pub(super) fn render_results_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
-        let result_state = self.result.read(cx).state().clone();
+        let active_tab = self.result.read(cx).state().active_tab;
         let has_content_result = self.result_has_content(cx);
-        let selected_tab = if result_state.active_tab == ResultTab::Tree || !has_content_result {
+        let selected_tab = if active_tab == ResultTab::Tree || !has_content_result {
             0
         } else {
             1
@@ -650,18 +650,16 @@ impl Workspace {
                                 Button::new("copy-active")
                                     .outline()
                                     .icon(IconName::Copy)
-                                    .label(if result_state.active_tab == ResultTab::Tree {
+                                    .label(if active_tab == ResultTab::Tree {
                                         tr(language, "copy_tree")
                                     } else {
                                         tr(language, "copy_current_page")
                                     })
-                                    .on_click(cx.listener(
-                                        if result_state.active_tab == ResultTab::Tree {
-                                            Self::copy_tree
-                                        } else {
-                                            Self::copy_preview
-                                        },
-                                    )),
+                                    .on_click(cx.listener(if active_tab == ResultTab::Tree {
+                                        Self::copy_tree
+                                    } else {
+                                        Self::copy_preview
+                                    })),
                             )
                             .child(
                                 Button::new("download-result")
@@ -673,12 +671,16 @@ impl Workspace {
                             ),
                     ),
             )
-            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
-                match result_state.active_tab {
-                    ResultTab::Tree => self.tree_pane_view.clone().into_any_element(),
-                    ResultTab::Content => self.render_content_panel(cx).into_any_element(),
-                },
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .child(match active_tab {
+                        ResultTab::Tree => self.tree_pane_view.clone().into_any_element(),
+                        ResultTab::Content => self.render_content_panel(cx).into_any_element(),
+                    }),
+            )
     }
 
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -856,11 +858,11 @@ impl Workspace {
         let language = self.language(cx);
         let ui_state = self.ui_state(cx);
         let tree_only = self.result_is_tree_only(cx);
-        let result_state = self.result.read(cx).state().clone();
+        let preview_rows_len = self.result.read(cx).state().preview_rows.len();
         let preview_filter_input = self.preview_filter_input.clone();
         let preview_table = self.preview_table.clone();
         let filter_active = !preview_filter_input.read(cx).value().trim().is_empty();
-        let has_visible_rows = !result_state.preview_rows.is_empty();
+        let has_visible_rows = preview_rows_len > 0;
         let file_list_collapsed = ui_state.content_file_list_collapsed;
         let file_list_toggle_label = if file_list_collapsed {
             tr(language, "content_files_expand")
@@ -920,9 +922,7 @@ impl Workspace {
                                                 div()
                                                     .text_sm()
                                                     .text_color(cx.theme().muted_foreground)
-                                                    .child(
-                                                        result_state.preview_rows.len().to_string(),
-                                                    ),
+                                                    .child(preview_rows_len.to_string()),
                                             ),
                                     )
                                     .child(
@@ -1330,7 +1330,6 @@ impl PreviewPaneView {
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let language = self.settings.read(cx).language();
-        let result_state = self.result.read(cx).state().clone();
         let (preview_error, preview_document, selected_preview_id) = {
             let preview = self.preview.read(cx);
             (
@@ -1339,8 +1338,13 @@ impl PreviewPaneView {
                 preview.selected_preview_file_id(),
             )
         };
-        let selected_preview = selected_preview_id
-            .and_then(|id| super::model::preview_file_row(result_state.result.as_ref(), id));
+        let selected_preview = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
+            None
+        } else {
+            let result = self.result.read(cx);
+            selected_preview_id
+                .and_then(|id| super::model::preview_file_row(result.state().result.as_ref(), id))
+        };
         let selected_archive = selected_preview
             .as_ref()
             .and_then(|row| row.archive.clone());
