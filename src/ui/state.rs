@@ -166,6 +166,20 @@ pub struct PreviewChunk {
     pub lines: Vec<SharedString>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct DeferredPreviewState {
+    pub source_path: PathBuf,
+    pub source_byte_len: u64,
+    pub excerpt_byte_len: u64,
+    pub excerpt_path: Option<PathBuf>,
+}
+
+impl DeferredPreviewState {
+    pub fn is_excerpt_loaded(&self) -> bool {
+        self.excerpt_path.is_some()
+    }
+}
+
 #[derive(Default)]
 pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
@@ -175,6 +189,7 @@ pub struct PreviewPanelState {
     pub queued_preview_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,
     pub preview_error: Option<String>,
+    pub deferred_preview: Option<DeferredPreviewState>,
     pub preview_chunks: Vec<PreviewChunk>,
     pub render_revision: u64,
 }

@@ -8,7 +8,10 @@ use super::view::TreeExpansionMode;
 use super::{Workspace, model};
 use crate::domain::{ProcessResult, ResultTab};
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
-use crate::services::preview::{PreviewEvent, start as start_preview};
+use crate::services::preview::{
+    EXCERPT_PREVIEW_BYTES, PreviewEvent, PreviewRequest, create_excerpt_preview,
+    start as start_preview,
+};
 use crate::ui::models::ProcessEventEffect;
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
@@ -76,6 +79,10 @@ impl Workspace {
             preview_cx.notify();
             request
         });
+        self.start_preview_request(request, cx);
+    }
+
+    fn start_preview_request(&mut self, request: PreviewRequest, cx: &mut Context<Self>) {
         self.preview.update(cx, |preview, _| {
             preview.set_preview_rx(Some(start_preview(request)));
         });
@@ -97,11 +104,95 @@ impl Workspace {
             return;
         };
 
+        let preview_state = self.preview.read(cx).state();
+        if preview_state.selected_preview_file_id == Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
+            && (preview_state.preview_document.is_some()
+                || preview_state.preview_rx.is_some()
+                || preview_state
+                    .deferred_preview
+                    .as_ref()
+                    .is_some_and(|state| state.source_path == merged_content_path))
+        {
+            return;
+        }
+
+        if let Ok(metadata) = std::fs::metadata(&merged_content_path)
+            && metadata.len() > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES
+        {
+            self.preview.update(cx, |preview, preview_cx| {
+                preview.defer_preview(
+                    super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                    merged_content_path.clone(),
+                    metadata.len(),
+                    EXCERPT_PREVIEW_BYTES,
+                );
+                preview_cx.notify();
+            });
+            self.preview_pane_view.update(cx, |view, _| {
+                view.scroll_to_top();
+            });
+            return;
+        }
+
         self.load_preview_path(
             super::MERGED_CONTENT_PREVIEW_FILE_ID,
             merged_content_path,
             cx,
         );
+    }
+
+    pub(super) fn load_deferred_merged_content_excerpt(&mut self, cx: &mut Context<Self>) {
+        let Some((source_path, source_byte_len)) = self
+            .preview
+            .read(cx)
+            .deferred_preview()
+            .filter(|state| state.excerpt_path.is_none())
+            .map(|state| (state.source_path.clone(), state.source_byte_len))
+        else {
+            return;
+        };
+
+        match create_excerpt_preview(&source_path, EXCERPT_PREVIEW_BYTES) {
+            Ok(excerpt_path) => {
+                let request = self.preview.update(cx, |preview, preview_cx| {
+                    let request = preview.open_deferred_excerpt_preview(
+                        super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                        source_path.clone(),
+                        source_byte_len,
+                        EXCERPT_PREVIEW_BYTES,
+                        excerpt_path,
+                    );
+                    preview_cx.notify();
+                    request
+                });
+                self.start_preview_request(request, cx);
+            }
+            Err(error) => {
+                self.preview.update(cx, |preview, preview_cx| {
+                    preview.set_preview_error_message(error.to_string());
+                    preview_cx.notify();
+                });
+            }
+        }
+    }
+
+    pub(super) fn load_deferred_merged_content_full(&mut self, cx: &mut Context<Self>) {
+        let Some(source_path) = self
+            .preview
+            .read(cx)
+            .deferred_preview()
+            .map(|state| state.source_path.clone())
+        else {
+            return;
+        };
+
+        let request = self.preview.update(cx, |preview, preview_cx| {
+            let request =
+                preview.open_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, source_path.clone());
+            preview_cx.notify();
+            request
+        });
+        self.start_preview_request(request, cx);
     }
 
     pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {

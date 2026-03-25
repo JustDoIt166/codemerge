@@ -391,6 +391,18 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "next_page") => "Next Page",
         (Language::Zh, "preview_loading") => "加载中...",
         (Language::En, "preview_loading") => "Loading...",
+        (Language::Zh, "large_preview_hint") => {
+            "合并结果较大，自动加载可能导致界面卡顿。可先加载前 1MB 预览，或手动加载全部内容。"
+        }
+        (Language::En, "large_preview_hint") => {
+            "This merged result is large. Load a 1 MB excerpt first, or load the full content manually."
+        }
+        (Language::Zh, "large_preview_excerpt_hint") => {
+            "当前仅显示前 1MB 预览，可继续手动加载全部内容。总大小："
+        }
+        (Language::En, "large_preview_excerpt_hint") => {
+            "Showing only the first 1 MB to keep the app responsive. Total size:"
+        }
         (Language::Zh, "load_1mb") => "加载1MB",
         (Language::En, "load_1mb") => "Load 1MB",
         (Language::Zh, "load_all") => "加载全部",

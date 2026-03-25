@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 use gpui::SharedString;
 
 use crate::services::preview::{PreviewDocument, PreviewEvent, PreviewRequest};
-use crate::ui::state::PreviewPanelState;
+use crate::ui::state::{DeferredPreviewState, PreviewPanelState};
 
 pub struct PreviewModel {
     state: PreviewPanelState,
@@ -145,13 +145,82 @@ impl PreviewModel {
     }
 
     pub fn open_preview(&mut self, file_id: u32, path: PathBuf) -> PreviewRequest {
+        self.prepare_open_preview(file_id, path, None)
+    }
+
+    pub fn open_deferred_excerpt_preview(
+        &mut self,
+        file_id: u32,
+        source_path: PathBuf,
+        source_byte_len: u64,
+        excerpt_byte_len: u64,
+        excerpt_path: PathBuf,
+    ) -> PreviewRequest {
+        self.prepare_open_preview(
+            file_id,
+            excerpt_path.clone(),
+            Some(DeferredPreviewState {
+                source_path,
+                source_byte_len,
+                excerpt_byte_len,
+                excerpt_path: Some(excerpt_path),
+            }),
+        )
+    }
+
+    pub fn defer_preview(
+        &mut self,
+        file_id: u32,
+        source_path: PathBuf,
+        source_byte_len: u64,
+        excerpt_byte_len: u64,
+    ) {
         self.state.preview_revision += 1;
         self.state.selected_preview_file_id = Some(file_id);
         self.state.preview_error = None;
+        self.state.preview_rx = None;
+        self.state.preview_requested_range = None;
+        self.state.queued_preview_range = None;
+        self.state.preview_document = None;
+        self.state.deferred_preview = Some(DeferredPreviewState {
+            source_path,
+            source_byte_len,
+            excerpt_byte_len,
+            excerpt_path: None,
+        });
+        self.state.clear_loaded_chunks();
+        self.state.bump_render_revision();
+    }
+
+    pub fn deferred_preview(&self) -> Option<&DeferredPreviewState> {
+        self.state.deferred_preview.as_ref()
+    }
+
+    pub fn set_preview_error_message(&mut self, error: impl Into<String>) {
+        self.state.preview_error = Some(error.into());
+        self.state.preview_rx = None;
+        self.state.preview_requested_range = None;
+        if self.state.preview_document.is_none() {
+            self.state.clear_loaded_chunks();
+        }
+        self.state.bump_render_revision();
+    }
+
+    fn prepare_open_preview(
+        &mut self,
+        file_id: u32,
+        path: PathBuf,
+        deferred_preview: Option<DeferredPreviewState>,
+    ) -> PreviewRequest {
+        self.state.preview_revision += 1;
+        self.state.selected_preview_file_id = Some(file_id);
+        self.state.preview_error = None;
+        self.state.preview_rx = None;
         self.state.preview_requested_range =
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.queued_preview_range = None;
         self.state.preview_document = None;
+        self.state.deferred_preview = deferred_preview;
         self.state.clear_loaded_chunks();
         self.state.bump_render_revision();
 
@@ -279,6 +348,7 @@ mod tests {
     use super::{PreviewEventEffect, PreviewModel, PreviewScrollDirection};
     use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
     use std::fs;
+    use std::path::PathBuf;
 
     #[test]
     fn opened_event_primes_document_and_chunks() {
@@ -422,5 +492,34 @@ mod tests {
                 .is_none()
         );
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn deferred_excerpt_preview_keeps_source_metadata() {
+        let mut model = PreviewModel::new();
+        let request = model.open_deferred_excerpt_preview(
+            11,
+            PathBuf::from("merged.txt"),
+            8_192,
+            1_024,
+            PathBuf::from("merged_excerpt.txt"),
+        );
+
+        match request {
+            PreviewRequest::Open { file_id, path, .. } => {
+                assert_eq!(file_id, 11);
+                assert_eq!(path, PathBuf::from("merged_excerpt.txt"));
+            }
+            other => panic!("unexpected request: {other:?}"),
+        }
+
+        let deferred = model.deferred_preview().expect("deferred preview state");
+        assert_eq!(deferred.source_path, PathBuf::from("merged.txt"));
+        assert_eq!(deferred.source_byte_len, 8_192);
+        assert_eq!(deferred.excerpt_byte_len, 1_024);
+        assert_eq!(
+            deferred.excerpt_path.as_ref(),
+            Some(&PathBuf::from("merged_excerpt.txt"))
+        );
     }
 }

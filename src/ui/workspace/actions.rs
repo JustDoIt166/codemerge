@@ -21,7 +21,6 @@ use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{BlacklistItemKind, PreviewTableDelegate, Workspace};
 use crate::domain::{FileEntry, OutputFormat, ResultTab};
 use crate::services::external_link;
-use crate::services::preview::load_text;
 use crate::services::process::ProcessRequest;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::app_metadata;
@@ -938,8 +937,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let document = self.preview.read(cx).preview_document().cloned();
-        let Some(document) = document else {
+        let path = self
+            .preview
+            .read(cx)
+            .preview_document()
+            .map(|document| document.path().to_path_buf());
+        let Some(path) = path else {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "no_content"),
@@ -948,11 +951,11 @@ impl Workspace {
             );
             return;
         };
-        let document = document.clone();
         let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
-            let result = load_text(&document);
+            let result = std::fs::read_to_string(&path)
+                .map_err(|e| crate::error::AppError::new(format!("read preview file failed: {e}")));
             let _ = this.update(cx, |_, cx| match result {
                 Ok(content) => {
                     if let Some(window) = cx.active_window() {

@@ -35,6 +35,7 @@ use crate::ui::state::{AppState, ProcessUiStatus, WorkspaceUiState};
 use crate::utils::i18n::tr;
 
 const MERGED_CONTENT_PREVIEW_FILE_ID: u32 = u32::MAX;
+const MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
 
 pub(super) fn preview_line_height() -> Pixels {
     px(22.)
@@ -696,35 +697,10 @@ impl Workspace {
         process.processing_skipped.hash(&mut hasher);
         process.processing_current_file.hash(&mut hasher);
         process.last_error.hash(&mut hasher);
-        result
-            .result
-            .as_ref()
-            .map(|result| {
-                (
-                    result.stats.total_chars,
-                    result.stats.total_tokens,
-                    result.preview_files.len(),
-                    model::summarize_archive_entries(Some(result)),
-                    result
-                        .preview_files
-                        .iter()
-                        .map(|entry| {
-                            (
-                                entry.display_path.clone(),
-                                entry
-                                    .archive
-                                    .as_ref()
-                                    .map(|archive| archive.archive_path.clone()),
-                                entry
-                                    .archive
-                                    .as_ref()
-                                    .map(|archive| archive.entry_path.clone()),
-                            )
-                        })
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .hash(&mut hasher);
+        // The status panel only needs to react when the process summary changes or when an
+        // entirely new result is installed. Walking every preview file here made ordinary tab
+        // switches scale with result size and could stall the UI on large merges.
+        result.result_revision.hash(&mut hasher);
         hasher.finish()
     }
 
@@ -1230,9 +1206,12 @@ impl Drop for Workspace {
 #[cfg(test)]
 mod tests {
     use super::{Workspace, WorkspacePanelKind};
-    use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
+    use crate::domain::{PreviewFileEntry, ProcessResult, ResultTab, TreeNode};
     use crate::processor::stats::ProcessingStats;
-    use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
+    use crate::services::preview::{
+        EXCERPT_PREVIEW_BYTES, MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest,
+        index_document, load_range,
+    };
     use crate::ui::{perf, preview_model::PreviewModel};
     use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
@@ -1394,6 +1373,50 @@ mod tests {
     }
 
     #[gpui::test]
+    fn status_panel_invalidation_key_stays_constant_time_with_large_results(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("status_panel_large_meta", 32);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let mut result = sample_result();
+            result.merged_content_path = Some(path.clone());
+            result.preview_files = (0..120_000)
+                .map(|ix| PreviewFileEntry {
+                    id: (ix + 1) as u32,
+                    display_path: format!("src/file_{ix}.rs"),
+                    chars: ix + 1,
+                    tokens: (ix % 17) + 1,
+                    preview_blob_path: path.clone(),
+                    byte_len: 32,
+                    archive: None,
+                })
+                .collect();
+            workspace.set_result(result, cx);
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        let start = Instant::now();
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            for _ in 0..32 {
+                let _ = workspace.status_panel_invalidation_key(cx);
+            }
+        });
+
+        assert!(
+            start.elapsed() < Duration::from_millis(150),
+            "status panel invalidation should not scale with preview file count"
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
     fn preview_requested_range_changes_do_not_invalidate_preview_pane(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
@@ -1471,6 +1494,33 @@ mod tests {
                 assert!(!view.scheduled_visible_sync);
 
                 view.queue_visible_range_sync(128..160, cx);
+                assert_eq!(view.pending_visible_range, None);
+                assert!(!view.scheduled_visible_sync);
+            });
+        });
+
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn preview_subrange_inside_last_visible_window_does_not_reschedule_notify(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("preview_measure_visible", 1_024);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_path(&path), cx);
+            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+
+            workspace.preview_pane_view.update(cx, |view, cx| {
+                view.queue_visible_range_sync(0..24, cx);
+                view.flush_pending_visible_range(cx);
+                assert_eq!(view.last_synced_visible_range, Some(0..24));
+                assert!(!view.scheduled_visible_sync);
+
+                view.queue_visible_range_sync(0..1, cx);
                 assert_eq!(view.pending_visible_range, None);
                 assert!(!view.scheduled_visible_sync);
             });
@@ -1587,6 +1637,75 @@ mod tests {
     }
 
     #[gpui::test]
+    fn preview_deep_scroll_draw_settles_without_extra_sync(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_dense_preview_fixture("preview_deep_scroll_settle", 20_000);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            seed_preview_model(
+                &workspace.preview,
+                &path,
+                cx,
+                0..1_536,
+                super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            );
+            workspace.result.update(cx, |result, result_cx| {
+                result.set_active_tab(ResultTab::Content);
+                result_cx.notify();
+            });
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.preview_pane_view.update(cx, |view, _| {
+                view.scroll_handle
+                    .scroll_to_item_strict(512, gpui::ScrollStrategy::Top);
+            });
+        });
+
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.preview_pane_view.update(cx, |view, _| {
+                assert!(
+                    view.last_synced_visible_range
+                        .as_ref()
+                        .is_some_and(|range| range.start >= 512),
+                    "deep scroll should settle on a deep visible range"
+                );
+                assert!(
+                    !view.scheduled_visible_sync,
+                    "stable deep scroll should not keep scheduling follow-up sync work"
+                );
+                assert!(
+                    view.pending_visible_range.is_none(),
+                    "stable deep scroll should not leave pending visible sync work behind"
+                );
+            });
+        });
+
+        let _ = fs::remove_dir_all(path.parent().expect("fixture dir"));
+    }
+
+    #[gpui::test]
     fn content_tab_loads_merged_result_preview(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
@@ -1618,6 +1737,84 @@ mod tests {
         }
 
         let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn content_tab_defers_large_merged_result_preview_until_explicit_load(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_large_preview_fixture(
+            "merged_content_deferred",
+            super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES as usize + 2_048,
+        );
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            workspace.load_merged_content_preview(cx);
+
+            let preview = workspace.preview.read(cx);
+            assert_eq!(
+                preview.selected_preview_file_id(),
+                Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
+            );
+            assert!(preview.preview_document().is_none());
+            assert!(preview.state().preview_rx.is_none());
+            let deferred = preview.deferred_preview().expect("deferred merged preview");
+            assert_eq!(deferred.source_path, path);
+            assert_eq!(deferred.excerpt_byte_len, EXCERPT_PREVIEW_BYTES);
+        });
+
+        let _ = fs::remove_dir_all(path.parent().expect("fixture dir"));
+    }
+
+    #[gpui::test]
+    fn load_1mb_preview_opens_excerpt_for_large_merged_result(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_large_preview_fixture(
+            "merged_content_excerpt",
+            super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES as usize + 4_096,
+        );
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            workspace.load_merged_content_preview(cx);
+            workspace.load_deferred_merged_content_excerpt(cx);
+        });
+
+        let excerpt_path = workspace
+            .update(cx, |workspace: &mut Workspace, cx| {
+                let preview = workspace.preview.read(cx);
+                preview
+                    .deferred_preview()
+                    .and_then(|state| state.excerpt_path.clone())
+            })
+            .expect("excerpt preview path");
+        let rx = workspace
+            .update(cx, |workspace: &mut Workspace, cx| {
+                workspace
+                    .preview
+                    .update(cx, |preview, _| preview.take_preview_rx())
+            })
+            .expect("preview receiver");
+        match rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("preview open event")
+        {
+            PreviewEvent::Opened {
+                file_id, document, ..
+            } => {
+                assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
+                assert_eq!(document.path(), excerpt_path.as_path());
+                assert_ne!(document.path(), path.as_path());
+            }
+            other => panic!("unexpected event: {other:?}"),
+        }
+
+        assert!(
+            fs::metadata(&excerpt_path).expect("excerpt metadata").len() <= EXCERPT_PREVIEW_BYTES
+        );
+        let _ = fs::remove_dir_all(path.parent().expect("fixture dir"));
     }
 
     #[gpui::test]
@@ -1660,6 +1857,152 @@ mod tests {
 
         assert!(start.elapsed() < Duration::from_millis(400));
         let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn content_tab_draw_stays_responsive_with_large_result_metadata(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_preview_fixture("merged_content_large_draw", 256);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let mut result = sample_result();
+            result.merged_content_path = Some(path.clone());
+            result.preview_files = (0..120_000)
+                .map(|ix| PreviewFileEntry {
+                    id: (ix + 1) as u32,
+                    display_path: format!("src/file_{ix}.rs"),
+                    chars: ix + 1,
+                    tokens: (ix % 17) + 1,
+                    preview_blob_path: path.clone(),
+                    byte_len: 128,
+                    archive: None,
+                })
+                .collect();
+            workspace.set_result(result, cx);
+            seed_preview_model(
+                &workspace.preview,
+                &path,
+                cx,
+                0..128,
+                super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            );
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            workspace.set_tab(&1, window, cx);
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        let start = Instant::now();
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let _ = fs::remove_file(path);
+    }
+
+    #[gpui::test]
+    fn content_tab_draw_stays_responsive_with_long_single_line_preview(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_single_line_preview_fixture(
+            "merged_content_long_line",
+            MAX_PREVIEW_LINE_BYTES * 64,
+        );
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            workspace.result.update(cx, |result, result_cx| {
+                result.set_active_tab(ResultTab::Content);
+                result_cx.notify();
+            });
+            workspace.preview.update(cx, |preview, preview_cx| {
+                let request =
+                    preview.open_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, path.clone());
+                let revision = match request {
+                    PreviewRequest::Open { revision, .. } => revision,
+                    _ => unreachable!(),
+                };
+                let document = index_document(&path).expect("index document");
+                let lines = load_range(&document, 0..1).expect("load range");
+                let _ = preview.apply_event(PreviewEvent::Opened {
+                    revision,
+                    file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                    document,
+                    loaded_range: 0..1,
+                    lines,
+                });
+                preview.set_preview_rx(None);
+                preview_cx.notify();
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        let rendered_line = workspace
+            .update(cx, |workspace: &mut Workspace, cx| {
+                workspace
+                    .preview
+                    .read(cx)
+                    .line_at(0)
+                    .map(|line| line.to_string())
+            })
+            .expect("preview line");
+        assert!(rendered_line.len() <= MAX_PREVIEW_LINE_BYTES);
+
+        let start = Instant::now();
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let _ = fs::remove_dir_all(path.parent().expect("fixture dir"));
+    }
+
+    #[gpui::test]
+    fn content_tab_draw_stays_responsive_with_dense_preview_document(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let path = write_dense_preview_fixture("merged_content_dense_lines", 100_000);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.set_result(sample_result_with_merged_content_path(&path), cx);
+            seed_preview_model(
+                &workspace.preview,
+                &path,
+                cx,
+                0..128,
+                super::MERGED_CONTENT_PREVIEW_FILE_ID,
+            );
+            workspace.result.update(cx, |result, result_cx| {
+                result.set_active_tab(ResultTab::Content);
+                result_cx.notify();
+            });
+            workspace.preview.update(cx, |preview, _| {
+                preview.set_preview_rx(None);
+            });
+            workspace.poll_task = None;
+            workspace.poll_task_running = false;
+        });
+
+        let start = Instant::now();
+        cx.update(|window, app| {
+            window.draw(app).clear();
+        });
+
+        assert!(start.elapsed() < Duration::from_millis(500));
+        let _ = fs::remove_dir_all(path.parent().expect("fixture dir"));
     }
 
     #[gpui::test]
@@ -1926,6 +2269,54 @@ mod tests {
                 .collect::<String>(),
         )
         .expect("write preview fixture");
+        path
+    }
+
+    fn write_large_preview_fixture(prefix: &str, min_byte_len: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create large preview fixture dir");
+        let path = root.join("merged.txt");
+        let line = "line-0123456789abcdef\n";
+        let repeat_count = min_byte_len / line.len() + 2;
+        fs::write(&path, line.repeat(repeat_count)).expect("write large preview fixture");
+        path
+    }
+
+    fn write_single_line_preview_fixture(prefix: &str, line_len: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create single line preview fixture dir");
+        let path = root.join("merged.txt");
+        fs::write(&path, format!("{}\n", "a".repeat(line_len)))
+            .expect("write single line preview fixture");
+        path
+    }
+
+    fn write_dense_preview_fixture(prefix: &str, line_count: usize) -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "{prefix}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create dense preview fixture dir");
+        let path = root.join("merged.txt");
+        fs::write(&path, "a\n".repeat(line_count)).expect("write dense preview fixture");
         path
     }
 }

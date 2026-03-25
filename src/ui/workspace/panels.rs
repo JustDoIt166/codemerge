@@ -1,12 +1,13 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, AppContext as _, Context, DragMoveEvent, Empty, InteractiveElement, IntoElement,
-    ListSizingBehavior, ParentElement, Render, StatefulInteractiveElement as _, Styled, Window,
-    div, prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, Empty,
+    InteractiveElement, IntoElement, ListSizingBehavior, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, UniformListDecoration, Window, div,
+    prelude::FluentBuilder as _, px, uniform_list,
 };
 use gpui_component::{
-    ActiveTheme as _, Disableable, IconName, Sizable, Size,
+    ActiveTheme as _, Disableable, IconName, Sizable, Size, StyledExt as _,
     button::{Button, ButtonVariants},
     checkbox::Checkbox,
     h_flex,
@@ -23,10 +24,10 @@ use gpui_component::{
 };
 
 use super::view::{
-    activity_row, card, empty_box, flow_card, format_duration, format_tree_summary, panel_frame,
-    panel_viewport, process_status_message, process_status_title, render_blacklist_section,
-    render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
-    section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
+    activity_row, card, empty_box, flow_card, format_duration, format_size, format_tree_summary,
+    panel_frame, panel_viewport, process_status_message, process_status_title,
+    render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
+    section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
 use super::{
     MERGED_CONTENT_PREVIEW_FILE_ID, PreviewPaneView, TreePaneView, TreeViewMode, Workspace,
@@ -37,6 +38,11 @@ use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
 use crate::utils::i18n::tr;
+
+#[derive(Clone)]
+struct PreviewVisibleRangeDecoration {
+    preview_pane: gpui::Entity<PreviewPaneView>,
+}
 
 #[derive(Clone)]
 struct SelectedFilesResizeDrag {
@@ -1328,14 +1334,28 @@ impl PreviewPaneView {
         &mut self,
         _window: &mut Window,
         cx: &mut Context<Self>,
-    ) -> impl IntoElement {
+    ) -> AnyElement {
         let language = self.settings.read(cx).language();
-        let (preview_error, preview_document, selected_preview_id) = {
+        let (
+            preview_error,
+            preview_loading,
+            selected_preview_id,
+            deferred_preview,
+            preview_document_meta,
+        ) = {
             let preview = self.preview.read(cx);
             (
                 preview.state().preview_error.clone(),
-                preview.preview_document().cloned(),
+                preview.state().preview_rx.is_some(),
                 preview.selected_preview_file_id(),
+                preview.deferred_preview().cloned(),
+                preview.preview_document().map(|document| {
+                    (
+                        document.line_count(),
+                        document.byte_len(),
+                        document.path().display().to_string(),
+                    )
+                }),
             )
         };
         let selected_preview = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
@@ -1348,33 +1368,58 @@ impl PreviewPaneView {
         let selected_archive = selected_preview
             .as_ref()
             .and_then(|row| row.archive.clone());
+        let selected_preview_label = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID)
+        {
+            tr(language, "tab_merged_content").to_string()
+        } else {
+            selected_preview
+                .as_ref()
+                .map(|row| row.display_path.clone())
+                .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string())
+        };
+
+        if let Some(deferred) = deferred_preview.as_ref()
+            && selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID)
+            && preview_document_meta.is_none()
+        {
+            self.last_requested_load_range = 0..0;
+            return self.render_deferred_merged_preview(
+                language,
+                deferred,
+                preview_error.as_deref(),
+                cx,
+            );
+        }
 
         if let Some(error) = preview_error.as_ref() {
-            let preview_failure_title =
-                if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
-                    tr(language, "tab_merged_content").to_string()
-                } else {
-                    selected_preview
-                        .as_ref()
-                        .map(|row| row.display_path.clone())
-                        .unwrap_or_else(|| tr(language, "preview_unknown_path").to_string())
-                };
             let title = format!(
                 "{}: {}",
                 tr(language, "status_error"),
-                preview_failure_title
+                selected_preview_label
             );
-            return empty_box(title, error.to_string(), IconName::TriangleAlert, cx);
+            return empty_box(title, error.to_string(), IconName::TriangleAlert, cx)
+                .into_any_element();
         }
 
-        let Some(document) = preview_document.as_ref() else {
+        let Some((line_count, byte_len, document_path)) = preview_document_meta else {
             self.last_requested_load_range = 0..0;
-            return empty_box(
-                tr(language, "preview_empty"),
-                tr(language, "preview_empty_hint"),
-                IconName::File,
-                cx,
-            );
+            return if preview_loading && selected_preview_id.is_some() {
+                empty_box(
+                    tr(language, "preview_loading"),
+                    selected_preview_label,
+                    IconName::File,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                empty_box(
+                    tr(language, "preview_empty"),
+                    tr(language, "preview_empty_hint"),
+                    IconName::File,
+                    cx,
+                )
+                .into_any_element()
+            };
         };
 
         let file_path = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
@@ -1383,9 +1428,8 @@ impl PreviewPaneView {
             selected_preview
                 .as_ref()
                 .map(|row| row.display_path.clone())
-                .unwrap_or_else(|| document.path().display().to_string())
+                .unwrap_or(document_path)
         };
-        let line_count = document.line_count();
         self.flush_pending_visible_range(cx);
         if self.render_cache_range.is_empty() && line_count > 0 {
             let initial =
@@ -1394,12 +1438,20 @@ impl PreviewPaneView {
         } else {
             self.refresh_render_cache(self.render_cache_range.clone(), cx);
         }
+        let excerpt_banner = deferred_preview
+            .as_ref()
+            .filter(|state| {
+                selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID)
+                    && state.is_excerpt_loaded()
+            })
+            .map(|state| self.render_deferred_excerpt_banner(language, state, cx));
 
         v_flex()
             .gap_2()
             .size_full()
             .min_h(px(0.))
             .child(render_kv(tr(language, "table_path"), file_path, cx))
+            .when_some(excerpt_banner, |this, banner| this.child(banner))
             .when_some(selected_archive.as_ref(), |this, archive| {
                 this.child(render_kv(
                     tr(language, "archive_path"),
@@ -1417,12 +1469,12 @@ impl PreviewPaneView {
                     .gap_3()
                     .child(render_kv(
                         tr(language, "line_count"),
-                        document.line_count().to_string(),
+                        line_count.to_string(),
                         cx,
                     ))
                     .child(render_kv(
                         tr(language, "byte_size"),
-                        document.byte_len().to_string(),
+                        byte_len.to_string(),
                         cx,
                     )),
             )
@@ -1441,7 +1493,6 @@ impl PreviewPaneView {
                             line_count,
                             cx.processor(
                                 move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
-                                    view.queue_visible_range_sync(visible_range.clone(), app_cx);
                                     let muted = app_cx.theme().muted_foreground;
                                     let mono = app_cx.theme().mono_font_family.clone();
                                     let rows = view.render_lines_for(visible_range, app_cx);
@@ -1480,12 +1531,148 @@ impl PreviewPaneView {
                                 },
                             ),
                         )
+                        .with_decoration(PreviewVisibleRangeDecoration {
+                            preview_pane: cx.entity(),
+                        })
                         .track_scroll(self.scroll_handle.clone())
-                        .h_full()
+                        .flex_grow()
+                        .size_full()
                         .with_sizing_behavior(ListSizingBehavior::Auto)
                         .p_2(),
                     ),
             )
+            .into_any_element()
+    }
+
+    fn render_deferred_merged_preview(
+        &mut self,
+        language: crate::domain::Language,
+        deferred: &crate::ui::state::DeferredPreviewState,
+        error: Option<&str>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let detail = error
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| tr(language, "large_preview_hint").to_string());
+
+        v_flex()
+            .size_full()
+            .items_center()
+            .justify_center()
+            .gap_3()
+            .p_4()
+            .child(
+                div()
+                    .flex()
+                    .w(px(44.))
+                    .h(px(44.))
+                    .rounded(px(12.))
+                    .bg(cx.theme().accent)
+                    .text_color(cx.theme().accent_foreground)
+                    .items_center()
+                    .justify_center()
+                    .child(
+                        gpui_component::Icon::new(IconName::SquareTerminal).with_size(Size::Medium),
+                    ),
+            )
+            .child(
+                div()
+                    .font_semibold()
+                    .child(tr(language, "tab_merged_content")),
+            )
+            .child(
+                div()
+                    .max_w(px(520.))
+                    .text_sm()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(detail),
+            )
+            .child(
+                h_flex()
+                    .gap_3()
+                    .child(render_kv(
+                        tr(language, "byte_size"),
+                        format_size(deferred.source_byte_len),
+                        cx,
+                    ))
+                    .child(render_kv(
+                        tr(language, "load_1mb"),
+                        format_size(deferred.excerpt_byte_len),
+                        cx,
+                    )),
+            )
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("deferred-merged-load-1mb")
+                            .primary()
+                            .label(tr(language, "load_1mb"))
+                            .on_click(cx.listener(Self::load_deferred_excerpt)),
+                    )
+                    .child(
+                        Button::new("deferred-merged-load-all")
+                            .outline()
+                            .label(tr(language, "load_all"))
+                            .on_click(cx.listener(Self::load_deferred_full)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_deferred_excerpt_banner(
+        &mut self,
+        language: crate::domain::Language,
+        deferred: &crate::ui::state::DeferredPreviewState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .w_full()
+            .p_3()
+            .rounded(cx.theme().radius)
+            .border_1()
+            .border_color(cx.theme().border)
+            .bg(cx.theme().secondary.opacity(0.22))
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .gap_3()
+                    .child(
+                        v_flex()
+                            .gap_1()
+                            .child(div().font_semibold().child(tr(language, "preview_loaded")))
+                            .child(
+                                div()
+                                    .text_sm()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} {}",
+                                        tr(language, "large_preview_excerpt_hint"),
+                                        format_size(deferred.source_byte_len)
+                                    )),
+                            ),
+                    )
+                    .child(
+                        Button::new("deferred-merged-load-all-after-excerpt")
+                            .outline()
+                            .label(tr(language, "load_all"))
+                            .on_click(cx.listener(Self::load_deferred_full)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn load_deferred_excerpt(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace.load_deferred_merged_content_excerpt(workspace_cx);
+        });
+    }
+
+    fn load_deferred_full(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace.load_deferred_merged_content_full(workspace_cx);
+        });
     }
 
     pub(super) fn queue_visible_range_sync(
@@ -1493,9 +1680,20 @@ impl PreviewPaneView {
         visible: std::ops::Range<usize>,
         cx: &mut App,
     ) {
-        if self.pending_visible_range.as_ref() == Some(&visible)
-            || (!self.scheduled_visible_sync
-                && self.last_synced_visible_range.as_ref() == Some(&visible))
+        if let Some(pending) = self.pending_visible_range.as_ref() {
+            if range_contains_range(pending, &visible) {
+                return;
+            }
+            if self.scheduled_visible_sync && range_contains_range(&visible, pending) {
+                self.pending_visible_range = Some(visible);
+                return;
+            }
+        }
+        if !self.scheduled_visible_sync
+            && self
+                .last_synced_visible_range
+                .as_ref()
+                .is_some_and(|synced| range_contains_range(synced, &visible))
         {
             return;
         }
@@ -1699,4 +1897,29 @@ fn bucket_visible_range(
         .unwrap_or(bucket_lines)
         .min(line_count);
     bucket_start..bucket_end.max(bucket_start + 1).min(line_count)
+}
+
+fn range_contains_range(
+    container: &std::ops::Range<usize>,
+    candidate: &std::ops::Range<usize>,
+) -> bool {
+    container.start <= candidate.start && container.end >= candidate.end
+}
+
+impl UniformListDecoration for PreviewVisibleRangeDecoration {
+    fn compute(
+        &self,
+        visible_range: std::ops::Range<usize>,
+        _bounds: gpui::Bounds<gpui::Pixels>,
+        _scroll_offset: gpui::Point<gpui::Pixels>,
+        _item_height: gpui::Pixels,
+        _item_count: usize,
+        _window: &mut Window,
+        cx: &mut App,
+    ) -> AnyElement {
+        self.preview_pane.update(cx, |view, cx| {
+            view.queue_visible_range_sync(visible_range, cx);
+        });
+        Empty.into_any_element()
+    }
 }
