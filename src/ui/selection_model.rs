@@ -3,6 +3,7 @@ use std::path::PathBuf;
 
 use crate::domain::FileEntry;
 use crate::ui::state::SelectionState;
+use crate::ui::workspace::BlacklistItemKind;
 
 pub struct SelectionModel {
     state: SelectionState,
@@ -30,6 +31,8 @@ impl SelectionModel {
             selected_files: self.state.selected_files.clone(),
             gitignore_file: self.state.gitignore_file.clone(),
             gitignore_rules: self.state.gitignore_rules.clone(),
+            temp_folder_blacklist: self.state.temp_folder_blacklist.clone(),
+            temp_ext_blacklist: self.state.temp_ext_blacklist.clone(),
         }
     }
 
@@ -73,12 +76,73 @@ impl SelectionModel {
     pub fn set_dedupe_exact_path(&mut self, checked: bool) {
         self.state.dedupe_exact_path = checked;
     }
+
+    pub fn add_temporary_blacklist_tokens(&mut self, tokens: &[String], as_ext: bool) -> usize {
+        let mut added = 0;
+        for token in tokens {
+            if as_ext {
+                let normalized = crate::processor::walker::normalize_ext(token);
+                if push_unique(&mut self.state.temp_ext_blacklist, normalized) {
+                    added += 1;
+                }
+            } else if push_unique(&mut self.state.temp_folder_blacklist, token.clone()) {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    pub fn append_temporary_gitignore_rules(&mut self, rules: Vec<String>) -> usize {
+        let mut added = 0;
+        for rule in rules {
+            if push_unique(&mut self.state.temp_folder_blacklist, rule) {
+                added += 1;
+            }
+        }
+        added
+    }
+
+    pub fn remove_temporary_blacklist_item(&mut self, kind: BlacklistItemKind, value: &str) {
+        match kind {
+            BlacklistItemKind::Folder => {
+                self.state
+                    .temp_folder_blacklist
+                    .retain(|item| item != value);
+            }
+            BlacklistItemKind::Ext => {
+                self.state.temp_ext_blacklist.retain(|item| item != value);
+            }
+        }
+    }
+
+    pub fn clear_temporary_blacklist(&mut self) -> bool {
+        let changed = !self.state.temp_folder_blacklist.is_empty()
+            || !self.state.temp_ext_blacklist.is_empty();
+        self.state.temp_folder_blacklist.clear();
+        self.state.temp_ext_blacklist.clear();
+        changed
+    }
+
+    pub fn clear_temporary_merge_filters(&mut self) -> bool {
+        let changed = self.clear_temporary_blacklist() || self.state.gitignore_file.is_some();
+        self.state.gitignore_file = None;
+        changed
+    }
+}
+
+fn push_unique(values: &mut Vec<String>, value: String) -> bool {
+    if values.contains(&value) {
+        return false;
+    }
+    values.push(value);
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::SelectionModel;
     use crate::domain::FileEntry;
+    use crate::ui::workspace::BlacklistItemKind;
     use std::path::PathBuf;
 
     #[test]
@@ -102,5 +166,66 @@ mod tests {
         assert!(!model.state().dedupe_exact_path);
         assert!(model.state().selected_folder.is_none());
         assert!(model.state().gitignore_rules.is_empty());
+        assert!(model.state().temp_folder_blacklist.is_empty());
+        assert!(model.state().temp_ext_blacklist.is_empty());
+    }
+
+    #[test]
+    fn temporary_blacklist_normalizes_and_dedupes() {
+        let mut model = SelectionModel::new();
+
+        let added_folders = model.add_temporary_blacklist_tokens(
+            &["target".into(), "target".into(), "build".into()],
+            false,
+        );
+        let added_exts = model
+            .add_temporary_blacklist_tokens(&["log".into(), ".tmp".into(), ".log".into()], true);
+
+        assert_eq!(added_folders, 2);
+        assert_eq!(added_exts, 2);
+        assert_eq!(
+            model.state().temp_folder_blacklist,
+            vec!["target".to_string(), "build".to_string()]
+        );
+        assert_eq!(
+            model.state().temp_ext_blacklist,
+            vec![".log".to_string(), ".tmp".to_string()]
+        );
+    }
+
+    #[test]
+    fn clear_temporary_merge_filters_keeps_selected_inputs() {
+        let mut model = SelectionModel::new();
+        model.set_selected_folder(PathBuf::from("root"), vec!["node_modules".into()]);
+        model.set_gitignore_file(Some(PathBuf::from(".gitignore")));
+        model.add_temporary_blacklist_tokens(&["target".into()], false);
+        model.add_temporary_blacklist_tokens(&["tmp".into()], true);
+
+        let changed = model.clear_temporary_merge_filters();
+
+        assert!(changed);
+        assert_eq!(model.state().selected_folder, Some(PathBuf::from("root")));
+        assert!(model.state().gitignore_file.is_none());
+        assert!(
+            model
+                .state()
+                .gitignore_rules
+                .contains(&"node_modules".to_string())
+        );
+        assert!(model.state().temp_folder_blacklist.is_empty());
+        assert!(model.state().temp_ext_blacklist.is_empty());
+    }
+
+    #[test]
+    fn remove_temporary_blacklist_item_updates_matching_collection() {
+        let mut model = SelectionModel::new();
+        model.add_temporary_blacklist_tokens(&["target".into()], false);
+        model.add_temporary_blacklist_tokens(&["log".into()], true);
+
+        model.remove_temporary_blacklist_item(BlacklistItemKind::Folder, "target");
+        model.remove_temporary_blacklist_item(BlacklistItemKind::Ext, ".log");
+
+        assert!(model.state().temp_folder_blacklist.is_empty());
+        assert!(model.state().temp_ext_blacklist.is_empty());
     }
 }

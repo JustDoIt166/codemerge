@@ -238,17 +238,98 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_gitignore_section(
+    fn render_temporary_blacklist_sections(
         &self,
         language: crate::domain::Language,
+        selection: &crate::ui::state::SelectionState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sections = Rc::new(super::model::build_blacklist_sections(
+            &selection.temp_folder_blacklist,
+            &selection.temp_ext_blacklist,
+            "",
+            language,
+        ));
+
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(12.))
+            .bg(cx.theme().secondary.opacity(0.22))
+            .child(if sections.is_empty() {
+                empty_box(
+                    tr(language, "temporary_rules_empty_title"),
+                    tr(language, "temporary_rules_empty_hint"),
+                    IconName::BookOpen,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                div()
+                    .size_full()
+                    .min_h(px(0.))
+                    .overflow_x_hidden()
+                    .overflow_y_scrollbar()
+                    .p_2()
+                    .child(v_flex().gap_3().children(sections.iter().enumerate().map(
+                        |(section_ix, section)| {
+                            let tags = section
+                                .items
+                                .iter()
+                                .enumerate()
+                                .map(|(ix, item)| {
+                                    let kind = item.kind;
+                                    let value = item.value.clone();
+                                    render_blacklist_tag(
+                                        item,
+                                        Button::new((
+                                            "remove-temporary-blacklist",
+                                            section_ix * 1000 + ix,
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .with_size(Size::Small)
+                                        .icon(IconName::Delete)
+                                        .disabled(!item.deletable)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.remove_temporary_blacklist_item(
+                                                kind,
+                                                value.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                        .into_any_element(),
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            render_blacklist_section(section, tags, cx)
+                        },
+                    )))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    fn render_temporary_rules_section(
+        &self,
+        language: crate::domain::Language,
+        selection: &crate::ui::state::SelectionState,
         gitignore_label: String,
         has_gitignore_file: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let has_temporary_rules =
+            !selection.temp_folder_blacklist.is_empty() || !selection.temp_ext_blacklist.is_empty();
+
         v_flex()
             .gap_3()
             .child(section_title(
-                tr(language, "panel_gitignore"),
+                tr(language, "panel_temporary_rules"),
                 IconName::BookOpen,
                 cx,
             ))
@@ -282,7 +363,35 @@ impl Workspace {
                 div()
                     .text_xs()
                     .text_color(cx.theme().muted_foreground)
-                    .child(tr(language, "gitignore_apply_hint")),
+                    .child(tr(language, "temporary_rules_hint")),
+            )
+            .child(Input::new(&self.temp_blacklist_add_input).prefix(IconName::Plus))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("add-temporary-folder-blacklist")
+                            .outline()
+                            .icon(IconName::Folder)
+                            .label(tr(language, "add_temp_folder"))
+                            .on_click(cx.listener(Self::add_temporary_folder_blacklist)),
+                    )
+                    .child(
+                        Button::new("add-temporary-ext-blacklist")
+                            .outline()
+                            .icon(IconName::File)
+                            .label(tr(language, "add_temp_ext"))
+                            .on_click(cx.listener(Self::add_temporary_ext_blacklist)),
+                    ),
+            )
+            .child(self.render_temporary_blacklist_sections(language, selection, cx))
+            .child(
+                Button::new("clear-temporary-blacklist")
+                    .outline()
+                    .icon(IconName::Delete)
+                    .label(tr(language, "clear_temporary_rules"))
+                    .disabled(!has_temporary_rules)
+                    .on_click(cx.listener(Self::clear_temporary_blacklist)),
             )
             .into_any_element()
     }
@@ -408,16 +517,7 @@ impl Workspace {
             .gitignore_file
             .as_ref()
             .map(|path| path.display().to_string())
-            .unwrap_or_else(|| {
-                if settings.options.use_gitignore {
-                    tr(language, "gitignore_auto_hint").to_string()
-                } else {
-                    match settings.language {
-                        crate::domain::Language::Zh => "自动 .gitignore 已停用".to_string(),
-                        crate::domain::Language::En => "Auto .gitignore disabled".to_string(),
-                    }
-                }
-            });
+            .unwrap_or_else(|| tr(language, "temporary_gitignore_empty").to_string());
 
         flow_card(cx).child(
             v_flex()
@@ -443,8 +543,9 @@ impl Workspace {
                     ui_state.selected_files_panel_height,
                     cx,
                 ))
-                .child(self.render_gitignore_section(
+                .child(self.render_temporary_rules_section(
                     language,
+                    &selection,
                     gitignore_label,
                     selection.gitignore_file.is_some(),
                     cx,

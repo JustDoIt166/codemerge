@@ -240,14 +240,19 @@ impl Workspace {
             (events, disconnected)
         });
         let mut finish_processing = disconnected;
+        let mut completed_successfully = false;
         for event in events {
             received_events = true;
-            let (_, event_finished) = self.apply_process_event(event, cx);
+            let (event_completed, event_finished) = self.apply_process_event(event, cx);
+            completed_successfully |= event_completed;
             finish_processing = event_finished || finish_processing;
         }
         if finish_processing {
             self.process
                 .update(cx, |process, _| process.state_mut().finish_run());
+        }
+        if completed_successfully && self.clear_temporary_merge_filters(cx) {
+            self.refresh_preflight(cx);
         }
 
         if let Some(rx) = self
@@ -607,6 +612,7 @@ impl Workspace {
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
+        let effective_blacklists = self.effective_blacklists(cx);
         let revision = self.process.update(cx, |process, process_cx| {
             let is_processing = process.is_processing();
             let state = process.state_mut();
@@ -627,8 +633,8 @@ impl Workspace {
                     .iter()
                     .map(|f| f.path.clone())
                     .collect(),
-                folder_blacklist: self.effective_folder_blacklist(cx),
-                ext_blacklist: settings.ext_blacklist.clone(),
+                folder_blacklist: effective_blacklists.folder_blacklist,
+                ext_blacklist: effective_blacklists.ext_blacklist,
             },
             crate::processor::walker::WalkerOptions {
                 use_gitignore: settings.options.use_gitignore,
@@ -640,6 +646,16 @@ impl Workspace {
             process_cx.notify();
         });
         self.ensure_background_polling(cx);
+    }
+
+    pub(super) fn clear_temporary_merge_filters(&mut self, cx: &mut Context<Self>) -> bool {
+        self.selection.update(cx, |selection, selection_cx| {
+            let cleared = selection.clear_temporary_merge_filters();
+            if cleared {
+                selection_cx.notify();
+            }
+            cleared
+        })
     }
 
     pub(super) fn clear_preview_state(&mut self, cx: &mut Context<Self>) {

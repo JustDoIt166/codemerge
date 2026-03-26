@@ -98,6 +98,8 @@ pub struct SelectionState {
     pub selected_files: Vec<FileEntry>,
     pub gitignore_file: Option<PathBuf>,
     pub gitignore_rules: Vec<String>,
+    pub temp_folder_blacklist: Vec<String>,
+    pub temp_ext_blacklist: Vec<String>,
 }
 
 #[derive(Clone)]

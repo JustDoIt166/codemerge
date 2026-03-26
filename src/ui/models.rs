@@ -7,6 +7,12 @@ use crate::ui::state::{
 };
 use crate::utils::i18n::tr;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveBlacklistRules {
+    pub folder_blacklist: Vec<String>,
+    pub ext_blacklist: Vec<String>,
+}
+
 pub struct SettingsModel {
     state: SettingsState,
 }
@@ -45,27 +51,20 @@ impl SettingsModel {
         self.state.language
     }
 
-    pub fn effective_folder_blacklist(&self, selection: &SelectionState) -> Vec<String> {
-        let mut rules = self.state.folder_blacklist.clone();
+    pub fn effective_blacklists(&self, selection: &SelectionState) -> EffectiveBlacklistRules {
+        let mut folder_blacklist = self.state.folder_blacklist.clone();
         if self.state.options.use_gitignore {
-            for rule in &selection.gitignore_rules {
-                if !rules.contains(rule) {
-                    rules.push(rule.clone());
-                }
-            }
+            append_unique_rules(&mut folder_blacklist, &selection.gitignore_rules);
         }
-        rules
-    }
+        append_unique_rules(&mut folder_blacklist, &selection.temp_folder_blacklist);
 
-    pub fn append_gitignore_rules(&mut self, rules: Vec<String>) -> usize {
-        let mut added = 0;
-        for rule in rules {
-            if !self.state.folder_blacklist.contains(&rule) {
-                self.state.folder_blacklist.push(rule);
-                added += 1;
-            }
+        let mut ext_blacklist = self.state.ext_blacklist.clone();
+        append_unique_rules(&mut ext_blacklist, &selection.temp_ext_blacklist);
+
+        EffectiveBlacklistRules {
+            folder_blacklist,
+            ext_blacklist,
         }
-        added
     }
 
     pub fn add_blacklist_tokens(&mut self, tokens: &[String], as_ext: bool) -> usize {
@@ -152,6 +151,14 @@ impl SettingsModel {
 
     pub fn set_output_format(&mut self, format: crate::domain::OutputFormat) {
         self.state.options.output_format = format;
+    }
+}
+
+fn append_unique_rules(target: &mut Vec<String>, rules: &[String]) {
+    for rule in rules {
+        if !target.contains(rule) {
+            target.push(rule.clone());
+        }
     }
 }
 
@@ -370,7 +377,9 @@ pub enum ProcessEventEffect {
 
 #[cfg(test)]
 mod tests {
-    use super::{ProcessEventEffect, ProcessModel, SettingsModel, WorkspaceUiModel};
+    use super::{
+        EffectiveBlacklistRules, ProcessEventEffect, ProcessModel, SettingsModel, WorkspaceUiModel,
+    };
     use crate::domain::{
         AppConfigV1, Language, OutputFormat, ProcessResult, ProcessStatus, ProcessingMode,
         ProcessingOptions,
@@ -380,7 +389,7 @@ mod tests {
     use crate::ui::state::{NarrowContentTab, PendingConfirmation, SelectionState, SidePanelTab};
 
     #[test]
-    fn effective_folder_blacklist_respects_use_gitignore() {
+    fn effective_blacklists_respect_use_gitignore_and_temporary_rules() {
         let config = AppConfigV1 {
             language: Language::En,
             options: ProcessingOptions {
@@ -391,24 +400,36 @@ mod tests {
                 mode: ProcessingMode::Full,
             },
             folder_blacklist: vec!["target".into()],
-            ext_blacklist: Vec::new(),
+            ext_blacklist: vec![".log".into()],
         };
         let model = SettingsModel::from_config(config);
         let selection = SelectionState {
             gitignore_rules: vec!["node_modules".into()],
+            temp_folder_blacklist: vec!["coverage".into()],
+            temp_ext_blacklist: vec![".tmp".into()],
             ..SelectionState::default()
         };
 
         let mut settings = model;
         assert_eq!(
-            settings.effective_folder_blacklist(&selection),
-            vec!["target".to_string(), "node_modules".to_string()]
+            settings.effective_blacklists(&selection),
+            EffectiveBlacklistRules {
+                folder_blacklist: vec![
+                    "target".to_string(),
+                    "node_modules".to_string(),
+                    "coverage".to_string()
+                ],
+                ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+            }
         );
 
         settings.set_use_gitignore(false);
         assert_eq!(
-            settings.effective_folder_blacklist(&selection),
-            vec!["target".to_string()]
+            settings.effective_blacklists(&selection),
+            EffectiveBlacklistRules {
+                folder_blacklist: vec!["target".to_string(), "coverage".to_string()],
+                ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+            }
         );
     }
 

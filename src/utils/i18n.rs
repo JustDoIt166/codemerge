@@ -47,8 +47,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "select_files") => "Select Files",
         (Language::Zh, "select_gitignore") => "选择 .gitignore",
         (Language::En, "select_gitignore") => "Select .gitignore",
-        (Language::Zh, "apply_gitignore") => "应用规则",
-        (Language::En, "apply_gitignore") => "Apply",
+        (Language::Zh, "apply_gitignore") => "应用到本次合并",
+        (Language::En, "apply_gitignore") => "Apply to This Run",
         (Language::Zh, "save_settings") => "保存设置",
         (Language::En, "save_settings") => "Save Settings",
 
@@ -57,8 +57,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "section_files") => "Files",
         (Language::Zh, "panel_inputs") => "输入与处理设置",
         (Language::En, "panel_inputs") => "Inputs & Processing",
-        (Language::Zh, "panel_gitignore") => ".gitignore 规则",
-        (Language::En, "panel_gitignore") => ".gitignore Rules",
+        (Language::Zh, "panel_temporary_rules") => "本次合并规则",
+        (Language::En, "panel_temporary_rules") => "One-Run Rules",
         (Language::Zh, "panel_status") => "处理状态",
         (Language::En, "panel_status") => "Processing Status",
         (Language::Zh, "panel_results") => "结果",
@@ -85,9 +85,13 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "gitignore_auto_hint") => {
             "Auto-detected .gitignore from the selected folder will be used first"
         }
-        (Language::Zh, "gitignore_apply_hint") => "手动选择后再应用规则，避免误覆盖当前黑名单",
-        (Language::En, "gitignore_apply_hint") => {
-            "Apply a manually selected file only when you want to append its rules"
+        (Language::Zh, "temporary_gitignore_empty") => "未选择本次合并用 .gitignore",
+        (Language::En, "temporary_gitignore_empty") => "No .gitignore selected for this run",
+        (Language::Zh, "temporary_rules_hint") => {
+            "这些规则会参与预检和本次处理，成功后自动清空，不会保存到配置。"
+        }
+        (Language::En, "temporary_rules_hint") => {
+            "These rules affect preflight and this run only. They are cleared after a successful run and are not saved."
         }
         (Language::Zh, "folder_label") => "文件夹: ",
         (Language::En, "folder_label") => "folder: ",
@@ -149,16 +153,36 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "blacklist_unified_hint") => {
             "Input folders/extensions, supports newline/comma/space"
         }
+        (Language::Zh, "temporary_rules_unified_hint") => {
+            "输入本次合并规则，支持换行/逗号/空格批量粘贴"
+        }
+        (Language::En, "temporary_rules_unified_hint") => {
+            "Input one-run filters, supports newline/comma/space"
+        }
         (Language::Zh, "add_folder") => "添加文件夹",
         (Language::En, "add_folder") => "Add Folder",
+        (Language::Zh, "add_temp_folder") => "本次文件夹",
+        (Language::En, "add_temp_folder") => "Run Folder",
         (Language::Zh, "extension") => "扩展名",
         (Language::En, "extension") => ".ext",
         (Language::Zh, "add_ext") => "添加扩展名",
         (Language::En, "add_ext") => "Add Ext",
+        (Language::Zh, "add_temp_ext") => "本次扩展名",
+        (Language::En, "add_temp_ext") => "Run Ext",
         (Language::Zh, "rules_group_folders") => "文件夹规则",
         (Language::En, "rules_group_folders") => "Folders",
         (Language::Zh, "rules_group_extensions") => "扩展名规则",
         (Language::En, "rules_group_extensions") => "Extensions",
+        (Language::Zh, "clear_temporary_rules") => "清空本次规则",
+        (Language::En, "clear_temporary_rules") => "Clear One-Run Rules",
+        (Language::Zh, "temporary_rules_empty_title") => "当前没有本次合并规则",
+        (Language::En, "temporary_rules_empty_title") => "No one-run rules yet",
+        (Language::Zh, "temporary_rules_empty_hint") => {
+            "手动添加规则或应用 .gitignore 后，这里会显示本次合并规则。"
+        }
+        (Language::En, "temporary_rules_empty_hint") => {
+            "Rules added here or imported from .gitignore will appear here for this run."
+        }
         (Language::Zh, "blacklist_no_match") => "无匹配条目",
         (Language::En, "blacklist_no_match") => "No matching entries",
         (Language::Zh, "blacklist_match_count") => "匹配条数:",
@@ -477,8 +501,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "read_gitignore_failed") => "read .gitignore failed: ",
         (Language::Zh, "save_config_failed") => "保存配置失败: ",
         (Language::En, "save_config_failed") => "save config failed: ",
-        (Language::Zh, "blacklist_saved") => "黑名单已保存",
-        (Language::En, "blacklist_saved") => "Blacklist saved",
+        (Language::Zh, "temporary_gitignore_applied") => "已将 .gitignore 规则应用到本次合并",
+        (Language::En, "temporary_gitignore_applied") => ".gitignore rules applied to this run",
         (Language::Zh, "duplicate_files_ignored") => " 条重复文件被忽略",
         (Language::En, "duplicate_files_ignored") => " duplicate files were ignored",
         (Language::Zh, "folder_selected") => "已选择文件夹",
@@ -501,8 +525,12 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "files_cleared") => "File list cleared",
         (Language::Zh, "blacklist_added") => "已添加黑名单项",
         (Language::En, "blacklist_added") => "Blacklist item added",
+        (Language::Zh, "temporary_rules_added") => "已添加本次合并规则",
+        (Language::En, "temporary_rules_added") => "One-run rule added",
         (Language::Zh, "blacklist_item_removed") => "已移除规则",
         (Language::En, "blacklist_item_removed") => "Rule removed",
+        (Language::Zh, "temporary_rule_removed") => "已移除本次合并规则",
+        (Language::En, "temporary_rule_removed") => "One-run rule removed",
         (Language::Zh, "blacklist_removed") => "已移除黑名单项",
         (Language::En, "blacklist_removed") => "Blacklist item removed",
         (Language::Zh, "blacklist_empty") => "没有可添加的条目",
@@ -513,6 +541,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "blacklist_reset_default") => "Reset to default blacklist",
         (Language::Zh, "blacklist_cleared") => "黑名单已清空",
         (Language::En, "blacklist_cleared") => "Blacklist cleared",
+        (Language::Zh, "temporary_rules_cleared") => "本次合并规则已清空",
+        (Language::En, "temporary_rules_cleared") => "One-run rules cleared",
         (Language::Zh, "blacklist_imported") => "已导入条目数:",
         (Language::En, "blacklist_imported") => "Imported entries:",
         (Language::Zh, "blacklist_exported") => "黑名单已导出",

@@ -348,6 +348,7 @@ pub struct Workspace {
     suppress_preview_table_events: bool,
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
+    temp_blacklist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
     input_panel_view: Entity<InputPanelView>,
     status_panel_view: Entity<StatusPanelView>,
@@ -380,6 +381,10 @@ impl Workspace {
         });
         let blacklist_add_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder(tr(cfg.language, "blacklist_unified_hint"))
+        });
+        let temp_blacklist_add_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr(cfg.language, "temporary_rules_unified_hint"))
         });
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table = cx.new(|cx| {
@@ -510,6 +515,7 @@ impl Workspace {
             suppress_preview_table_events: false,
             blacklist_filter_input,
             blacklist_add_input,
+            temp_blacklist_add_input,
             rules_panel: RulesPanelController {
                 revision: 0,
                 cache: RulesPanelCache::default(),
@@ -604,11 +610,12 @@ impl Workspace {
         self.settings.read(cx).language()
     }
 
-    pub(super) fn effective_folder_blacklist(&self, cx: &App) -> Vec<String> {
+    pub(super) fn effective_blacklists(
+        &self,
+        cx: &App,
+    ) -> crate::ui::models::EffectiveBlacklistRules {
         let selection = self.selection_snapshot(cx);
-        self.settings
-            .read(cx)
-            .effective_folder_blacklist(&selection)
+        self.settings.read(cx).effective_blacklists(&selection)
     }
 
     pub(super) fn result_has_content(&self, cx: &App) -> bool {
@@ -679,6 +686,9 @@ impl Workspace {
         self.blacklist_add_input.update(cx, |state, cx| {
             state.set_placeholder(tr(language, "blacklist_unified_hint"), window, cx)
         });
+        self.temp_blacklist_add_input.update(cx, |state, cx| {
+            state.set_placeholder(tr(language, "temporary_rules_unified_hint"), window, cx)
+        });
         self.preview_table.update(cx, |table, cx| {
             table.delegate_mut().set_language(language);
             cx.notify();
@@ -720,17 +730,20 @@ impl Workspace {
         let selection = self.selection.read(cx).snapshot();
         let ui = self.ui.read(cx).state();
         Self::hash_value(&(
-            settings.language,
-            settings.options,
-            settings.folder_blacklist,
-            settings.ext_blacklist,
-            selection.dedupe_exact_path,
-            selection.selected_folder,
-            selection.selected_files,
-            selection.gitignore_file,
-            selection.gitignore_rules,
-            ui.selected_files_panel_height,
-            ui.pending_confirmation,
+            (settings.language, settings.options),
+            (settings.folder_blacklist, settings.ext_blacklist),
+            (
+                selection.dedupe_exact_path,
+                selection.selected_folder,
+                selection.selected_files,
+            ),
+            (
+                selection.gitignore_file,
+                selection.gitignore_rules,
+                selection.temp_folder_blacklist,
+                selection.temp_ext_blacklist,
+            ),
+            (ui.selected_files_panel_height, ui.pending_confirmation),
         ))
     }
 
@@ -1266,12 +1279,15 @@ mod tests {
         EXCERPT_PREVIEW_BYTES, MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest,
         index_document, load_range,
     };
+    use crate::services::process::{ProcessEvent, ProcessHandle};
     use crate::ui::{perf, preview_model::PreviewModel};
     use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
+    use std::sync::mpsc;
     use std::time::{Duration, Instant};
+    use tokio_util::sync::CancellationToken;
 
     #[gpui::test]
     fn preview_render_cache_handles_large_visible_windows(cx: &mut TestAppContext) {
@@ -1401,6 +1417,116 @@ mod tests {
             let second_key = workspace.input_panel_invalidation_key(cx);
 
             assert_ne!(first_key, second_key);
+        });
+    }
+
+    #[gpui::test]
+    fn successful_process_completion_clears_temporary_filters_and_restarts_preflight(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.selection.update(cx, |selection, selection_cx| {
+                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection_cx.notify();
+            });
+            let (tx, rx) = mpsc::channel();
+            tx.send(ProcessEvent::Completed(sample_result()))
+                .expect("send completed");
+            drop(tx);
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    receiver: rx,
+                    cancel: CancellationToken::new(),
+                });
+            });
+
+            let _ = workspace.poll_background(cx);
+
+            let selection = workspace.selection_snapshot(cx);
+            assert!(selection.gitignore_file.is_none());
+            assert!(selection.temp_folder_blacklist.is_empty());
+            assert!(selection.temp_ext_blacklist.is_empty());
+            assert!(workspace.process.read(cx).state().preflight_rx.is_some());
+        });
+    }
+
+    #[gpui::test]
+    fn cancelled_process_keeps_temporary_filters(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.selection.update(cx, |selection, selection_cx| {
+                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection_cx.notify();
+            });
+            let (tx, rx) = mpsc::channel();
+            tx.send(ProcessEvent::Cancelled).expect("send cancelled");
+            drop(tx);
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    receiver: rx,
+                    cancel: CancellationToken::new(),
+                });
+            });
+
+            let _ = workspace.poll_background(cx);
+
+            let selection = workspace.selection_snapshot(cx);
+            assert_eq!(
+                selection.gitignore_file.as_deref(),
+                Some(std::path::Path::new("manual.gitignore"))
+            );
+            assert_eq!(
+                selection.temp_folder_blacklist,
+                vec!["node_modules".to_string()]
+            );
+            assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
+        });
+    }
+
+    #[gpui::test]
+    fn failed_process_keeps_temporary_filters(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.selection.update(cx, |selection, selection_cx| {
+                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection_cx.notify();
+            });
+            let (tx, rx) = mpsc::channel();
+            tx.send(ProcessEvent::Failed(crate::error::AppError::new("boom")))
+                .expect("send failed");
+            drop(tx);
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    receiver: rx,
+                    cancel: CancellationToken::new(),
+                });
+            });
+
+            let _ = workspace.poll_background(cx);
+
+            let selection = workspace.selection_snapshot(cx);
+            assert_eq!(
+                selection.gitignore_file.as_deref(),
+                Some(std::path::Path::new("manual.gitignore"))
+            );
+            assert_eq!(
+                selection.temp_folder_blacklist,
+                vec!["node_modules".to_string()]
+            );
+            assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
         });
     }
 

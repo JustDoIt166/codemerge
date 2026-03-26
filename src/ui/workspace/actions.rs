@@ -28,6 +28,14 @@ use crate::utils::i18n::tr;
 use crate::utils::path::filename;
 
 impl Workspace {
+    fn parse_blacklist_tokens(raw: &str) -> Vec<String> {
+        raw.split(|ch: char| ch == ',' || ch == '\n' || ch.is_whitespace())
+            .filter(|part| !part.trim().is_empty())
+            .map(str::trim)
+            .map(ToOwned::to_owned)
+            .collect::<Vec<_>>()
+    }
+
     fn notify_active_window(cx: &mut App, kind: NotificationType, message: impl Into<String>) {
         if let Some(window) = cx.active_window() {
             let message = SharedString::from(message.into());
@@ -325,6 +333,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        self.clear_pending_confirmation(cx);
         let selection = self.selection_snapshot(cx);
         let Some(path) = &selection.gitignore_file else {
             self.push_notice(
@@ -343,19 +352,27 @@ impl Workspace {
                 .map(|content| crate::processor::walker::parse_gitignore_rules(&content));
             let _ = this.update(cx, |this, cx| match loaded {
                 Ok(rules) => {
-                    this.settings.update(cx, |settings, settings_cx| {
-                        let added = settings.append_gitignore_rules(rules);
-                        settings_cx.notify();
+                    let added = this.selection.update(cx, |selection, selection_cx| {
+                        let added = selection.append_temporary_gitignore_rules(rules);
+                        if added > 0 {
+                            selection_cx.notify();
+                        }
                         added
                     });
-                    this.invalidate_rules_panel_cache();
-                    this.persist_settings_async(cx);
-                    this.refresh_preflight(cx);
-                    Self::notify_active_window(
-                        cx,
-                        NotificationType::Success,
-                        tr(language, "blacklist_saved"),
-                    );
+                    if added > 0 {
+                        this.refresh_preflight(cx);
+                        Self::notify_active_window(
+                            cx,
+                            NotificationType::Success,
+                            tr(language, "temporary_gitignore_applied"),
+                        );
+                    } else {
+                        Self::notify_active_window(
+                            cx,
+                            NotificationType::Warning,
+                            tr(language, "blacklist_empty"),
+                        );
+                    }
                 }
                 Err(err) => Self::notify_active_window(
                     cx,
@@ -484,6 +501,7 @@ impl Workspace {
         self.sync_preview_table(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
+        let effective_blacklists = self.effective_blacklists(cx);
         let handle = crate::services::process::start(ProcessRequest {
             selected_folder: selection.selected_folder.clone(),
             selected_files: selection
@@ -491,8 +509,8 @@ impl Workspace {
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect(),
-            folder_blacklist: self.effective_folder_blacklist(cx),
-            ext_blacklist: settings.ext_blacklist.clone(),
+            folder_blacklist: effective_blacklists.folder_blacklist,
+            ext_blacklist: effective_blacklists.ext_blacklist,
             options: settings.options.clone(),
             language: settings.language,
         });
@@ -555,6 +573,32 @@ impl Workspace {
         }
     }
 
+    pub(super) fn add_temporary_folder_blacklist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let added = self.consume_temporary_blacklist_input(false, window, cx);
+        if added > 0 {
+            self.refresh_preflight(cx);
+        }
+    }
+
+    pub(super) fn add_temporary_ext_blacklist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let added = self.consume_temporary_blacklist_input(true, window, cx);
+        if added > 0 {
+            self.refresh_preflight(cx);
+        }
+    }
+
     pub(super) fn consume_blacklist_input(
         &mut self,
         as_ext: bool,
@@ -562,12 +606,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> usize {
         let raw = self.blacklist_add_input.read(cx).value().to_string();
-        let tokens = raw
-            .split(|ch: char| ch == ',' || ch == '\n' || ch.is_whitespace())
-            .filter(|part| !part.trim().is_empty())
-            .map(str::trim)
-            .map(ToOwned::to_owned)
-            .collect::<Vec<_>>();
+        let tokens = Self::parse_blacklist_tokens(&raw);
         if tokens.is_empty() {
             self.push_notice(
                 NotificationType::Warning,
@@ -579,9 +618,21 @@ impl Workspace {
         }
 
         let added = self.settings.update(cx, |settings, settings_cx| {
-            settings_cx.notify();
-            settings.add_blacklist_tokens(&tokens, as_ext)
+            let added = settings.add_blacklist_tokens(&tokens, as_ext);
+            if added > 0 {
+                settings_cx.notify();
+            }
+            added
         });
+        if added == 0 {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "blacklist_empty"),
+                window,
+                cx,
+            );
+            return 0;
+        }
         self.blacklist_add_input
             .update(cx, |state, cx| state.set_value("", window, cx));
         self.invalidate_rules_panel_cache();
@@ -589,6 +640,51 @@ impl Workspace {
         self.push_notice(
             NotificationType::Success,
             tr(self.language(cx), "blacklist_added"),
+            window,
+            cx,
+        );
+        added
+    }
+
+    pub(super) fn consume_temporary_blacklist_input(
+        &mut self,
+        as_ext: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let raw = self.temp_blacklist_add_input.read(cx).value().to_string();
+        let tokens = Self::parse_blacklist_tokens(&raw);
+        if tokens.is_empty() {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "blacklist_empty"),
+                window,
+                cx,
+            );
+            return 0;
+        }
+
+        let added = self.selection.update(cx, |selection, selection_cx| {
+            let added = selection.add_temporary_blacklist_tokens(&tokens, as_ext);
+            if added > 0 {
+                selection_cx.notify();
+            }
+            added
+        });
+        if added == 0 {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "blacklist_empty"),
+                window,
+                cx,
+            );
+            return 0;
+        }
+        self.temp_blacklist_add_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.push_notice(
+            NotificationType::Success,
+            tr(self.language(cx), "temporary_rules_added"),
             window,
             cx,
         );
@@ -758,6 +854,38 @@ impl Workspace {
         self.push_notice(
             NotificationType::Info,
             tr(self.language(cx), "blacklist_cleared"),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn clear_temporary_blacklist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let cleared = self.selection.update(cx, |selection, selection_cx| {
+            let cleared = selection.clear_temporary_blacklist();
+            if cleared {
+                selection_cx.notify();
+            }
+            cleared
+        });
+        if !cleared {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "blacklist_empty"),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.refresh_preflight(cx);
+        self.push_notice(
+            NotificationType::Info,
+            tr(self.language(cx), "temporary_rules_cleared"),
             window,
             cx,
         );
@@ -995,6 +1123,36 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    pub(super) fn remove_temporary_blacklist_item(
+        &mut self,
+        kind: BlacklistItemKind,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let removed = self.selection.update(cx, |selection, selection_cx| {
+            let before = selection.snapshot();
+            selection.remove_temporary_blacklist_item(kind, &value);
+            let after = selection.snapshot();
+            let removed = before.temp_folder_blacklist != after.temp_folder_blacklist
+                || before.temp_ext_blacklist != after.temp_ext_blacklist;
+            if removed {
+                selection_cx.notify();
+            }
+            removed
+        });
+        if removed {
+            self.refresh_preflight(cx);
+            self.push_notice(
+                NotificationType::Info,
+                tr(self.language(cx), "temporary_rule_removed"),
+                window,
+                cx,
+            );
+        }
     }
 
     pub(super) fn download_result(
