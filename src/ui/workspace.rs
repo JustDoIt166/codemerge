@@ -12,11 +12,12 @@ use std::{hash::Hash, hash::Hasher, ops::Range};
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId, FocusHandle, Focusable,
-    InteractiveElement, ParentElement, Pixels, Render, SharedString, Styled, Subscription, Task,
-    Timer, UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, px, size,
+    InteractiveElement, ParentElement, Pixels, Render, SharedString,
+    StatefulInteractiveElement as _, Styled, Subscription, Task, Timer, UniformListScrollHandle,
+    Window, div, prelude::FluentBuilder as _, px, size,
 };
 use gpui_component::{
-    ActiveTheme as _, Sizable, Size, WindowExt as _, h_flex,
+    ActiveTheme as _, Icon, IconName, Sizable, Size, WindowExt as _, h_flex,
     input::InputState,
     notification::NotificationType,
     table::{Column, TableDelegate, TableState},
@@ -59,6 +60,7 @@ pub(super) struct PreviewTableDelegate {
     language: Language,
     columns: Vec<Column>,
     rows: Vec<PreviewRowViewModel>,
+    sort: model::PreviewTableSort,
 }
 
 impl PreviewTableDelegate {
@@ -75,6 +77,7 @@ impl PreviewTableDelegate {
                     .text_right(),
             ],
             rows: Vec::new(),
+            sort: model::PreviewTableSort::default(),
         }
     }
 
@@ -83,6 +86,11 @@ impl PreviewTableDelegate {
         self.columns[0].name = tr(language, "table_path").into();
         self.columns[1].name = tr(language, "table_chars").into();
         self.columns[2].name = tr(language, "table_tokens").into();
+    }
+
+    fn toggle_chars_sort(&mut self) {
+        self.sort = self.sort.toggle_chars();
+        model::sort_preview_rows(&mut self.rows, self.sort);
     }
 }
 
@@ -103,9 +111,51 @@ impl TableDelegate for PreviewTableDelegate {
         &mut self,
         col_ix: usize,
         _: &mut Window,
-        _: &mut Context<TableState<Self>>,
+        cx: &mut Context<TableState<Self>>,
     ) -> impl IntoElement {
-        self.columns[col_ix].name.clone()
+        if col_ix == 1 {
+            let icon_name = match self.sort {
+                model::PreviewTableSort::None => IconName::ChevronsUpDown,
+                model::PreviewTableSort::CharsDesc => IconName::SortDescending,
+                model::PreviewTableSort::CharsAsc => IconName::SortAscending,
+            };
+            return h_flex()
+                .id(("preview-table-sort", col_ix))
+                .gap_1()
+                .items_center()
+                .child(self.columns[col_ix].name.clone())
+                .child(
+                    Icon::new(icon_name)
+                        .size_3()
+                        .text_color(cx.theme().secondary_foreground),
+                )
+                .on_click(cx.listener(move |table, _, _, cx| {
+                    cx.stop_propagation();
+                    let selected_id = table
+                        .selected_row()
+                        .and_then(|row_ix| table.delegate().rows.get(row_ix))
+                        .map(|row| row.id);
+                    table.delegate_mut().toggle_chars_sort();
+                    if let Some(selected_id) = selected_id {
+                        if let Some(next_row_ix) = table
+                            .delegate()
+                            .rows
+                            .iter()
+                            .position(|row| row.id == selected_id)
+                        {
+                            if table.selected_row() != Some(next_row_ix) {
+                                table.set_selected_row(next_row_ix, cx);
+                            }
+                        } else if table.selected_row().is_some() {
+                            table.clear_selection(cx);
+                        }
+                    }
+                    cx.notify();
+                }))
+                .into_any_element();
+        }
+
+        self.columns[col_ix].name.clone().into_any_element()
     }
 
     fn render_td(
@@ -268,6 +318,7 @@ struct PreviewTableCache {
     filter: String,
     result_key: u64,
     current_selected_id: Option<u32>,
+    sort: model::PreviewTableSort,
     model: Option<model::PreviewTableModel>,
 }
 
@@ -331,8 +382,11 @@ impl Workspace {
             InputState::new(window, cx).placeholder(tr(cfg.language, "blacklist_unified_hint"))
         });
         let tree_state = cx.new(|cx| TreeState::new(cx));
-        let preview_table =
-            cx.new(|cx| TableState::new(PreviewTableDelegate::new(cfg.language), window, cx));
+        let preview_table = cx.new(|cx| {
+            TableState::new(PreviewTableDelegate::new(cfg.language), window, cx)
+                .col_selectable(false)
+                .sortable(false)
+        });
         let suppress_tree_interaction_sync = Rc::new(Cell::new(false));
         let settings_model = cx.new(|_| SettingsModel::from_config(cfg.clone()));
         let ui_model = cx.new(|_| WorkspaceUiModel::new());

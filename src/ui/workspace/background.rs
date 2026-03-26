@@ -504,6 +504,7 @@ impl Workspace {
             .trim()
             .to_ascii_lowercase();
         let current_selected_id = self.preview.read(cx).selected_preview_file_id();
+        let sort = self.preview_table.read(cx).delegate().sort;
         let has_merged_content = self
             .result
             .read(cx)
@@ -525,12 +526,14 @@ impl Workspace {
         let table_model = if self.preview_table_cache.filter == filter
             && self.preview_table_cache.result_key == result_key
             && self.preview_table_cache.current_selected_id == current_selected_id
+            && self.preview_table_cache.sort == sort
         {
             self.preview_table_cache.model.clone().unwrap_or_else(|| {
                 model::build_preview_table_model(
                     self.result.read(cx).state().result.as_ref(),
                     filter.as_str(),
                     current_selected_id,
+                    sort,
                 )
             })
         } else {
@@ -538,10 +541,12 @@ impl Workspace {
                 self.result.read(cx).state().result.as_ref(),
                 filter.as_str(),
                 current_selected_id,
+                sort,
             );
             self.preview_table_cache.filter = filter.clone();
             self.preview_table_cache.result_key = result_key;
             self.preview_table_cache.current_selected_id = current_selected_id;
+            self.preview_table_cache.sort = sort;
             self.preview_table_cache.model = Some(model.clone());
             model
         };

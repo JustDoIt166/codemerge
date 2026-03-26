@@ -139,6 +139,23 @@ pub(super) struct PreviewTableModel {
     pub next_selected_file_id: Option<u32>,
 }
 
+#[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(super) enum PreviewTableSort {
+    #[default]
+    None,
+    CharsDesc,
+    CharsAsc,
+}
+
+impl PreviewTableSort {
+    pub fn toggle_chars(self) -> Self {
+        match self {
+            Self::CharsDesc => Self::CharsAsc,
+            Self::CharsAsc | Self::None => Self::CharsDesc,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(super) struct BlacklistTagViewModel {
     pub kind: BlacklistItemKind,
@@ -350,8 +367,9 @@ pub(super) fn build_preview_table_model(
     result: Option<&ProcessResult>,
     filter: &str,
     current_selected_id: Option<u32>,
+    sort: PreviewTableSort,
 ) -> PreviewTableModel {
-    let rows = result
+    let mut rows = result
         .map(|result| {
             result
                 .preview_files
@@ -369,6 +387,7 @@ pub(super) fn build_preview_table_model(
                 .collect::<Vec<_>>()
         })
         .unwrap_or_default();
+    sort_preview_rows(&mut rows, sort);
 
     let selected_row_ix = rows
         .iter()
@@ -382,6 +401,25 @@ pub(super) fn build_preview_table_model(
         rows,
         selected_row_ix,
         next_selected_file_id,
+    }
+}
+
+pub(super) fn sort_preview_rows(rows: &mut [PreviewRowViewModel], sort: PreviewTableSort) {
+    match sort {
+        PreviewTableSort::None => {}
+        PreviewTableSort::CharsDesc => rows.sort_by(|left, right| {
+            right
+                .chars
+                .cmp(&left.chars)
+                .then_with(|| left.display_path.cmp(&right.display_path))
+                .then_with(|| left.id.cmp(&right.id))
+        }),
+        PreviewTableSort::CharsAsc => rows.sort_by(|left, right| {
+            left.chars
+                .cmp(&right.chars)
+                .then_with(|| left.display_path.cmp(&right.display_path))
+                .then_with(|| left.id.cmp(&right.id))
+        }),
     }
 }
 
@@ -864,12 +902,12 @@ mod tests {
     use gpui::Decorations;
 
     use super::{
-        TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect, WindowChromeMode,
-        WindowZoomAction, WorkspaceChromeTone, ancestor_node_ids, apply_preflight_event,
-        apply_tree_interaction, build_blacklist_sections, build_preview_table_model,
-        build_tree_panel_data, build_tree_projection, build_tree_render_state,
-        build_workspace_chrome_view_model, icon_kind_for_extension, preview_file_row,
-        process_status_message, process_status_title, resolve_window_chrome_mode,
+        PreviewTableSort, TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePanelEffect,
+        WindowChromeMode, WindowZoomAction, WorkspaceChromeTone, ancestor_node_ids,
+        apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
+        build_preview_table_model, build_tree_panel_data, build_tree_projection,
+        build_tree_render_state, build_workspace_chrome_view_model, icon_kind_for_extension,
+        preview_file_row, process_status_message, process_status_title, resolve_window_chrome_mode,
         resolve_window_zoom_action, summarize_archive_entries,
     };
     use crate::domain::{
@@ -911,7 +949,8 @@ mod tests {
     #[test]
     fn preview_table_keeps_selected_row_when_filter_matches() {
         let result = sample_archive_result();
-        let model = build_preview_table_model(Some(&result), "lib", Some(2));
+        let model =
+            build_preview_table_model(Some(&result), "lib", Some(2), PreviewTableSort::None);
 
         assert_eq!(model.rows.len(), 1);
         assert_eq!(model.selected_row_ix, Some(0));
@@ -946,10 +985,57 @@ mod tests {
             preview_blob_dir: None,
         };
 
-        let model = build_preview_table_model(Some(&result), "lib", Some(2));
+        let model =
+            build_preview_table_model(Some(&result), "lib", Some(2), PreviewTableSort::None);
 
         assert_eq!(model.selected_row_ix, None);
         assert_eq!(model.next_selected_file_id, Some(7));
+    }
+
+    #[test]
+    fn preview_table_sort_toggle_switches_between_desc_and_asc() {
+        assert_eq!(
+            PreviewTableSort::None.toggle_chars(),
+            PreviewTableSort::CharsDesc
+        );
+        assert_eq!(
+            PreviewTableSort::CharsDesc.toggle_chars(),
+            PreviewTableSort::CharsAsc
+        );
+        assert_eq!(
+            PreviewTableSort::CharsAsc.toggle_chars(),
+            PreviewTableSort::CharsDesc
+        );
+    }
+
+    #[test]
+    fn preview_table_sorts_by_chars_descending_and_keeps_selection() {
+        let result = sample_sort_result();
+
+        let model =
+            build_preview_table_model(Some(&result), "", Some(3), PreviewTableSort::CharsDesc);
+
+        assert_eq!(
+            model.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![2, 3, 1]
+        );
+        assert_eq!(model.selected_row_ix, Some(1));
+        assert_eq!(model.next_selected_file_id, Some(3));
+    }
+
+    #[test]
+    fn preview_table_sorts_by_chars_ascending_and_falls_back_to_first_row() {
+        let result = sample_sort_result();
+
+        let model =
+            build_preview_table_model(Some(&result), "", Some(99), PreviewTableSort::CharsAsc);
+
+        assert_eq!(
+            model.rows.iter().map(|row| row.id).collect::<Vec<_>>(),
+            vec![1, 3, 2]
+        );
+        assert_eq!(model.selected_row_ix, None);
+        assert_eq!(model.next_selected_file_id, Some(1));
     }
 
     #[test]
@@ -1522,6 +1608,47 @@ mod tests {
                     entry_path: "src/lib.rs".to_string(),
                 }),
             }],
+            preview_blob_dir: None,
+        }
+    }
+
+    fn sample_sort_result() -> ProcessResult {
+        ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            merged_content_path: None,
+            suggested_result_name: "workspace-20260319.txt".to_string(),
+            file_details: Vec::new(),
+            preview_files: vec![
+                PreviewFileEntry {
+                    id: 1,
+                    display_path: "src/a.rs".to_string(),
+                    chars: 8,
+                    tokens: 2,
+                    preview_blob_path: PathBuf::from("a"),
+                    byte_len: 8,
+                    archive: None,
+                },
+                PreviewFileEntry {
+                    id: 2,
+                    display_path: "src/b.rs".to_string(),
+                    chars: 24,
+                    tokens: 6,
+                    preview_blob_path: PathBuf::from("b"),
+                    byte_len: 24,
+                    archive: None,
+                },
+                PreviewFileEntry {
+                    id: 3,
+                    display_path: "src/c.rs".to_string(),
+                    chars: 12,
+                    tokens: 3,
+                    preview_blob_path: PathBuf::from("c"),
+                    byte_len: 12,
+                    archive: None,
+                },
+            ],
             preview_blob_dir: None,
         }
     }
