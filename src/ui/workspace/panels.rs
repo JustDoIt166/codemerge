@@ -50,6 +50,13 @@ struct SelectedFilesResizeDrag {
     start_y: gpui::Pixels,
 }
 
+struct PreviewContentViewState {
+    file_path: String,
+    archive_paths: Option<(String, String)>,
+    line_count: usize,
+    byte_len: u64,
+}
+
 impl Render for SelectedFilesResizeDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
@@ -82,6 +89,314 @@ impl Workspace {
             )
     }
 
+    fn render_input_toolbar(
+        &self,
+        language: crate::domain::Language,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("select-folder")
+                    .primary()
+                    .icon(IconName::FolderOpen)
+                    .label(tr(language, "select_folder"))
+                    .on_click(cx.listener(Self::select_folder)),
+            )
+            .child(
+                Button::new("select-files")
+                    .outline()
+                    .icon(IconName::File)
+                    .label(tr(language, "select_files"))
+                    .on_click(cx.listener(Self::select_files)),
+            )
+            .into_any_element()
+    }
+
+    fn render_selected_files_section(
+        &self,
+        language: crate::domain::Language,
+        selected_files: Rc<Vec<crate::domain::FileEntry>>,
+        panel_height: gpui::Pixels,
+        start_height: u16,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .gap_2()
+            .child(
+                h_flex()
+                    .justify_between()
+                    .items_center()
+                    .child(section_caption(
+                        tr(language, "selected_files_title"),
+                        IconName::File,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(selected_files.len().to_string()),
+                    ),
+            )
+            .child(self.render_selected_files_body(
+                language,
+                selected_files,
+                panel_height,
+                start_height,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_selected_files_body(
+        &self,
+        language: crate::domain::Language,
+        selected_files: Rc<Vec<crate::domain::FileEntry>>,
+        panel_height: gpui::Pixels,
+        start_height: u16,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if selected_files.is_empty() {
+            return empty_box(
+                tr(language, "selected_files_empty"),
+                tr(language, "selected_files_hint"),
+                IconName::File,
+                cx,
+            )
+            .into_any_element();
+        }
+
+        self.render_selected_files_list(selected_files, panel_height, start_height, cx)
+    }
+
+    fn render_selected_files_list(
+        &self,
+        rows: Rc<Vec<crate::domain::FileEntry>>,
+        panel_height: gpui::Pixels,
+        start_height: u16,
+        cx: &App,
+    ) -> AnyElement {
+        v_flex()
+            .gap_1()
+            .child(
+                div()
+                    .w_full()
+                    .min_h(panel_height)
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(12.))
+                    .bg(cx.theme().secondary.opacity(0.22))
+                    .child(
+                        v_flex()
+                            .w_full()
+                            .children(rows.iter().map(|entry| selected_file_row(entry, cx)))
+                            .p_1(),
+                    ),
+            )
+            .child(self.render_selected_files_resize_handle(start_height, cx))
+            .into_any_element()
+    }
+
+    fn render_selected_files_resize_handle(&self, start_height: u16, cx: &App) -> AnyElement {
+        let resize_ui_for_drag = self.ui.clone();
+
+        h_flex()
+            .id("selected-files-resize-handle")
+            .w_full()
+            .h(px(18.))
+            .justify_center()
+            .items_center()
+            .cursor_row_resize()
+            .on_drag(
+                start_height,
+                move |drag_start_height: &u16,
+                      position: gpui::Point<gpui::Pixels>,
+                      _: &mut Window,
+                      cx: &mut App| {
+                    cx.stop_propagation();
+                    cx.new(|_| SelectedFilesResizeDrag {
+                        start_height: *drag_start_height,
+                        start_y: position.y,
+                    })
+                },
+            )
+            .on_drag_move(
+                move |event: &DragMoveEvent<SelectedFilesResizeDrag>,
+                      _: &mut Window,
+                      cx: &mut App| {
+                    let drag = event.drag(cx);
+                    let delta = f32::from(event.event.position.y - drag.start_y);
+                    let next_height =
+                        (f32::from(drag.start_height) + delta).round().max(0.0) as u16;
+                    resize_ui_for_drag.update(cx, |ui, ui_cx| {
+                        if ui.set_selected_files_panel_height(next_height) {
+                            ui_cx.notify();
+                        }
+                    });
+                },
+            )
+            .child(
+                div()
+                    .w(px(52.))
+                    .h(px(4.))
+                    .rounded(px(999.))
+                    .bg(cx.theme().border.opacity(0.85)),
+            )
+            .into_any_element()
+    }
+
+    fn render_gitignore_section(
+        &self,
+        language: crate::domain::Language,
+        gitignore_label: String,
+        has_gitignore_file: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .gap_3()
+            .child(section_title(
+                tr(language, "panel_gitignore"),
+                IconName::BookOpen,
+                cx,
+            ))
+            .child(render_info_block(
+                tr(language, "gitignore"),
+                gitignore_label,
+                has_gitignore_file,
+                IconName::BookOpen,
+                cx,
+            ))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("select-gitignore")
+                            .outline()
+                            .icon(IconName::BookOpen)
+                            .label(tr(language, "select_gitignore"))
+                            .on_click(cx.listener(Self::select_gitignore)),
+                    )
+                    .child(
+                        Button::new("apply-gitignore")
+                            .outline()
+                            .icon(IconName::Check)
+                            .label(tr(language, "apply_gitignore"))
+                            .disabled(!has_gitignore_file)
+                            .on_click(cx.listener(Self::apply_gitignore)),
+                    ),
+            )
+            .child(
+                div()
+                    .text_xs()
+                    .text_color(cx.theme().muted_foreground)
+                    .child(tr(language, "gitignore_apply_hint")),
+            )
+            .into_any_element()
+    }
+
+    fn render_options_section(
+        &self,
+        language: crate::domain::Language,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let settings = self.settings_snapshot(cx);
+        let selection = self.selection_snapshot(cx);
+
+        v_flex()
+            .gap_3()
+            .child(section_title(
+                tr(language, "section_options"),
+                IconName::Settings2,
+                cx,
+            ))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_caption(tr(language, "format"), IconName::File, cx))
+                    .child(
+                        TabBar::new("output-format")
+                            .selected_index(match settings.options.output_format {
+                                OutputFormat::Default => 0,
+                                OutputFormat::Xml => 1,
+                                OutputFormat::PlainText => 2,
+                                OutputFormat::Markdown => 3,
+                            })
+                            .on_click(cx.listener(Self::set_output_format))
+                            .child(Tab::new().label(tr(language, "format_default")))
+                            .child(Tab::new().label(tr(language, "format_xml")))
+                            .child(Tab::new().label(tr(language, "format_plain")))
+                            .child(Tab::new().label(tr(language, "format_markdown"))),
+                    ),
+            )
+            .child(
+                Checkbox::new("compress")
+                    .checked(settings.options.compress)
+                    .label(tr(language, "compress"))
+                    .on_click(cx.listener(Self::toggle_compress)),
+            )
+            .child(
+                Checkbox::new("use-gitignore")
+                    .checked(settings.options.use_gitignore)
+                    .label(tr(language, "use_gitignore"))
+                    .on_click(cx.listener(Self::toggle_use_gitignore)),
+            )
+            .child(
+                Checkbox::new("ignore-git")
+                    .checked(settings.options.ignore_git)
+                    .label(tr(language, "ignore_git"))
+                    .on_click(cx.listener(Self::toggle_ignore_git)),
+            )
+            .child(
+                Checkbox::new("dedupe")
+                    .checked(selection.dedupe_exact_path)
+                    .label(tr(language, "dedupe_exact_path"))
+                    .on_click(cx.listener(Self::toggle_dedupe)),
+            )
+            .into_any_element()
+    }
+
+    fn render_input_danger_zone(
+        &self,
+        language: crate::domain::Language,
+        pending_confirmation: Option<PendingConfirmation>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_caption(
+                        tr(language, "danger_zone"),
+                        IconName::TriangleAlert,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(tr(language, "danger_zone_hint")),
+                    )
+                    .child(
+                        Button::new("clear-inputs")
+                            .danger()
+                            .icon(IconName::Delete)
+                            .label(
+                                if pending_confirmation == Some(PendingConfirmation::ClearInputs) {
+                                    tr(language, "confirm_clear_inputs")
+                                } else {
+                                    tr(language, "clear")
+                                },
+                            )
+                            .on_click(cx.listener(Self::clear_inputs)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_input_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
@@ -90,7 +405,6 @@ impl Workspace {
         let has_inputs = self.has_inputs(cx);
         let selected_files = Rc::new(selection.selected_files.clone());
         let selected_files_panel_height = px(f32::from(ui_state.selected_files_panel_height));
-        let resize_ui = self.ui.clone();
         let folder_label = self
             .selection_snapshot(cx)
             .selected_folder
@@ -122,24 +436,7 @@ impl Workspace {
                     IconName::PanelLeft,
                     cx,
                 ))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("select-folder")
-                                .primary()
-                                .icon(IconName::FolderOpen)
-                                .label(tr(language, "select_folder"))
-                                .on_click(cx.listener(Self::select_folder)),
-                        )
-                        .child(
-                            Button::new("select-files")
-                                .outline()
-                                .icon(IconName::File)
-                                .label(tr(language, "select_files"))
-                                .on_click(cx.listener(Self::select_files)),
-                        ),
-                )
+                .child(self.render_input_toolbar(language, cx))
                 .child(render_info_block(
                     tr(language, "folder"),
                     folder_label,
@@ -147,226 +444,21 @@ impl Workspace {
                     IconName::FolderOpen,
                     cx,
                 ))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(
-                            h_flex()
-                                .justify_between()
-                                .items_center()
-                                .child(section_caption(
-                                    tr(language, "selected_files_title"),
-                                    IconName::File,
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .text_sm()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(selection.selected_files.len().to_string()),
-                                ),
-                        )
-                        .child(if selected_files.is_empty() {
-                            empty_box(
-                                tr(language, "selected_files_empty"),
-                                tr(language, "selected_files_hint"),
-                                IconName::File,
-                                cx,
-                            )
-                            .into_any_element()
-                        } else {
-                            let rows = selected_files.clone();
-                            let resize_ui_for_drag = resize_ui.clone();
-                            let resize_handle = h_flex()
-                                .id("selected-files-resize-handle")
-                                .w_full()
-                                .h(px(18.))
-                                .justify_center()
-                                .items_center()
-                                .cursor_row_resize()
-                                .on_drag(
-                                    ui_state.selected_files_panel_height,
-                                    move |start_height: &u16,
-                                          position: gpui::Point<gpui::Pixels>,
-                                          _: &mut Window,
-                                          cx: &mut App| {
-                                        cx.stop_propagation();
-                                        cx.new(|_| SelectedFilesResizeDrag {
-                                            start_height: *start_height,
-                                            start_y: position.y,
-                                        })
-                                    },
-                                )
-                                .on_drag_move(
-                                    move |event: &DragMoveEvent<SelectedFilesResizeDrag>,
-                                          _: &mut Window,
-                                          cx: &mut App| {
-                                        let drag = event.drag(cx);
-                                        let delta =
-                                            f32::from(event.event.position.y - drag.start_y);
-                                        let next_height =
-                                            (f32::from(drag.start_height) + delta).round().max(0.0)
-                                                as u16;
-                                        resize_ui_for_drag.update(cx, |ui, ui_cx| {
-                                            if ui.set_selected_files_panel_height(next_height) {
-                                                ui_cx.notify();
-                                            }
-                                        });
-                                    },
-                                );
-                            v_flex()
-                                .gap_1()
-                                .child(
-                                    div()
-                                        .w_full()
-                                        .min_h(selected_files_panel_height)
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .rounded(px(12.))
-                                        .bg(cx.theme().secondary.opacity(0.22))
-                                        .child(
-                                            v_flex()
-                                                .w_full()
-                                                .children(
-                                                    rows.iter()
-                                                        .map(|entry| selected_file_row(entry, cx)),
-                                                )
-                                                .p_1(),
-                                        ),
-                                )
-                                .child(
-                                    resize_handle.child(
-                                        div()
-                                            .w(px(52.))
-                                            .h(px(4.))
-                                            .rounded(px(999.))
-                                            .bg(cx.theme().border.opacity(0.85)),
-                                    ),
-                                )
-                                .into_any_element()
-                        }),
-                )
-                .child(section_title(
-                    tr(language, "panel_gitignore"),
-                    IconName::BookOpen,
+                .child(self.render_selected_files_section(
+                    language,
+                    selected_files,
+                    selected_files_panel_height,
+                    ui_state.selected_files_panel_height,
                     cx,
                 ))
-                .child(render_info_block(
-                    tr(language, "gitignore"),
+                .child(self.render_gitignore_section(
+                    language,
                     gitignore_label,
                     selection.gitignore_file.is_some(),
-                    IconName::BookOpen,
                     cx,
                 ))
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .child(
-                            Button::new("select-gitignore")
-                                .outline()
-                                .icon(IconName::BookOpen)
-                                .label(tr(language, "select_gitignore"))
-                                .on_click(cx.listener(Self::select_gitignore)),
-                        )
-                        .child(
-                            Button::new("apply-gitignore")
-                                .outline()
-                                .icon(IconName::Check)
-                                .label(tr(language, "apply_gitignore"))
-                                .disabled(selection.gitignore_file.is_none())
-                                .on_click(cx.listener(Self::apply_gitignore)),
-                        ),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(tr(language, "gitignore_apply_hint")),
-                )
-                .child(section_title(
-                    tr(language, "section_options"),
-                    IconName::Settings2,
-                    cx,
-                ))
-                .child(
-                    v_flex()
-                        .gap_2()
-                        .child(section_caption(tr(language, "format"), IconName::File, cx))
-                        .child(
-                            TabBar::new("output-format")
-                                .selected_index(match settings.options.output_format {
-                                    OutputFormat::Default => 0,
-                                    OutputFormat::Xml => 1,
-                                    OutputFormat::PlainText => 2,
-                                    OutputFormat::Markdown => 3,
-                                })
-                                .on_click(cx.listener(Self::set_output_format))
-                                .child(Tab::new().label(tr(language, "format_default")))
-                                .child(Tab::new().label(tr(language, "format_xml")))
-                                .child(Tab::new().label(tr(language, "format_plain")))
-                                .child(Tab::new().label(tr(language, "format_markdown"))),
-                        ),
-                )
-                .child(
-                    Checkbox::new("compress")
-                        .checked(settings.options.compress)
-                        .label(tr(language, "compress"))
-                        .on_click(cx.listener(Self::toggle_compress)),
-                )
-                .child(
-                    Checkbox::new("use-gitignore")
-                        .checked(settings.options.use_gitignore)
-                        .label(tr(language, "use_gitignore"))
-                        .on_click(cx.listener(Self::toggle_use_gitignore)),
-                )
-                .child(
-                    Checkbox::new("ignore-git")
-                        .checked(settings.options.ignore_git)
-                        .label(tr(language, "ignore_git"))
-                        .on_click(cx.listener(Self::toggle_ignore_git)),
-                )
-                .child(
-                    Checkbox::new("dedupe")
-                        .checked(selection.dedupe_exact_path)
-                        .label(tr(language, "dedupe_exact_path"))
-                        .on_click(cx.listener(Self::toggle_dedupe)),
-                )
-                .child(
-                    div()
-                        .pt_2()
-                        .border_t_1()
-                        .border_color(cx.theme().border)
-                        .child(
-                            v_flex()
-                                .gap_2()
-                                .child(section_caption(
-                                    tr(language, "danger_zone"),
-                                    IconName::TriangleAlert,
-                                    cx,
-                                ))
-                                .child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(cx.theme().muted_foreground)
-                                        .child(tr(language, "danger_zone_hint")),
-                                )
-                                .child(
-                                    Button::new("clear-inputs")
-                                        .danger()
-                                        .icon(IconName::Delete)
-                                        .label(
-                                            if ui_state.pending_confirmation
-                                                == Some(PendingConfirmation::ClearInputs)
-                                            {
-                                                tr(language, "confirm_clear_inputs")
-                                            } else {
-                                                tr(language, "clear")
-                                            },
-                                        )
-                                        .on_click(cx.listener(Self::clear_inputs)),
-                                ),
-                        ),
-                ),
+                .child(self.render_options_section(language, cx))
+                .child(self.render_input_danger_zone(language, ui_state.pending_confirmation, cx)),
         )
     }
 
@@ -689,6 +781,171 @@ impl Workspace {
             )
     }
 
+    fn render_rules_editor(
+        &self,
+        language: crate::domain::Language,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        v_flex()
+            .gap_2()
+            .child(Input::new(&self.blacklist_add_input).prefix(IconName::Plus))
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("add-folder-blacklist")
+                            .outline()
+                            .icon(IconName::Folder)
+                            .label(tr(language, "add_folder"))
+                            .on_click(cx.listener(Self::add_folder_blacklist)),
+                    )
+                    .child(
+                        Button::new("add-ext-blacklist")
+                            .outline()
+                            .icon(IconName::File)
+                            .label(tr(language, "add_ext"))
+                            .on_click(cx.listener(Self::add_ext_blacklist)),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn render_blacklist_transfer_actions(
+        &self,
+        language: crate::domain::Language,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        h_flex()
+            .gap_2()
+            .child(
+                Button::new("import-blacklist")
+                    .outline()
+                    .icon(IconName::ArrowDown)
+                    .label(tr(language, "blacklist_import_append"))
+                    .on_click(cx.listener(Self::import_blacklist)),
+            )
+            .child(
+                Button::new("export-blacklist")
+                    .outline()
+                    .icon(IconName::ArrowUp)
+                    .label(tr(language, "blacklist_export"))
+                    .on_click(cx.listener(Self::export_blacklist)),
+            )
+            .into_any_element()
+    }
+
+    fn render_blacklist_sections(
+        &self,
+        language: crate::domain::Language,
+        sections: Rc<Vec<super::model::BlacklistSectionViewModel>>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(12.))
+            .bg(cx.theme().secondary.opacity(0.22))
+            .child(if sections.is_empty() {
+                empty_box(
+                    tr(language, "blacklist_empty_title"),
+                    tr(language, "blacklist_empty_hint"),
+                    IconName::Folder,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                div()
+                    .size_full()
+                    .min_h(px(0.))
+                    .overflow_x_hidden()
+                    .overflow_y_scrollbar()
+                    .p_2()
+                    .child(v_flex().gap_3().children(sections.iter().enumerate().map(
+                        |(section_ix, section)| {
+                            let tags = section
+                                .items
+                                .iter()
+                                .enumerate()
+                                .map(|(ix, item)| {
+                                    let kind = item.kind;
+                                    let value = item.value.clone();
+                                    render_blacklist_tag(
+                                        item,
+                                        Button::new(("remove-blacklist", section_ix * 1000 + ix))
+                                            .ghost()
+                                            .compact()
+                                            .with_size(Size::Small)
+                                            .icon(IconName::Delete)
+                                            .disabled(!item.deletable)
+                                            .on_click(cx.listener(move |this, _, window, cx| {
+                                                this.remove_blacklist_item(
+                                                    kind,
+                                                    value.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }))
+                                            .into_any_element(),
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            render_blacklist_section(section, tags, cx)
+                        },
+                    )))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
+    fn render_rules_footer(
+        &self,
+        language: crate::domain::Language,
+        pending_confirmation: Option<PendingConfirmation>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        div()
+            .pt_2()
+            .border_t_1()
+            .border_color(cx.theme().border)
+            .child(
+                h_flex()
+                    .gap_2()
+                    .child(
+                        Button::new("reset-blacklist")
+                            .outline()
+                            .icon(IconName::Undo2)
+                            .label(
+                                if pending_confirmation == Some(PendingConfirmation::ResetBlacklist)
+                                {
+                                    tr(language, "confirm_reset_blacklist")
+                                } else {
+                                    tr(language, "blacklist_reset_default")
+                                },
+                            )
+                            .on_click(cx.listener(Self::reset_blacklist)),
+                    )
+                    .child(
+                        Button::new("clear-blacklist")
+                            .danger()
+                            .icon(IconName::Delete)
+                            .label(
+                                if pending_confirmation == Some(PendingConfirmation::ClearBlacklist)
+                                {
+                                    tr(language, "confirm_clear_blacklist")
+                                } else {
+                                    tr(language, "blacklist_clear_all")
+                                },
+                            )
+                            .on_click(cx.listener(Self::clear_blacklist)),
+                    ),
+            )
+            .into_any_element()
+    }
+
     pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
         let ui_state = self.ui_state(cx);
@@ -705,171 +962,44 @@ impl Workspace {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr(language, "rules_secondary_hint")),
             )
-            .child(
-                v_flex()
-                    .gap_2()
-                    .child(Input::new(&self.blacklist_add_input).prefix(IconName::Plus))
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("add-folder-blacklist")
-                                    .outline()
-                                    .icon(IconName::Folder)
-                                    .label(tr(language, "add_folder"))
-                                    .on_click(cx.listener(Self::add_folder_blacklist)),
-                            )
-                            .child(
-                                Button::new("add-ext-blacklist")
-                                    .outline()
-                                    .icon(IconName::File)
-                                    .label(tr(language, "add_ext"))
-                                    .on_click(cx.listener(Self::add_ext_blacklist)),
-                            ),
-                    ),
-            )
+            .child(self.render_rules_editor(language, cx))
             .child(
                 Input::new(&self.blacklist_filter_input)
                     .prefix(IconName::Search)
                     .cleanable(true),
             )
-            .child(
-                h_flex()
-                    .gap_2()
-                    .child(
-                        Button::new("import-blacklist")
-                            .outline()
-                            .icon(IconName::ArrowDown)
-                            .label(tr(language, "blacklist_import_append"))
-                            .on_click(cx.listener(Self::import_blacklist)),
-                    )
-                    .child(
-                        Button::new("export-blacklist")
-                            .outline()
-                            .icon(IconName::ArrowUp)
-                            .label(tr(language, "blacklist_export"))
-                            .on_click(cx.listener(Self::export_blacklist)),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(12.))
-                    .bg(cx.theme().secondary.opacity(0.22))
-                    .child(if blacklist_sections.is_empty() {
-                        empty_box(
-                            tr(language, "blacklist_empty_title"),
-                            tr(language, "blacklist_empty_hint"),
-                            IconName::Folder,
-                            cx,
-                        )
-                        .into_any_element()
-                    } else {
-                        div()
-                            .size_full()
-                            .min_h(px(0.))
-                            .overflow_x_hidden()
-                            .overflow_y_scrollbar()
-                            .p_2()
-                            .child(v_flex().gap_3().children(
-                                blacklist_sections.iter().enumerate().map(
-                                    |(section_ix, section)| {
-                                        let tags = section
-                                            .items
-                                            .iter()
-                                            .enumerate()
-                                            .map(|(ix, item)| {
-                                                let kind = item.kind;
-                                                let value = item.value.clone();
-                                                render_blacklist_tag(
-                                                    item,
-                                                    Button::new((
-                                                        "remove-blacklist",
-                                                        section_ix * 1000 + ix,
-                                                    ))
-                                                    .ghost()
-                                                    .compact()
-                                                    .with_size(Size::Small)
-                                                    .icon(IconName::Delete)
-                                                    .disabled(!item.deletable)
-                                                    .on_click(cx.listener(
-                                                        move |this, _, window, cx| {
-                                                            this.remove_blacklist_item(
-                                                                kind,
-                                                                value.clone(),
-                                                                window,
-                                                                cx,
-                                                            );
-                                                        },
-                                                    ))
-                                                    .into_any_element(),
-                                                    cx,
-                                                )
-                                            })
-                                            .collect::<Vec<_>>();
-                                        render_blacklist_section(section, tags, cx)
-                                    },
-                                ),
-                            ))
-                            .into_any_element()
-                    }),
-            )
-            .child(
-                div()
-                    .pt_2()
-                    .border_t_1()
-                    .border_color(cx.theme().border)
-                    .child(
-                        h_flex()
-                            .gap_2()
-                            .child(
-                                Button::new("reset-blacklist")
-                                    .outline()
-                                    .icon(IconName::Undo2)
-                                    .label(
-                                        if ui_state.pending_confirmation
-                                            == Some(PendingConfirmation::ResetBlacklist)
-                                        {
-                                            tr(language, "confirm_reset_blacklist")
-                                        } else {
-                                            tr(language, "blacklist_reset_default")
-                                        },
-                                    )
-                                    .on_click(cx.listener(Self::reset_blacklist)),
-                            )
-                            .child(
-                                Button::new("clear-blacklist")
-                                    .danger()
-                                    .icon(IconName::Delete)
-                                    .label(
-                                        if ui_state.pending_confirmation
-                                            == Some(PendingConfirmation::ClearBlacklist)
-                                        {
-                                            tr(language, "confirm_clear_blacklist")
-                                        } else {
-                                            tr(language, "blacklist_clear_all")
-                                        },
-                                    )
-                                    .on_click(cx.listener(Self::clear_blacklist)),
-                            ),
-                    ),
-            )
+            .child(self.render_blacklist_transfer_actions(language, cx))
+            .child(self.render_blacklist_sections(language, blacklist_sections, cx))
+            .child(self.render_rules_footer(language, ui_state.pending_confirmation, cx))
     }
 
-    pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let language = self.language(cx);
-        let ui_state = self.ui_state(cx);
-        let tree_only = self.result_is_tree_only(cx);
-        let preview_rows_len = self.result.read(cx).state().preview_rows.len();
-        let preview_filter_input = self.preview_filter_input.clone();
-        let preview_table = self.preview_table.clone();
-        let filter_active = !preview_filter_input.read(cx).value().trim().is_empty();
-        let has_visible_rows = preview_rows_len > 0;
-        let file_list_collapsed = ui_state.content_file_list_collapsed;
+    fn render_content_tree_only_state(
+        &self,
+        language: crate::domain::Language,
+        cx: &App,
+    ) -> AnyElement {
+        v_flex()
+            .gap_3()
+            .size_full()
+            .min_h(px(0.))
+            .child(empty_box(
+                tr(language, "mode_tree_only"),
+                tr(language, "mode_tree_only_desc"),
+                IconName::FolderOpen,
+                cx,
+            ))
+            .into_any_element()
+    }
+
+    fn render_content_file_list_section(
+        &self,
+        language: crate::domain::Language,
+        preview_rows_len: usize,
+        filter_active: bool,
+        has_visible_rows: bool,
+        file_list_collapsed: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         let file_list_toggle_label = if file_list_collapsed {
             tr(language, "content_files_expand")
         } else {
@@ -881,138 +1011,191 @@ impl Workspace {
             IconName::ChevronUp
         };
 
-        if tree_only {
-            return v_flex()
-                .gap_3()
-                .size_full()
-                .min_h(px(0.))
-                .child(empty_box(
-                    tr(language, "mode_tree_only"),
-                    tr(language, "mode_tree_only_desc"),
-                    IconName::FolderOpen,
-                    cx,
-                ))
+        div()
+            .flex_none()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(14.))
+            .bg(cx.theme().secondary.opacity(0.18))
+            .p_3()
+            .child(
+                v_flex()
+                    .gap_3()
+                    .child(
+                        h_flex()
+                            .justify_between()
+                            .items_center()
+                            .gap_3()
+                            .child(
+                                h_flex()
+                                    .items_center()
+                                    .gap_3()
+                                    .child(section_caption(
+                                        tr(language, "content_files_title"),
+                                        IconName::File,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .text_sm()
+                                            .text_color(cx.theme().muted_foreground)
+                                            .child(preview_rows_len.to_string()),
+                                    ),
+                            )
+                            .child(
+                                Button::new("toggle-content-file-list")
+                                    .ghost()
+                                    .compact()
+                                    .with_size(Size::Small)
+                                    .icon(file_list_toggle_icon)
+                                    .label(file_list_toggle_label)
+                                    .on_click(
+                                        cx.listener(Self::toggle_content_file_list_collapsed),
+                                    ),
+                            ),
+                    )
+                    .when(!file_list_collapsed, |this| {
+                        this.child(self.render_content_file_list_body(
+                            language,
+                            filter_active,
+                            has_visible_rows,
+                            cx,
+                        ))
+                    }),
+            )
+            .into_any_element()
+    }
+
+    fn render_content_file_list_body(
+        &self,
+        language: crate::domain::Language,
+        filter_active: bool,
+        has_visible_rows: bool,
+        cx: &App,
+    ) -> AnyElement {
+        let preview_filter_input = self.preview_filter_input.clone();
+        let preview_table = self.preview_table.clone();
+
+        v_flex()
+            .gap_3()
+            .child(
+                Input::new(&preview_filter_input)
+                    .prefix(IconName::Search)
+                    .cleanable(true),
+            )
+            .child(
+                div()
+                    .h(px(280.))
+                    .overflow_hidden()
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .rounded(px(14.))
+                    .bg(cx.theme().secondary.opacity(0.35))
+                    .child(self.render_content_file_list_table(
+                        language,
+                        filter_active,
+                        has_visible_rows,
+                        preview_table,
+                        cx,
+                    )),
+            )
+            .into_any_element()
+    }
+
+    fn render_content_file_list_table(
+        &self,
+        language: crate::domain::Language,
+        filter_active: bool,
+        has_visible_rows: bool,
+        preview_table: gpui::Entity<gpui_component::table::TableState<super::PreviewTableDelegate>>,
+        cx: &App,
+    ) -> AnyElement {
+        if has_visible_rows {
+            return Table::new(&preview_table)
+                .with_size(Size::Small)
+                .bordered(false)
+                .stripe(true)
                 .into_any_element();
+        }
+
+        empty_box(
+            if filter_active {
+                tr(language, "content_no_match")
+            } else {
+                tr(language, "content_empty")
+            },
+            if filter_active {
+                tr(language, "content_no_match_hint")
+            } else {
+                tr(language, "content_empty_hint")
+            },
+            IconName::File,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn render_content_preview_section(
+        &self,
+        language: crate::domain::Language,
+        cx: &App,
+    ) -> AnyElement {
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(14.))
+            .bg(cx.theme().secondary.opacity(0.18))
+            .p_3()
+            .child(
+                v_flex()
+                    .gap_3()
+                    .size_full()
+                    .min_h(px(0.))
+                    .child(section_caption(
+                        tr(language, "content_preview_title"),
+                        IconName::SquareTerminal,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_hidden()
+                            .child(self.preview_pane_view.clone()),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    pub(super) fn render_content_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+        let language = self.language(cx);
+        let ui_state = self.ui_state(cx);
+        let tree_only = self.result_is_tree_only(cx);
+        let preview_rows_len = self.result.read(cx).state().preview_rows.len();
+        let filter_active = !self.preview_filter_input.read(cx).value().trim().is_empty();
+        let has_visible_rows = preview_rows_len > 0;
+        let file_list_collapsed = ui_state.content_file_list_collapsed;
+
+        if tree_only {
+            return self.render_content_tree_only_state(language, cx);
         }
 
         v_flex()
             .gap_3()
             .size_full()
             .min_h(px(0.))
-            .child(
-                div()
-                    .flex_none()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(14.))
-                    .bg(cx.theme().secondary.opacity(0.18))
-                    .p_3()
-                    .child(
-                        v_flex()
-                            .gap_3()
-                            .child(
-                                h_flex()
-                                    .justify_between()
-                                    .items_center()
-                                    .gap_3()
-                                    .child(
-                                        h_flex()
-                                            .items_center()
-                                            .gap_3()
-                                            .child(section_caption(
-                                                tr(language, "content_files_title"),
-                                                IconName::File,
-                                                cx,
-                                            ))
-                                            .child(
-                                                div()
-                                                    .text_sm()
-                                                    .text_color(cx.theme().muted_foreground)
-                                                    .child(preview_rows_len.to_string()),
-                                            ),
-                                    )
-                                    .child(
-                                        Button::new("toggle-content-file-list")
-                                            .ghost()
-                                            .compact()
-                                            .with_size(Size::Small)
-                                            .icon(file_list_toggle_icon)
-                                            .label(file_list_toggle_label)
-                                            .on_click(cx.listener(
-                                                Self::toggle_content_file_list_collapsed,
-                                            )),
-                                    ),
-                            )
-                            .when(!file_list_collapsed, |this| {
-                                this.child(
-                                    Input::new(&preview_filter_input)
-                                        .prefix(IconName::Search)
-                                        .cleanable(true),
-                                )
-                                .child(
-                                    div()
-                                        .h(px(280.))
-                                        .overflow_hidden()
-                                        .border_1()
-                                        .border_color(cx.theme().border)
-                                        .rounded(px(14.))
-                                        .bg(cx.theme().secondary.opacity(0.35))
-                                        .child(if has_visible_rows {
-                                            Table::new(&preview_table)
-                                                .with_size(Size::Small)
-                                                .bordered(false)
-                                                .stripe(true)
-                                                .into_any_element()
-                                        } else {
-                                            empty_box(
-                                                if filter_active {
-                                                    tr(language, "content_no_match")
-                                                } else {
-                                                    tr(language, "content_empty")
-                                                },
-                                                if filter_active {
-                                                    tr(language, "content_no_match_hint")
-                                                } else {
-                                                    tr(language, "content_empty_hint")
-                                                },
-                                                IconName::File,
-                                                cx,
-                                            )
-                                            .into_any_element()
-                                        }),
-                                )
-                            }),
-                    ),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .overflow_hidden()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(14.))
-                    .bg(cx.theme().secondary.opacity(0.18))
-                    .p_3()
-                    .child(
-                        v_flex()
-                            .gap_3()
-                            .size_full()
-                            .min_h(px(0.))
-                            .child(section_caption(
-                                tr(language, "content_preview_title"),
-                                IconName::SquareTerminal,
-                                cx,
-                            ))
-                            .child(
-                                div()
-                                    .flex_1()
-                                    .min_h(px(0.))
-                                    .overflow_hidden()
-                                    .child(self.preview_pane_view.clone()),
-                            ),
-                    ),
-            )
+            .child(self.render_content_file_list_section(
+                language,
+                preview_rows_len,
+                filter_active,
+                has_visible_rows,
+                file_list_collapsed,
+                cx,
+            ))
+            .child(self.render_content_preview_section(language, cx))
             .into_any_element()
     }
 
@@ -1403,23 +1586,13 @@ impl PreviewPaneView {
 
         let Some((line_count, byte_len, document_path)) = preview_document_meta else {
             self.last_requested_load_range = 0..0;
-            return if preview_loading && selected_preview_id.is_some() {
-                empty_box(
-                    tr(language, "preview_loading"),
-                    selected_preview_label,
-                    IconName::File,
-                    cx,
-                )
-                .into_any_element()
-            } else {
-                empty_box(
-                    tr(language, "preview_empty"),
-                    tr(language, "preview_empty_hint"),
-                    IconName::File,
-                    cx,
-                )
-                .into_any_element()
-            };
+            return self.render_preview_placeholder(
+                language,
+                preview_loading,
+                selected_preview_id.is_some(),
+                &selected_preview_label,
+                cx,
+            );
         };
 
         let file_path = if selected_preview_id == Some(MERGED_CONTENT_PREVIEW_FILE_ID) {
@@ -1430,6 +1603,9 @@ impl PreviewPaneView {
                 .map(|row| row.display_path.clone())
                 .unwrap_or(document_path)
         };
+        let archive_paths = selected_archive
+            .as_ref()
+            .map(|archive| (archive.archive_path.clone(), archive.entry_path.clone()));
         self.flush_pending_visible_range(cx);
         if self.render_cache_range.is_empty() && line_count > 0 {
             let initial =
@@ -1446,100 +1622,177 @@ impl PreviewPaneView {
             })
             .map(|state| self.render_deferred_excerpt_banner(language, state, cx));
 
+        self.render_preview_content(
+            language,
+            PreviewContentViewState {
+                file_path,
+                archive_paths,
+                line_count,
+                byte_len,
+            },
+            excerpt_banner,
+            cx,
+        )
+    }
+
+    fn render_preview_placeholder(
+        &mut self,
+        language: crate::domain::Language,
+        preview_loading: bool,
+        has_selection: bool,
+        selected_preview_label: &str,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if preview_loading && has_selection {
+            return empty_box(
+                tr(language, "preview_loading"),
+                selected_preview_label.to_string(),
+                IconName::File,
+                cx,
+            )
+            .into_any_element();
+        }
+
+        empty_box(
+            tr(language, "preview_empty"),
+            tr(language, "preview_empty_hint"),
+            IconName::File,
+            cx,
+        )
+        .into_any_element()
+    }
+
+    fn render_preview_content(
+        &mut self,
+        language: crate::domain::Language,
+        content: PreviewContentViewState,
+        excerpt_banner: Option<AnyElement>,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
         v_flex()
             .gap_2()
             .size_full()
             .min_h(px(0.))
-            .child(render_kv(tr(language, "table_path"), file_path, cx))
-            .when_some(excerpt_banner, |this, banner| this.child(banner))
-            .when_some(selected_archive.as_ref(), |this, archive| {
-                this.child(render_kv(
-                    tr(language, "archive_path"),
-                    archive.archive_path.clone(),
-                    cx,
-                ))
-                .child(render_kv(
-                    tr(language, "archive_entry_path"),
-                    archive.entry_path.clone(),
-                    cx,
-                ))
-            })
+            .child(self.render_preview_metadata(language, &content, excerpt_banner, cx))
+            .child(self.render_preview_lines_view(content.line_count, cx))
+            .into_any_element()
+    }
+
+    fn render_preview_metadata(
+        &self,
+        language: crate::domain::Language,
+        content: &PreviewContentViewState,
+        excerpt_banner: Option<AnyElement>,
+        cx: &App,
+    ) -> AnyElement {
+        let metadata = v_flex()
+            .gap_2()
+            .child(render_kv(
+                tr(language, "table_path"),
+                content.file_path.clone(),
+                cx,
+            ))
+            .when_some(excerpt_banner, |this, banner| this.child(banner));
+        let metadata =
+            if let Some((archive_path, archive_entry_path)) = content.archive_paths.as_ref() {
+                metadata
+                    .child(render_kv(
+                        tr(language, "archive_path"),
+                        archive_path.clone(),
+                        cx,
+                    ))
+                    .child(render_kv(
+                        tr(language, "archive_entry_path"),
+                        archive_entry_path.clone(),
+                        cx,
+                    ))
+            } else {
+                metadata
+            };
+
+        metadata
             .child(
                 h_flex()
                     .gap_3()
                     .child(render_kv(
                         tr(language, "line_count"),
-                        line_count.to_string(),
+                        content.line_count.to_string(),
                         cx,
                     ))
                     .child(render_kv(
                         tr(language, "byte_size"),
-                        byte_len.to_string(),
+                        content.byte_len.to_string(),
                         cx,
                     )),
             )
+            .into_any_element()
+    }
+
+    fn render_preview_lines_view(&self, line_count: usize, cx: &mut Context<Self>) -> AnyElement {
+        div()
+            .relative()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(cx.theme().radius)
+            .child(
+                uniform_list(
+                    "preview-lines",
+                    line_count,
+                    cx.processor(
+                        move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
+                            let muted = app_cx.theme().muted_foreground;
+                            let mono = app_cx.theme().mono_font_family.clone();
+                            view.render_lines_for(visible_range, app_cx)
+                                .into_iter()
+                                .map(|row| Self::render_preview_line_row(row, muted, mono.clone()))
+                                .collect()
+                        },
+                    ),
+                )
+                .with_decoration(PreviewVisibleRangeDecoration {
+                    preview_pane: cx.entity(),
+                })
+                .track_scroll(self.scroll_handle.clone())
+                .flex_grow()
+                .size_full()
+                .with_sizing_behavior(ListSizingBehavior::Auto)
+                .p_2(),
+            )
+            .into_any_element()
+    }
+
+    fn render_preview_line_row(
+        row: crate::ui::preview_model::PreviewRenderLine,
+        muted: gpui::Hsla,
+        mono: gpui::SharedString,
+    ) -> AnyElement {
+        h_flex()
+            .w_full()
+            .gap_3()
+            .px_3()
+            .h(preview_line_height())
+            .overflow_hidden()
+            .font_family(mono)
             .child(
                 div()
-                    .relative()
+                    .w(px(64.))
+                    .flex_none()
+                    .text_right()
+                    .text_color(muted)
+                    .whitespace_nowrap()
+                    .child(row.line_number),
+            )
+            .child(
+                div()
                     .flex_1()
-                    .min_h(px(0.))
+                    .min_w(px(0.))
                     .overflow_hidden()
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(cx.theme().radius)
-                    .child(
-                        uniform_list(
-                            "preview-lines",
-                            line_count,
-                            cx.processor(
-                                move |view, visible_range: std::ops::Range<usize>, _, app_cx| {
-                                    let muted = app_cx.theme().muted_foreground;
-                                    let mono = app_cx.theme().mono_font_family.clone();
-                                    let rows = view.render_lines_for(visible_range, app_cx);
-
-                                    rows.into_iter()
-                                        .map(|row| {
-                                            h_flex()
-                                                .w_full()
-                                                .gap_3()
-                                                .px_3()
-                                                .h(preview_line_height())
-                                                .overflow_hidden()
-                                                .font_family(mono.clone())
-                                                .child(
-                                                    div()
-                                                        .w(px(64.))
-                                                        .flex_none()
-                                                        .text_right()
-                                                        .text_color(muted)
-                                                        .whitespace_nowrap()
-                                                        .child(row.line_number),
-                                                )
-                                                .child(
-                                                    div()
-                                                        .flex_1()
-                                                        .min_w(px(0.))
-                                                        .overflow_hidden()
-                                                        .whitespace_nowrap()
-                                                        .when(row.missing, |this| {
-                                                            this.text_color(muted.opacity(0.75))
-                                                        })
-                                                        .child(row.text),
-                                                )
-                                        })
-                                        .collect()
-                                },
-                            ),
-                        )
-                        .with_decoration(PreviewVisibleRangeDecoration {
-                            preview_pane: cx.entity(),
-                        })
-                        .track_scroll(self.scroll_handle.clone())
-                        .flex_grow()
-                        .size_full()
-                        .with_sizing_behavior(ListSizingBehavior::Auto)
-                        .p_2(),
-                    ),
+                    .whitespace_nowrap()
+                    .when(row.missing, |this| this.text_color(muted.opacity(0.75)))
+                    .child(row.text),
             )
             .into_any_element()
     }

@@ -187,70 +187,89 @@ pub(super) fn render_tree_row(
                     .px(px(12.))
                     .pl(px(12.) + row_indent)
                     .hover(|style| style.bg(palette.row_hover_bg))
-                    .child(
-                        div()
-                            .flex()
-                            .w(px(14.))
-                            .items_center()
-                            .justify_center()
-                            .text_color(palette.chevron_fg)
-                            .when_some(chevron, |this, chevron| this.child(chevron)),
-                    )
-                    .child(
-                        div()
-                            .flex()
-                            .w(px(20.))
-                            .h(px(20.))
-                            .items_center()
-                            .justify_center()
-                            .child(
-                                row.icon_kind
-                                    .icon()
-                                    .text_color(palette.icon_fg)
-                                    .with_size(Size::Small),
-                            ),
-                    )
-                    .child(
-                        v_flex()
-                            .min_w(px(0.))
-                            .flex_1()
-                            .gap_1()
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap_3()
-                                    .child(div().min_w(px(0.)).flex_1().child(render_match_label(
-                                        row.label.as_ref(),
-                                        row.match_kind,
-                                        row.match_range.as_ref(),
-                                        &palette,
-                                    )))
-                                    .when(!badges.is_empty(), |this| {
-                                        this.child(h_flex().gap_1().children(
-                                            badges.into_iter().map(|badge| {
-                                                div()
-                                                    .text_xs()
-                                                    .px(px(7.))
-                                                    .py(px(2.))
-                                                    .rounded(px(6.))
-                                                    .bg(palette.badge_bg)
-                                                    .text_color(palette.badge_fg)
-                                                    .child(badge)
-                                            }),
-                                        ))
-                                    }),
-                            )
-                            .child(
-                                h_flex()
-                                    .items_center()
-                                    .justify_between()
-                                    .gap(px(6.))
-                                    .child(render_secondary_label(row, language, &palette)),
-                            ),
-                    ),
+                    .child(render_tree_row_chevron(chevron, &palette))
+                    .child(render_tree_row_icon(row, &palette))
+                    .child(render_tree_row_body(row, badges, language, &palette)),
             ),
         )
+}
+
+fn render_tree_row_chevron(
+    chevron: Option<IconName>,
+    palette: &ResolvedTreeRowPalette,
+) -> gpui::Div {
+    div()
+        .flex()
+        .w(px(14.))
+        .items_center()
+        .justify_center()
+        .text_color(palette.chevron_fg)
+        .when_some(chevron, |this, chevron| this.child(chevron))
+}
+
+fn render_tree_row_icon(row: &TreeRowViewModel, palette: &ResolvedTreeRowPalette) -> gpui::Div {
+    div()
+        .flex()
+        .w(px(20.))
+        .h(px(20.))
+        .items_center()
+        .justify_center()
+        .child(
+            row.icon_kind
+                .icon()
+                .text_color(palette.icon_fg)
+                .with_size(Size::Small),
+        )
+}
+
+fn render_tree_row_body(
+    row: &TreeRowViewModel,
+    badges: Vec<String>,
+    language: Language,
+    palette: &ResolvedTreeRowPalette,
+) -> gpui::Div {
+    v_flex()
+        .min_w(px(0.))
+        .flex_1()
+        .gap_1()
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap_3()
+                .child(div().min_w(px(0.)).flex_1().child(render_match_label(
+                    row.label.as_ref(),
+                    row.match_kind,
+                    row.match_range.as_ref(),
+                    palette,
+                )))
+                .when(!badges.is_empty(), |this| {
+                    this.child(render_tree_badges_row(badges, palette))
+                }),
+        )
+        .child(
+            h_flex()
+                .items_center()
+                .justify_between()
+                .gap(px(6.))
+                .child(render_secondary_label(row, language, palette)),
+        )
+}
+
+fn render_tree_badges_row(badges: Vec<String>, palette: &ResolvedTreeRowPalette) -> AnyElement {
+    h_flex()
+        .gap_1()
+        .children(badges.into_iter().map(|badge| {
+            div()
+                .text_xs()
+                .px(px(7.))
+                .py(px(2.))
+                .rounded(px(6.))
+                .bg(palette.badge_bg)
+                .text_color(palette.badge_fg)
+                .child(badge)
+        }))
+        .into_any_element()
 }
 
 fn tree_secondary_label(row: &TreeRowViewModel, language: Language) -> String {
@@ -733,9 +752,13 @@ pub(super) fn render_blacklist_section(
                         )
                         .child(pill_label(&section.count.to_string(), cx)),
                 )
-                .child(div().flex().flex_wrap().gap_2().children(tags)),
+                .child(render_tag_flow(tags)),
         )
         .into_any_element()
+}
+
+pub(super) fn render_tag_flow(tags: Vec<AnyElement>) -> gpui::Div {
+    div().flex().flex_wrap().gap_2().children(tags)
 }
 
 pub(super) fn render_blacklist_tag(
