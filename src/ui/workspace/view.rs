@@ -13,7 +13,6 @@ use super::model::{
     BlacklistSectionViewModel, BlacklistTagViewModel, FilterMatchKind, TreeCountSummary,
     TreeRowViewModel,
 };
-pub(super) use super::model::{process_status_message, process_status_title};
 use super::tree_palette::{ResolvedTreeRowPalette, TreeRowPalette};
 use crate::domain::{FileEntry, Language, ProcessStatus};
 use crate::ui::state::ProcessUiStatus;
@@ -975,7 +974,7 @@ pub(super) fn format_duration(duration: std::time::Duration) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::process_status_message;
+    use super::super::model::process_status_message;
     use crate::domain::Language;
     use crate::ui::state::{ProcessState, ProcessUiStatus};
     use crate::utils::i18n::tr;
