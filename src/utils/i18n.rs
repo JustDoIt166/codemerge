@@ -331,6 +331,10 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "tree_filter") => "Filter tree",
         (Language::Zh, "tree_expand_all") => "全部展开",
         (Language::En, "tree_expand_all") => "Expand All",
+        (Language::Zh, "tree_expand_all_limited") => "目录树过大，已保留当前展开状态",
+        (Language::En, "tree_expand_all_limited") => {
+            "Tree is too large to expand all nodes at once"
+        }
         (Language::Zh, "tree_collapse_all") => "全部收起",
         (Language::En, "tree_collapse_all") => "Collapse All",
         (Language::Zh, "tree_view_tree") => "目录树视图",
@@ -629,6 +633,27 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "preview_loaded") => "Loaded 1MB preview",
         (Language::Zh, "preview_loaded_all") => "已加载全部内容",
         (Language::En, "preview_loaded_all") => "Loaded full content",
-        _ => "",
+        _ => missing_translation(key),
+    }
+}
+
+fn missing_translation(key: &str) -> &'static str {
+    #[cfg(debug_assertions)]
+    eprintln!("missing i18n translation key: {key}");
+
+    Box::leak(format!("[missing:{key}]").into_boxed_str())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::tr;
+    use crate::domain::Language;
+
+    #[test]
+    fn missing_translation_is_visible() {
+        assert_eq!(
+            tr(Language::En, "definitely_missing_key"),
+            "[missing:definitely_missing_key]"
+        );
     }
 }

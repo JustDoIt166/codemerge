@@ -1,7 +1,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::domain::{AppConfigV1, default_ext_blacklist};
+use crate::domain::{APP_CONFIG_VERSION, AppConfigV1};
 use crate::error::{AppError, AppResult};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -102,22 +102,8 @@ pub fn save_config_to_path(cfg: &AppConfigV1, path: &Path) -> AppResult<()> {
 }
 
 fn migrate_config(mut config: AppConfigV1) -> AppConfigV1 {
-    if config.ext_blacklist == legacy_default_ext_blacklist() {
-        config.ext_blacklist = default_ext_blacklist();
-    }
+    config.version = APP_CONFIG_VERSION;
     config
-}
-
-fn legacy_default_ext_blacklist() -> Vec<String> {
-    [
-        ".jpg", ".jpeg", ".png", ".gif", ".bmp", ".webp", ".svg", ".ico", ".mp3", ".wav", ".ogg",
-        ".flac", ".m4a", ".mp4", ".mov", ".avi", ".mkv", ".webm", ".pdf", ".zip", ".rar", ".7z",
-        ".tar", ".gz", ".xz", ".exe", ".dll", ".so", ".dylib", ".class", ".jar", ".ttf", ".woff",
-        ".woff2", ".eot", ".otf", ".db", ".sqlite",
-    ]
-    .iter()
-    .map(|v| (*v).to_string())
-    .collect()
 }
 
 #[cfg(test)]
@@ -125,7 +111,9 @@ mod tests {
     use tempfile::tempdir;
 
     use super::{ConfigLoadIssue, load_config_report_from_path, save_config_to_path};
-    use crate::domain::{AppConfigV1, Language, OutputFormat, ProcessingMode, ProcessingOptions};
+    use crate::domain::{
+        APP_CONFIG_VERSION, AppConfigV1, Language, OutputFormat, ProcessingMode, ProcessingOptions,
+    };
 
     #[test]
     fn missing_file_returns_default_with_issue() {
@@ -171,6 +159,7 @@ mod tests {
         std::fs::write(&path, "{broken").expect("seed broken file");
 
         let config = AppConfigV1 {
+            version: APP_CONFIG_VERSION,
             language: Language::En,
             options: ProcessingOptions {
                 compress: true,
@@ -213,23 +202,33 @@ mod tests {
     }
 
     #[test]
-    fn load_migrates_legacy_default_zip_blacklist() {
+    fn load_legacy_config_preserves_saved_blacklist_and_sets_current_version() {
         let dir = tempdir().expect("tempdir");
         let path = dir.path().join("config.json");
-        let config = AppConfigV1 {
-            ext_blacklist: super::legacy_default_ext_blacklist(),
-            ..AppConfigV1::default()
-        };
+        let legacy_blacklist = vec![".zip".to_string(), ".log".to_string()];
         std::fs::write(
             &path,
-            serde_json::to_string_pretty(&config).expect("serialize config"),
+            serde_json::json!({
+                "language": "Zh",
+                "options": {
+                    "compress": false,
+                    "use_gitignore": true,
+                    "ignore_git": true,
+                    "output_format": "Default",
+                    "mode": "Full"
+                },
+                "folder_blacklist": ["target"],
+                "ext_blacklist": legacy_blacklist,
+            })
+            .to_string(),
         )
         .expect("write config");
 
         let report = load_config_report_from_path(&path);
 
         assert_eq!(report.issue, None);
-        assert!(!report.config.ext_blacklist.iter().any(|ext| ext == ".zip"));
+        assert_eq!(report.config.version, APP_CONFIG_VERSION);
+        assert_eq!(report.config.ext_blacklist, legacy_blacklist);
     }
 
     #[test]

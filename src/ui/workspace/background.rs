@@ -272,7 +272,7 @@ impl Workspace {
                 .update(cx, |process, _| process.state_mut().finish_run());
         }
         if completed_successfully && self.clear_temporary_merge_filters(cx) {
-            self.refresh_preflight(cx);
+            self.refresh_preflight_internal(true, cx);
         }
 
         if let Some(rx) = self
@@ -621,6 +621,14 @@ impl Workspace {
     }
 
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
+        self.refresh_preflight_internal(false, cx);
+    }
+
+    fn refresh_preflight_internal(
+        &mut self,
+        preserve_completed_status: bool,
+        cx: &mut Context<Self>,
+    ) {
         self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
@@ -629,8 +637,12 @@ impl Workspace {
             let is_processing = process.is_processing();
             let state = process.state_mut();
             state.preflight_revision += 1;
+            state.preflight_preserves_status = preserve_completed_status
+                && state.ui_status == crate::ui::state::ProcessUiStatus::Completed;
             if !is_processing {
-                state.ui_status = crate::ui::state::ProcessUiStatus::Preflight;
+                if !state.preflight_preserves_status {
+                    state.ui_status = crate::ui::state::ProcessUiStatus::Preflight;
+                }
                 state.last_error = None;
             }
             process_cx.notify();

@@ -126,6 +126,7 @@ impl Default for SettingsState {
 pub struct ProcessState {
     pub preflight: PreflightStats,
     pub preflight_revision: u64,
+    pub preflight_preserves_status: bool,
     pub preflight_rx: Option<std::sync::mpsc::Receiver<PreflightEvent>>,
     pub process_handle: Option<ProcessHandle>,
     pub ui_status: ProcessUiStatus,
@@ -142,6 +143,7 @@ impl ProcessState {
     pub fn discard_preflight_for_run(&mut self) {
         self.preflight_rx = None;
         self.preflight_revision = self.preflight_revision.wrapping_add(1);
+        self.preflight_preserves_status = false;
         self.preflight = PreflightStats::default();
     }
 
@@ -337,6 +339,7 @@ mod tests {
     #[test]
     fn clear_inputs_resets_workspace_runtime_state() {
         let config = AppConfigV1 {
+            version: crate::domain::APP_CONFIG_VERSION,
             language: Language::En,
             options: ProcessingOptions {
                 compress: true,

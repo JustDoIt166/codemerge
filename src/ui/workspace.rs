@@ -37,6 +37,7 @@ use crate::utils::i18n::tr;
 
 const MERGED_CONTENT_PREVIEW_FILE_ID: u32 = u32::MAX;
 const MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const TREE_EXPAND_ALL_FOLDER_LIMIT: usize = 50_000;
 
 pub(super) fn preview_line_height() -> Pixels {
     px(22.)
@@ -387,6 +388,9 @@ impl Workspace {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let _ = crate::utils::temp_file::cleanup_stale_temp_entries(
+            std::time::Duration::from_secs(24 * 60 * 60),
+        );
         let config_report = settings::load_report();
         let config_alert =
             Self::config_alert_from_report(&config_report, config_report.config.language);
@@ -1368,7 +1372,7 @@ mod tests {
         index_document, load_range,
     };
     use crate::services::process::{ProcessEvent, ProcessHandle};
-    use crate::ui::{perf, preview_model::PreviewModel};
+    use crate::ui::{perf, preview_model::PreviewModel, state::ProcessUiStatus};
     use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
     use std::fs;
@@ -1576,6 +1580,40 @@ mod tests {
     }
 
     #[gpui::test]
+    fn successful_process_completion_keeps_completed_status_after_followup_preflight(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.selection.update(cx, |selection, selection_cx| {
+                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection_cx.notify();
+            });
+            let (tx, rx) = mpsc::channel();
+            tx.send(ProcessEvent::Completed(sample_result()))
+                .expect("send completed");
+            drop(tx);
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    receiver: rx,
+                    cancel: CancellationToken::new(),
+                });
+            });
+
+            let _ = workspace.poll_background(cx);
+            std::thread::sleep(Duration::from_millis(50));
+            let _ = workspace.poll_background(cx);
+
+            let process = workspace.process.read(cx).state();
+            assert_eq!(process.ui_status, ProcessUiStatus::Completed);
+        });
+    }
+
+    #[gpui::test]
     fn cancelled_process_keeps_temporary_filters(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
@@ -1609,6 +1647,33 @@ mod tests {
                 vec!["node_modules".to_string()]
             );
             assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
+        });
+    }
+
+    #[gpui::test]
+    fn clearing_inputs_detaches_cancelled_process_events(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let (tx, rx) = mpsc::channel();
+            tx.send(ProcessEvent::Completed(sample_result()))
+                .expect("send completed");
+            drop(tx);
+            let cancel = CancellationToken::new();
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    receiver: rx,
+                    cancel: cancel.clone(),
+                });
+            });
+
+            workspace.cancel_and_detach_background_work(cx);
+            let _ = workspace.poll_background(cx);
+
+            assert!(cancel.is_cancelled());
+            assert!(workspace.result.read(cx).state().result.is_none());
+            assert!(workspace.process.read(cx).state().process_handle.is_none());
         });
     }
 

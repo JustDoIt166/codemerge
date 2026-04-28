@@ -1,5 +1,6 @@
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, SystemTime};
 
 use chrono::Local;
 
@@ -63,11 +64,67 @@ pub fn cleanup_preview_dir(path: &std::path::Path) -> Result<(), String> {
     cleanup_temp_dir(path)
 }
 
+pub fn cleanup_stale_temp_entries(max_age: Duration) -> Result<usize, String> {
+    let root = codemerge_temp_root()?;
+    cleanup_stale_temp_entries_in(&root, max_age)
+}
+
+fn cleanup_stale_temp_entries_in(
+    root: &std::path::Path,
+    max_age: Duration,
+) -> Result<usize, String> {
+    let now = SystemTime::now();
+    let mut removed = 0;
+
+    for entry in std::fs::read_dir(root).map_err(|e| format!("read temp dir failed: {e}"))? {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(_) => continue,
+        };
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+            continue;
+        };
+        if !is_owned_temp_entry(name) {
+            continue;
+        }
+
+        let Ok(metadata) = entry.metadata() else {
+            continue;
+        };
+        let Ok(modified) = metadata.modified() else {
+            continue;
+        };
+        let Ok(age) = now.duration_since(modified) else {
+            continue;
+        };
+        if age < max_age {
+            continue;
+        }
+
+        let cleanup_result = if metadata.is_dir() {
+            std::fs::remove_dir_all(&path)
+        } else {
+            std::fs::remove_file(&path)
+        };
+        if cleanup_result.is_ok() {
+            removed += 1;
+        }
+    }
+
+    Ok(removed)
+}
+
+fn is_owned_temp_entry(name: &str) -> bool {
+    name.starts_with("process_") || name.starts_with("preview_") || name.starts_with("merged_")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_preview_dir, cleanup_temp_dir, make_temp_preview_dir, make_temp_process_dir,
-        make_temp_result_path, make_temp_result_path_in,
+        cleanup_preview_dir, cleanup_stale_temp_entries_in, cleanup_temp_dir,
+        make_temp_preview_dir, make_temp_process_dir, make_temp_result_path,
+        make_temp_result_path_in,
     };
 
     #[test]
@@ -96,5 +153,24 @@ mod tests {
         cleanup_temp_dir(&dir).expect("cleanup temp dir");
         assert!(!dir.exists());
         assert!(!result_path.exists());
+    }
+
+    #[test]
+    fn stale_cleanup_removes_only_owned_old_entries() {
+        let root = tempfile::tempdir().expect("tempdir");
+        let old_dir = root.path().join("process_old");
+        let old_file = root.path().join("merged_old.txt");
+        std::fs::create_dir_all(&old_dir).expect("create process dir");
+        std::fs::write(&old_file, "content").expect("write result");
+        let unrelated = root.path().join("user_file.txt");
+        std::fs::write(&unrelated, "keep").expect("write unrelated");
+
+        let removed =
+            cleanup_stale_temp_entries_in(root.path(), std::time::Duration::ZERO).expect("cleanup");
+
+        assert_eq!(removed, 2);
+        assert!(!old_dir.exists());
+        assert!(!old_file.exists());
+        assert!(unrelated.exists());
     }
 }

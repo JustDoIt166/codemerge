@@ -95,3 +95,30 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --target ${{ matrix.target }}
+
+  windows-check:
+    name: Check And Test Windows
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Verify tracked assets
+        shell: pwsh
+        run: |
+          if (!(Test-Path assets/app.ico)) { throw "missing assets/app.ico" }
+          if (!(Test-Path assets/fonts/logo.svg)) { throw "missing assets/fonts/logo.svg" }
+          if (!(Test-Path assets/icons)) { throw "missing assets/icons" }
+          if (-not (Get-ChildItem assets/icons -File | Select-Object -First 1)) { throw "assets/icons is empty" }
+
+      - name: Check build
+        run: cargo check --locked --all-targets
+
+      - name: Run tests
+        run: cargo test --locked

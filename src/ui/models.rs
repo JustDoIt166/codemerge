@@ -37,6 +37,7 @@ impl SettingsModel {
 
     pub fn to_config(&self) -> AppConfigV1 {
         AppConfigV1 {
+            version: crate::domain::APP_CONFIG_VERSION,
             language: self.state.language,
             options: self.state.options.clone(),
             folder_blacklist: self.state.folder_blacklist.clone(),
@@ -279,11 +280,12 @@ impl ProcessModel {
     ) {
         let ready_label = tr(language, "status_ready");
         let is_processing = self.is_processing();
+        let should_preserve_status = self.state.preflight_preserves_status;
         match event {
             PreflightEvent::Started { revision } => {
                 if revision == self.state.preflight_revision {
                     self.state.preflight.is_scanning = true;
-                    if !is_processing {
+                    if !is_processing && !should_preserve_status {
                         self.state.ui_status = ProcessUiStatus::Preflight;
                     }
                 }
@@ -300,7 +302,7 @@ impl ProcessModel {
                     self.state.preflight.skipped_files = skipped;
                     self.state.preflight.total_files = candidates + skipped;
                     self.state.preflight.is_scanning = true;
-                    if !is_processing {
+                    if !is_processing && !should_preserve_status {
                         self.state.ui_status = ProcessUiStatus::Preflight;
                     }
                 }
@@ -308,7 +310,8 @@ impl ProcessModel {
             PreflightEvent::Completed { revision, stats } => {
                 if revision == self.state.preflight_revision {
                     self.state.preflight = stats;
-                    if !is_processing {
+                    self.state.preflight_preserves_status = false;
+                    if !is_processing && !should_preserve_status {
                         self.state.ui_status = ProcessUiStatus::Idle;
                         self.state.processing_current_file = ready_label.to_string();
                     }
@@ -316,6 +319,7 @@ impl ProcessModel {
             }
             PreflightEvent::Failed { revision, error } => {
                 if revision == self.state.preflight_revision {
+                    self.state.preflight_preserves_status = false;
                     self.state.preflight.is_scanning = false;
                     self.state.ui_status = ProcessUiStatus::Error;
                     self.state.last_error = Some(error.to_string());
@@ -410,13 +414,16 @@ mod tests {
     use crate::services::preflight::PreflightEvent;
     use crate::services::process::ProcessEvent;
     use crate::services::process::ProcessHandle;
-    use crate::ui::state::{NarrowContentTab, PendingConfirmation, SelectionState, SidePanelTab};
+    use crate::ui::state::{
+        NarrowContentTab, PendingConfirmation, ProcessUiStatus, SelectionState, SidePanelTab,
+    };
     use std::sync::mpsc;
     use tokio_util::sync::CancellationToken;
 
     #[test]
     fn effective_blacklists_respect_use_gitignore_and_temporary_rules() {
         let config = AppConfigV1 {
+            version: crate::domain::APP_CONFIG_VERSION,
             language: Language::En,
             options: ProcessingOptions {
                 compress: false,
@@ -462,6 +469,7 @@ mod tests {
     #[test]
     fn import_blacklist_content_normalizes_and_dedupes() {
         let config = AppConfigV1 {
+            version: crate::domain::APP_CONFIG_VERSION,
             language: Language::En,
             options: ProcessingOptions {
                 compress: false,
@@ -586,6 +594,34 @@ mod tests {
         assert_eq!(process.state().preflight.to_process_files, 9);
         assert_eq!(process.state().preflight.skipped_files, 3);
         assert!(process.state().preflight.is_scanning);
+    }
+
+    #[test]
+    fn process_model_preflight_completion_can_preserve_completed_status() {
+        let mut process = ProcessModel::new("ready".into());
+        process.state_mut().preflight_revision = 4;
+        process.state_mut().preflight_preserves_status = true;
+        process.state_mut().ui_status = ProcessUiStatus::Completed;
+        process.state_mut().processing_current_file = "done".into();
+
+        process.apply_preflight_event(
+            PreflightEvent::Completed {
+                revision: 4,
+                stats: crate::domain::PreflightStats {
+                    total_files: 12,
+                    skipped_files: 2,
+                    to_process_files: 10,
+                    scanned_entries: 12,
+                    is_scanning: false,
+                },
+            },
+            Language::En,
+        );
+
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Completed);
+        assert_eq!(process.state().processing_current_file, "done");
+        assert_eq!(process.state().preflight.total_files, 12);
+        assert!(!process.state().preflight_preserves_status);
     }
 
     #[test]

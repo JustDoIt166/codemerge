@@ -300,11 +300,12 @@ pub(crate) fn apply_preflight_event(
     is_processing: bool,
     status_ready: &str,
 ) {
+    let should_preserve_status = process.preflight_preserves_status;
     match event {
         PreflightEvent::Started { revision } => {
             if revision == process.preflight_revision {
                 process.preflight.is_scanning = true;
-                if !is_processing {
+                if !is_processing && !should_preserve_status {
                     process.ui_status = ProcessUiStatus::Preflight;
                 }
             }
@@ -321,7 +322,7 @@ pub(crate) fn apply_preflight_event(
                 process.preflight.skipped_files = skipped;
                 process.preflight.total_files = candidates + skipped;
                 process.preflight.is_scanning = true;
-                if !is_processing {
+                if !is_processing && !should_preserve_status {
                     process.ui_status = ProcessUiStatus::Preflight;
                 }
             }
@@ -329,7 +330,8 @@ pub(crate) fn apply_preflight_event(
         PreflightEvent::Completed { revision, stats } => {
             if revision == process.preflight_revision {
                 process.preflight = stats;
-                if !is_processing {
+                process.preflight_preserves_status = false;
+                if !is_processing && !should_preserve_status {
                     process.ui_status = ProcessUiStatus::Idle;
                     process.processing_current_file = status_ready.to_string();
                 }
@@ -337,6 +339,7 @@ pub(crate) fn apply_preflight_event(
         }
         PreflightEvent::Failed { revision, error } => {
             if revision == process.preflight_revision {
+                process.preflight_preserves_status = false;
                 process.preflight.is_scanning = false;
                 process.ui_status = ProcessUiStatus::Error;
                 process.last_error = Some(error.to_string());

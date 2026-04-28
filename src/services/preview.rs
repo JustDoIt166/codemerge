@@ -9,6 +9,8 @@ use crate::error::{AppError, AppResult};
 
 pub const EXCERPT_PREVIEW_BYTES: u64 = 1024 * 1024;
 pub const MAX_PREVIEW_LINE_BYTES: usize = 8 * 1024;
+const SPARSE_INDEX_THRESHOLD_BYTES: u64 = 16 * 1024 * 1024;
+const SPARSE_INDEX_STRIDE_LINES: usize = 1_000;
 const TRUNCATED_PREVIEW_SUFFIX: &str = "...";
 
 #[derive(Debug, Clone)]
@@ -53,7 +55,20 @@ pub enum PreviewEvent {
 pub struct PreviewDocument {
     path: PathBuf,
     byte_len: u64,
-    line_offsets: Arc<[u64]>,
+    line_index: Arc<PreviewLineIndex>,
+}
+
+#[derive(Debug, Clone)]
+struct PreviewLineIndex {
+    checkpoints: Arc<[LineCheckpoint]>,
+    line_count: usize,
+    stride: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LineCheckpoint {
+    line: usize,
+    offset: u64,
 }
 
 impl PreviewDocument {
@@ -62,7 +77,7 @@ impl PreviewDocument {
     }
 
     pub fn line_count(&self) -> usize {
-        self.line_offsets.len()
+        self.line_index.line_count
     }
 
     pub fn byte_len(&self) -> u64 {
@@ -140,9 +155,15 @@ pub fn index_document(path: &Path) -> AppResult<PreviewDocument> {
         .len();
 
     let mut reader = BufReader::new(file);
-    let mut line_offsets = vec![0];
+    let stride = if byte_len > SPARSE_INDEX_THRESHOLD_BYTES {
+        SPARSE_INDEX_STRIDE_LINES
+    } else {
+        1
+    };
+    let mut checkpoints = vec![LineCheckpoint { line: 0, offset: 0 }];
     let mut buffer = Vec::with_capacity(4096);
     let mut offset = 0_u64;
+    let mut next_line = 1_usize;
 
     loop {
         buffer.clear();
@@ -154,14 +175,24 @@ pub fn index_document(path: &Path) -> AppResult<PreviewDocument> {
         }
         offset += read as u64;
         if offset < byte_len {
-            line_offsets.push(offset);
+            if next_line.is_multiple_of(stride) {
+                checkpoints.push(LineCheckpoint {
+                    line: next_line,
+                    offset,
+                });
+            }
+            next_line += 1;
         }
     }
 
     Ok(PreviewDocument {
         path: path.to_path_buf(),
         byte_len,
-        line_offsets: line_offsets.into(),
+        line_index: Arc::new(PreviewLineIndex {
+            checkpoints: checkpoints.into(),
+            line_count: next_line,
+            stride,
+        }),
     })
 }
 
@@ -171,13 +202,24 @@ pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> AppResult<
     }
 
     let clamped_end = range.end.min(document.line_count());
-    let start_offset = document.line_offsets[range.start];
+    let checkpoint = document.line_index.checkpoint_for_line(range.start);
     let mut file = std::fs::File::open(&document.path)
         .map_err(|e| AppError::new(format!("open preview file failed: {e}")))?;
-    file.seek(SeekFrom::Start(start_offset))
+    file.seek(SeekFrom::Start(checkpoint.offset))
         .map_err(|e| AppError::new(format!("seek preview file failed: {e}")))?;
 
     let mut reader = BufReader::new(file);
+    for _ in checkpoint.line..range.start {
+        let mut ignored = String::new();
+        if reader
+            .read_line(&mut ignored)
+            .map_err(|e| AppError::new(format!("read preview file failed: {e}")))?
+            == 0
+        {
+            return Ok(Vec::new());
+        }
+    }
+
     let mut lines = Vec::with_capacity(clamped_end - range.start);
     for _ in range.start..clamped_end {
         let mut line = String::new();
@@ -199,6 +241,20 @@ pub fn load_range(document: &PreviewDocument, range: Range<usize>) -> AppResult<
     }
 
     Ok(lines)
+}
+
+impl PreviewLineIndex {
+    fn checkpoint_for_line(&self, line: usize) -> LineCheckpoint {
+        let checkpoint_ix = if self.stride <= 1 {
+            line
+        } else {
+            line / self.stride
+        };
+        self.checkpoints
+            .get(checkpoint_ix.min(self.checkpoints.len().saturating_sub(1)))
+            .copied()
+            .unwrap_or(LineCheckpoint { line: 0, offset: 0 })
+    }
 }
 
 pub fn load_text(document: &PreviewDocument) -> AppResult<String> {
@@ -310,8 +366,9 @@ fn write_excerpt_preview(source: &Path, target: &Path, max_bytes: u64) -> AppRes
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest, TRUNCATED_PREVIEW_SUFFIX,
-        create_excerpt_preview, index_document, load_range, load_text, start,
+        MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest, SPARSE_INDEX_STRIDE_LINES,
+        SPARSE_INDEX_THRESHOLD_BYTES, TRUNCATED_PREVIEW_SUFFIX, create_excerpt_preview,
+        index_document, load_range, load_text, start,
     };
 
     fn with_preview_file(name: &str, content: &str, test: impl FnOnce(&std::path::Path)) {
@@ -349,9 +406,30 @@ mod tests {
             let clone = document.clone();
 
             assert!(std::sync::Arc::ptr_eq(
-                &document.line_offsets,
-                &clone.line_offsets
+                &document.line_index,
+                &clone.line_index
             ));
+        });
+    }
+
+    #[test]
+    fn large_preview_uses_sparse_index_and_reads_deep_ranges() {
+        let long_line = "x".repeat(1024);
+        let line_count = (SPARSE_INDEX_THRESHOLD_BYTES as usize / (long_line.len() + 1)) + 128;
+        let content = (0..line_count)
+            .map(|ix| format!("{ix:05}-{long_line}\n"))
+            .collect::<String>();
+
+        with_preview_file("large_sparse.txt", &content, |path| {
+            let document = index_document(path).expect("index document");
+            assert_eq!(document.line_count(), line_count);
+            assert_eq!(document.line_index.stride, SPARSE_INDEX_STRIDE_LINES);
+            assert!(document.line_index.checkpoints.len() < line_count / 2);
+
+            let target = SPARSE_INDEX_STRIDE_LINES + 37;
+            let lines = load_range(&document, target..target + 2).expect("load range");
+            assert!(lines[0].starts_with(&format!("{target:05}-")));
+            assert!(lines[1].starts_with(&format!("{:05}-", target + 1)));
         });
     }
 

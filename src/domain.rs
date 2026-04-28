@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::processor::stats::ProcessingStats;
 
+pub const APP_CONFIG_VERSION: u32 = 1;
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub enum Language {
     Zh,
@@ -56,15 +58,22 @@ impl Default for ProcessingOptions {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfigV1 {
+    #[serde(default = "default_config_version")]
+    pub version: u32,
     pub language: Language,
     pub options: ProcessingOptions,
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
 }
 
+fn default_config_version() -> u32 {
+    0
+}
+
 impl Default for AppConfigV1 {
     fn default() -> Self {
         Self {
+            version: APP_CONFIG_VERSION,
             language: Language::Zh,
             options: ProcessingOptions::default(),
             folder_blacklist: default_folder_blacklist(),

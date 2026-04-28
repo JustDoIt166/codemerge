@@ -462,13 +462,7 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation(cx);
-        if let Some(handle) = self.process.read(cx).state().process_handle.as_ref() {
-            handle.cancel.cancel();
-        }
-        self.process.update(cx, |process, process_cx| {
-            process.state_mut().preflight_rx = None;
-            process_cx.notify();
-        });
+        self.cancel_and_detach_background_work(cx);
         self.preview.update(cx, |preview, preview_cx| {
             preview.set_preview_rx(None);
             preview_cx.notify();
@@ -517,6 +511,16 @@ impl Workspace {
             window,
             cx,
         );
+    }
+
+    pub(super) fn cancel_and_detach_background_work(&mut self, cx: &mut Context<Self>) {
+        self.process.update(cx, |process, process_cx| {
+            if let Some(handle) = process.state_mut().process_handle.take() {
+                handle.cancel.cancel();
+            }
+            process.state_mut().preflight_rx = None;
+            process_cx.notify();
+        });
     }
 
     pub(super) fn start_process(
@@ -1089,7 +1093,26 @@ impl Workspace {
         });
     }
 
-    pub(super) fn expand_tree(&mut self, _: &ClickEvent, _: &mut Window, cx: &mut Context<Self>) {
+    pub(super) fn expand_tree(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self
+            .tree_panel
+            .data
+            .as_ref()
+            .is_some_and(|data| data.index.total_folders > super::TREE_EXPAND_ALL_FOLDER_LIMIT)
+        {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "tree_expand_all_limited"),
+                window,
+                cx,
+            );
+            return;
+        }
         self.sync_tree_with_mode(TreeExpansionMode::ExpandAll, cx);
     }
 
@@ -1122,12 +1145,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let path = self
-            .preview
-            .read(cx)
-            .preview_document()
-            .map(|document| document.path().to_path_buf());
-        let Some(path) = path else {
+        let document = self.preview.read(cx).preview_document().cloned();
+        let Some(document) = document else {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "no_content"),
@@ -1139,8 +1158,7 @@ impl Workspace {
         let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
-            let result = std::fs::read_to_string(&path)
-                .map_err(|e| crate::error::AppError::new(format!("read preview file failed: {e}")));
+            let result = crate::services::preview::load_text(&document);
             let _ = this.update(cx, |_, cx| match result {
                 Ok(content) => {
                     if let Some(window) = cx.active_window() {
