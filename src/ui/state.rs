@@ -139,6 +139,12 @@ pub struct ProcessState {
 }
 
 impl ProcessState {
+    pub fn discard_preflight_for_run(&mut self) {
+        self.preflight_rx = None;
+        self.preflight_revision = self.preflight_revision.wrapping_add(1);
+        self.preflight = PreflightStats::default();
+    }
+
     pub fn reset_for_run(&mut self, scanning_label: String) {
         self.ui_status = ProcessUiStatus::Running;
         self.last_error = None;
@@ -182,6 +188,13 @@ impl DeferredPreviewState {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PreviewLoadRequestKind {
+    File,
+    DeferredExcerpt,
+    DeferredFull,
+}
+
 #[derive(Default)]
 pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
@@ -192,6 +205,7 @@ pub struct PreviewPanelState {
     pub preview_document: Option<PreviewDocument>,
     pub preview_error: Option<String>,
     pub deferred_preview: Option<DeferredPreviewState>,
+    pub pending_request_type: Option<PreviewLoadRequestKind>,
     pub preview_chunks: Vec<PreviewChunk>,
     pub render_revision: u64,
 }

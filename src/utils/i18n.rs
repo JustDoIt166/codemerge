@@ -39,6 +39,12 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "remove_tag") => "Remove",
         (Language::Zh, "repository_tooltip") => "打开 GitHub 仓库: ",
         (Language::En, "repository_tooltip") => "Open GitHub repository: ",
+        (Language::Zh, "version_prefix") => "版本 ",
+        (Language::En, "version_prefix") => "v",
+        (Language::Zh, "language_switch_en") => "EN",
+        (Language::En, "language_switch_en") => "EN",
+        (Language::Zh, "language_switch_zh") => "中文",
+        (Language::En, "language_switch_zh") => "中文",
 
         // 文件选择
         (Language::Zh, "select_folder") => "选择文件夹",
@@ -551,6 +557,44 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "config_updated") => "Settings updated",
         (Language::Zh, "config_fallback_defaults") => "配置读取失败，已回退到默认设置",
         (Language::En, "config_fallback_defaults") => "Config load failed, defaults were restored",
+        (Language::Zh, "config_load_failed") => "配置加载失败",
+        (Language::En, "config_load_failed") => "Config load failed",
+        (Language::Zh, "config_save_failed") => "配置保存失败",
+        (Language::En, "config_save_failed") => "Config save failed",
+        (Language::Zh, "config_path_label") => "配置路径",
+        (Language::En, "config_path_label") => "Config path",
+        (Language::Zh, "config_error_label") => "错误",
+        (Language::En, "config_error_label") => "Error",
+        (Language::Zh, "config_path_unknown") => "未知",
+        (Language::En, "config_path_unknown") => "Unknown",
+        (Language::Zh, "config_reset_button") => "重置配置",
+        (Language::En, "config_reset_button") => "Reset Config",
+        (Language::Zh, "config_retry_button") => "重试保存",
+        (Language::En, "config_retry_button") => "Retry Save",
+        (Language::Zh, "config_reset_done") => "配置已重置为默认值",
+        (Language::En, "config_reset_done") => "Config reset to defaults",
+        (Language::Zh, "config_dir_unavailable_detail") => {
+            "无法定位配置目录，请检查系统配置目录权限。"
+        }
+        (Language::En, "config_dir_unavailable_detail") => {
+            "Config directory is unavailable. Check system config directory permissions."
+        }
+        (Language::Zh, "config_save_failed_detail") => {
+            "最近的设置变更尚未写入磁盘，请检查目录权限或稍后重试。"
+        }
+        (Language::En, "config_save_failed_detail") => {
+            "Recent setting changes were not written to disk. Check directory permissions and retry."
+        }
+        (Language::Zh, "merged_content_unavailable") => "合并后内容文件无法访问",
+        (Language::En, "merged_content_unavailable") => "Merged content file is unavailable",
+        (Language::Zh, "merged_directory_structure") => "目录结构",
+        (Language::En, "merged_directory_structure") => "Directory Structure",
+        (Language::Zh, "merged_file_path") => "文件路径",
+        (Language::En, "merged_file_path") => "File",
+        (Language::Zh, "merged_chars") => "字符数",
+        (Language::En, "merged_chars") => "Chars",
+        (Language::Zh, "merged_tokens") => "Token估算",
+        (Language::En, "merged_tokens") => "Tokens",
         (Language::Zh, "process_started") => "开始处理",
         (Language::En, "process_started") => "Processing started",
 

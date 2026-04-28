@@ -1,4 +1,4 @@
-use codemerge::domain::OutputFormat;
+use codemerge::domain::{Language, OutputFormat};
 use codemerge::processor::{merger, reader, walker};
 use std::fs;
 use std::io::Write;
@@ -35,12 +35,12 @@ fn merge_formats_match_expected_structure() {
         content: "fn main() {}".to_string(),
     }];
 
-    let d = merger::merge_content(OutputFormat::Default, "root/", &files);
-    let x = merger::merge_content(OutputFormat::Xml, "root/", &files);
-    let p = merger::merge_content(OutputFormat::PlainText, "root/", &files);
-    let m = merger::merge_content(OutputFormat::Markdown, "root/", &files);
+    let d = merger::merge_content(OutputFormat::Default, "root/", &files, Language::Zh);
+    let x = merger::merge_content(OutputFormat::Xml, "root/", &files, Language::En);
+    let p = merger::merge_content(OutputFormat::PlainText, "root/", &files, Language::En);
+    let m = merger::merge_content(OutputFormat::Markdown, "root/", &files, Language::En);
 
-    assert!(d.contains("Directory Structure"));
+    assert!(d.contains("目录结构"));
     assert!(d.contains("文件路径: src/main.rs"));
     assert!(d.contains("字符数: 12 | Token估算: 6"));
     assert!(x.contains("<codemerge>"));

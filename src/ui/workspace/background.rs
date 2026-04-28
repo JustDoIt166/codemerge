@@ -116,22 +116,34 @@ impl Workspace {
             return;
         }
 
-        if let Ok(metadata) = std::fs::metadata(&merged_content_path)
-            && metadata.len() > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES
-        {
-            self.preview.update(cx, |preview, preview_cx| {
-                preview.defer_preview(
-                    super::MERGED_CONTENT_PREVIEW_FILE_ID,
-                    merged_content_path.clone(),
-                    metadata.len(),
-                    EXCERPT_PREVIEW_BYTES,
-                );
-                preview_cx.notify();
-            });
-            self.preview_pane_view.update(cx, |view, _| {
-                view.scroll_to_top();
-            });
-            return;
+        match std::fs::metadata(&merged_content_path) {
+            Ok(metadata) if metadata.len() > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES => {
+                self.preview.update(cx, |preview, preview_cx| {
+                    preview.defer_preview(
+                        super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                        merged_content_path.clone(),
+                        metadata.len(),
+                        EXCERPT_PREVIEW_BYTES,
+                    );
+                    preview_cx.notify();
+                });
+                self.preview_pane_view.update(cx, |view, _| {
+                    view.scroll_to_top();
+                });
+                return;
+            }
+            Err(error) => {
+                let language = self.language(cx);
+                self.preview.update(cx, |preview, preview_cx| {
+                    preview.set_preview_error_message(format!(
+                        "{}: {error}",
+                        crate::utils::i18n::tr(language, "merged_content_unavailable")
+                    ));
+                    preview_cx.notify();
+                });
+                return;
+            }
+            Ok(_) => {}
         }
 
         self.load_preview_path(
@@ -142,13 +154,17 @@ impl Workspace {
     }
 
     pub(super) fn load_deferred_merged_content_excerpt(&mut self, cx: &mut Context<Self>) {
-        let Some((source_path, source_byte_len)) = self
-            .preview
-            .read(cx)
-            .deferred_preview()
-            .filter(|state| state.excerpt_path.is_none())
-            .map(|state| (state.source_path.clone(), state.source_byte_len))
-        else {
+        let Some((source_path, source_byte_len)) = ({
+            let preview = self.preview.read(cx);
+            preview
+                .state()
+                .pending_request_type
+                .is_none()
+                .then(|| preview.deferred_preview())
+                .flatten()
+                .filter(|state| state.excerpt_path.is_none())
+                .map(|state| (state.source_path.clone(), state.source_byte_len))
+        }) else {
             return;
         };
 
@@ -177,18 +193,22 @@ impl Workspace {
     }
 
     pub(super) fn load_deferred_merged_content_full(&mut self, cx: &mut Context<Self>) {
-        let Some(source_path) = self
-            .preview
-            .read(cx)
-            .deferred_preview()
-            .map(|state| state.source_path.clone())
-        else {
+        let Some(source_path) = ({
+            let preview = self.preview.read(cx);
+            preview
+                .state()
+                .pending_request_type
+                .is_none()
+                .then(|| preview.deferred_preview())
+                .flatten()
+                .map(|state| state.source_path.clone())
+        }) else {
             return;
         };
 
         let request = self.preview.update(cx, |preview, preview_cx| {
-            let request =
-                preview.open_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, source_path.clone());
+            let request = preview
+                .open_deferred_full_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, source_path);
             preview_cx.notify();
             request
         });
@@ -415,6 +435,7 @@ impl Workspace {
         self.cleanup_current_result_artifacts();
         self.preview_table_cache = super::PreviewTableCache::default();
         self.result_artifacts = super::ResultArtifacts {
+            process_dir: result.process_dir.clone(),
             merged_content_path: result.merged_content_path.clone(),
             preview_blob_dir: result.preview_blob_dir.clone(),
         };
@@ -517,17 +538,7 @@ impl Workspace {
             .result
             .as_ref()
             .is_some_and(|result| result.merged_content_path.is_some());
-        let result_key = self
-            .result
-            .read(cx)
-            .state()
-            .result
-            .as_ref()
-            .map_or(0, |result| {
-                result.preview_files.len()
-                    ^ result.tree_nodes.len()
-                    ^ usize::from(result.merged_content_path.is_some())
-            }) as u64;
+        let result_key = self.result.read(cx).state().result_revision;
         let table_model = if self.preview_table_cache.filter == filter
             && self.preview_table_cache.result_key == result_key
             && self.preview_table_cache.current_selected_id == current_selected_id
@@ -610,6 +621,7 @@ impl Workspace {
     }
 
     pub(super) fn refresh_preflight(&mut self, cx: &mut Context<Self>) {
+        self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_blacklists = self.effective_blacklists(cx);

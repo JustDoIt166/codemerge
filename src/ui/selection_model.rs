@@ -52,6 +52,14 @@ impl SelectionModel {
         self.state.gitignore_rules = gitignore_rules;
     }
 
+    pub fn set_selected_folder_gitignore_rules(&mut self, gitignore_rules: Vec<String>) -> bool {
+        if self.state.gitignore_rules == gitignore_rules {
+            return false;
+        }
+        self.state.gitignore_rules = gitignore_rules;
+        true
+    }
+
     pub fn add_selected_files(&mut self, files: Vec<FileEntry>) {
         let mut existing = self
             .state
@@ -214,6 +222,16 @@ mod tests {
         );
         assert!(model.state().temp_folder_blacklist.is_empty());
         assert!(model.state().temp_ext_blacklist.is_empty());
+    }
+
+    #[test]
+    fn selected_folder_gitignore_rules_update_only_when_changed() {
+        let mut model = SelectionModel::new();
+        model.set_selected_folder(PathBuf::from("root"), vec!["target".into()]);
+
+        assert!(!model.set_selected_folder_gitignore_rules(vec!["target".into()]));
+        assert!(model.set_selected_folder_gitignore_rules(vec!["dist".into()]));
+        assert_eq!(model.state().gitignore_rules, vec!["dist".to_string()]);
     }
 
     #[test]

@@ -324,8 +324,24 @@ struct PreviewTableCache {
 
 #[derive(Clone, Default)]
 struct ResultArtifacts {
+    process_dir: Option<std::path::PathBuf>,
     merged_content_path: Option<std::path::PathBuf>,
     preview_blob_dir: Option<std::path::PathBuf>,
+}
+
+#[derive(Clone)]
+struct ConfigAlert {
+    title: SharedString,
+    detail: SharedString,
+    action_label: SharedString,
+    action: ConfigAlertAction,
+    is_error: bool,
+}
+
+#[derive(Clone, Copy)]
+enum ConfigAlertAction {
+    ResetDefaults,
+    RetrySave,
 }
 
 pub struct Workspace {
@@ -338,6 +354,7 @@ pub struct Workspace {
     result: Entity<ResultModel>,
     preview: Entity<PreviewModel>,
     result_artifacts: ResultArtifacts,
+    config_alert: Option<ConfigAlert>,
     tree_panel: TreePanelController,
     preview_table: Entity<TableState<PreviewTableDelegate>>,
     preview_filter_input: Entity<InputState>,
@@ -371,7 +388,9 @@ impl Workspace {
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
         let config_report = settings::load_report();
-        let cfg = config_report.config;
+        let config_alert =
+            Self::config_alert_from_report(&config_report, config_report.config.language);
+        let cfg = config_report.config.clone();
         let tree_filter_input =
             cx.new(|cx| InputState::new(window, cx).placeholder(tr(cfg.language, "tree_filter")));
         let preview_filter_input =
@@ -496,6 +515,7 @@ impl Workspace {
             result: result_model,
             preview: preview_model,
             result_artifacts: ResultArtifacts::default(),
+            config_alert,
             tree_panel: TreePanelController {
                 state: tree_state,
                 filter_input: tree_filter_input,
@@ -533,10 +553,7 @@ impl Workspace {
             poll_idle_streak: 0,
             _subscriptions: subscriptions,
         };
-        if matches!(
-            config_report.issue,
-            Some(ConfigLoadIssue::ParseFailed(_)) | Some(ConfigLoadIssue::ReadFailed(_))
-        ) {
+        if this.config_alert.is_some() {
             window.push_notification(
                 (
                     NotificationType::Warning,
@@ -659,6 +676,10 @@ impl Workspace {
     }
 
     fn cleanup_result_artifacts(artifacts: &ResultArtifacts) {
+        if let Some(dir) = &artifacts.process_dir {
+            let _ = crate::utils::temp_file::cleanup_temp_dir(dir);
+            return;
+        }
         if let Some(path) = &artifacts.merged_content_path {
             let _ = std::fs::remove_file(path);
         }
@@ -835,6 +856,73 @@ impl Workspace {
                 ui.narrow_content_tab,
                 kind,
             )),
+        }
+    }
+
+    fn config_alert_from_report(
+        report: &settings::ConfigLoadReport,
+        language: Language,
+    ) -> Option<ConfigAlert> {
+        let path = report
+            .path
+            .as_ref()
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| tr(language, "config_path_unknown").to_string());
+        match report.issue.as_ref() {
+            Some(ConfigLoadIssue::ParseFailed(err)) => Some(ConfigAlert {
+                title: SharedString::from(tr(language, "config_load_failed")),
+                detail: SharedString::from(format!(
+                    "{} | {}: {path} | {}: {err}",
+                    tr(language, "config_fallback_defaults"),
+                    tr(language, "config_path_label"),
+                    tr(language, "config_error_label")
+                )),
+                action_label: SharedString::from(tr(language, "config_reset_button")),
+                action: ConfigAlertAction::ResetDefaults,
+                is_error: true,
+            }),
+            Some(ConfigLoadIssue::ReadFailed(err)) => Some(ConfigAlert {
+                title: SharedString::from(tr(language, "config_load_failed")),
+                detail: SharedString::from(format!(
+                    "{} | {}: {path} | {}: {err}",
+                    tr(language, "config_fallback_defaults"),
+                    tr(language, "config_path_label"),
+                    tr(language, "config_error_label")
+                )),
+                action_label: SharedString::from(tr(language, "config_reset_button")),
+                action: ConfigAlertAction::ResetDefaults,
+                is_error: true,
+            }),
+            Some(ConfigLoadIssue::ConfigDirUnavailable) => Some(ConfigAlert {
+                title: SharedString::from(tr(language, "config_save_failed")),
+                detail: SharedString::from(tr(language, "config_dir_unavailable_detail")),
+                action_label: SharedString::from(tr(language, "config_reset_button")),
+                action: ConfigAlertAction::ResetDefaults,
+                is_error: true,
+            }),
+            Some(ConfigLoadIssue::MissingFile) | None => None,
+        }
+    }
+
+    fn set_config_save_error(&mut self, error: String, cx: &mut Context<Self>) {
+        let language = self.language(cx);
+        self.config_alert = Some(ConfigAlert {
+            title: SharedString::from(tr(language, "config_save_failed")),
+            detail: SharedString::from(format!(
+                "{} | {}: {error}",
+                tr(language, "config_save_failed_detail"),
+                tr(language, "config_error_label")
+            )),
+            action_label: SharedString::from(tr(language, "config_retry_button")),
+            action: ConfigAlertAction::RetrySave,
+            is_error: true,
+        });
+        cx.notify();
+    }
+
+    fn clear_config_alert(&mut self, cx: &mut Context<Self>) {
+        if self.config_alert.take().is_some() {
+            cx.notify();
         }
     }
 }
@@ -1421,6 +1509,38 @@ mod tests {
     }
 
     #[gpui::test]
+    fn refresh_selected_folder_gitignore_rules_reads_current_file(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let root = std::env::temp_dir().join(format!(
+            "codemerge_gitignore_refresh_tests_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join(".gitignore"), "dist\n").expect("write gitignore");
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            workspace.selection.update(cx, |selection, selection_cx| {
+                selection.set_selected_folder(root.clone(), vec!["target".into()]);
+                selection_cx.notify();
+            });
+
+            workspace.refresh_selected_folder_gitignore_rules(cx);
+
+            assert_eq!(
+                workspace.selection_snapshot(cx).gitignore_rules,
+                vec!["dist".to_string()]
+            );
+        });
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[gpui::test]
     fn successful_process_completion_clears_temporary_filters_and_restarts_preflight(
         cx: &mut TestAppContext,
     ) {
@@ -1490,6 +1610,28 @@ mod tests {
             );
             assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
         });
+    }
+
+    #[test]
+    fn cleanup_result_artifacts_removes_owned_process_dir() {
+        let process_dir = std::env::temp_dir().join(format!(
+            "codemerge_workspace_artifacts_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&process_dir).expect("create process dir");
+        fs::write(process_dir.join("preview_0.txt"), "preview").expect("write preview");
+
+        Workspace::cleanup_result_artifacts(&super::ResultArtifacts {
+            process_dir: Some(process_dir.clone()),
+            merged_content_path: Some(process_dir.join("merged.txt")),
+            preview_blob_dir: Some(process_dir.clone()),
+        });
+
+        assert!(!process_dir.exists());
     }
 
     #[gpui::test]
@@ -2350,6 +2492,7 @@ mod tests {
                     children: Vec::new(),
                 },
             ],
+            process_dir: None,
             merged_content_path: None,
             suggested_result_name: "workspace-20260321.txt".to_string(),
             file_details: Vec::new(),

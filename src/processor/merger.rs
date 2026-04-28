@@ -1,4 +1,5 @@
-use crate::domain::OutputFormat;
+use crate::domain::{Language, OutputFormat};
+use crate::utils::i18n::tr;
 
 #[derive(Debug, Clone)]
 pub struct MergedFile {
@@ -8,11 +9,13 @@ pub struct MergedFile {
     pub content: String,
 }
 
-pub fn render_prefix(format: OutputFormat, tree: &str) -> String {
+pub fn render_prefix(format: OutputFormat, tree: &str, language: Language) -> String {
     let mut out = String::new();
+    let directory_structure = tr(language, "merged_directory_structure");
     match format {
         OutputFormat::Default => {
-            out.push_str("Directory Structure:\n");
+            out.push_str(directory_structure);
+            out.push_str(":\n");
             out.push_str(tree);
             out.push_str("\n\n");
         }
@@ -22,12 +25,15 @@ pub fn render_prefix(format: OutputFormat, tree: &str) -> String {
             out.push_str("\n]]></directory_structure>\n<files>\n");
         }
         OutputFormat::PlainText => {
-            out.push_str("Directory Structure:\n");
+            out.push_str(directory_structure);
+            out.push_str(":\n");
             out.push_str(tree);
             out.push_str("\n\n");
         }
         OutputFormat::Markdown => {
-            out.push_str("# Directory Structure\n\n```text\n");
+            out.push_str("# ");
+            out.push_str(directory_structure);
+            out.push_str("\n\n```text\n");
             out.push_str(tree);
             out.push_str("\n```\n\n");
         }
@@ -35,13 +41,16 @@ pub fn render_prefix(format: OutputFormat, tree: &str) -> String {
     out
 }
 
-pub fn render_file_entry(format: OutputFormat, file: &MergedFile) -> String {
+pub fn render_file_entry(format: OutputFormat, file: &MergedFile, language: Language) -> String {
     let mut out = String::new();
+    let file_path = tr(language, "merged_file_path");
+    let chars = tr(language, "merged_chars");
+    let tokens = tr(language, "merged_tokens");
     match format {
         OutputFormat::Default => {
             out.push_str("============================================================\n");
             out.push_str(&format!(
-                "文件路径: {}\n字符数: {} | Token估算: {}\n\n",
+                "{file_path}: {}\n{chars}: {} | {tokens}: {}\n\n",
                 file.path, file.chars, file.tokens
             ));
             out.push_str(&file.content);
@@ -58,7 +67,7 @@ pub fn render_file_entry(format: OutputFormat, file: &MergedFile) -> String {
         }
         OutputFormat::PlainText => {
             out.push_str(&format!(
-                "================\nFile: {}\nChars: {}\nTokens: {}\n================\n",
+                "================\n{file_path}: {}\n{chars}: {}\n{tokens}: {}\n================\n",
                 file.path, file.chars, file.tokens
             ));
             out.push_str(&file.content);
@@ -67,8 +76,8 @@ pub fn render_file_entry(format: OutputFormat, file: &MergedFile) -> String {
         OutputFormat::Markdown => {
             let lang = lang_from_path(&file.path);
             out.push_str(&format!(
-                "# {}\n\n- chars: {}\n- tokens: {}\n\n```{}\n{}\n```\n\n",
-                file.path, file.chars, file.tokens, lang, file.content
+                "# {}\n\n- {}: {}\n- {}: {}\n\n```{}\n{}\n```\n\n",
+                file.path, chars, file.chars, tokens, file.tokens, lang, file.content
             ));
         }
     }
@@ -82,10 +91,15 @@ pub fn render_suffix(format: OutputFormat) -> &'static str {
     }
 }
 
-pub fn merge_content(format: OutputFormat, tree: &str, files: &[MergedFile]) -> String {
-    let mut out = render_prefix(format, tree);
+pub fn merge_content(
+    format: OutputFormat,
+    tree: &str,
+    files: &[MergedFile],
+    language: Language,
+) -> String {
+    let mut out = render_prefix(format, tree, language);
     for file in files {
-        out.push_str(&render_file_entry(format, file));
+        out.push_str(&render_file_entry(format, file, language));
     }
     out.push_str(render_suffix(format));
     out

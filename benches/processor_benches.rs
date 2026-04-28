@@ -3,7 +3,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[path = "support/mod.rs"]
 mod support;
 
-use codemerge::domain::OutputFormat;
+use codemerge::domain::{Language, OutputFormat};
 use codemerge::processor::{merger, reader, walker};
 
 // ---------------------------------------------------------------------------
@@ -104,7 +104,7 @@ fn bench_render_file_entry(c: &mut Criterion) {
     ];
     for &(name, format) in formats {
         group.bench_with_input(BenchmarkId::from_parameter(name), &file, |b, file| {
-            b.iter(|| merger::render_file_entry(format, file));
+            b.iter(|| merger::render_file_entry(format, file, Language::En));
         });
     }
     group.finish();
@@ -131,7 +131,7 @@ fn bench_merge_content(c: &mut Criterion) {
                 BenchmarkId::new(name, scale),
                 &(&files, &tree),
                 |b, (files, tree)| {
-                    b.iter(|| merger::merge_content(format, tree, files));
+                    b.iter(|| merger::merge_content(format, tree, files, Language::En));
                 },
             );
         }

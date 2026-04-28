@@ -164,6 +164,7 @@ pub struct ProcessResult {
     pub stats: ProcessingStats,
     pub tree_string: String,
     pub tree_nodes: Vec<TreeNode>,
+    pub process_dir: Option<PathBuf>,
     pub merged_content_path: Option<PathBuf>,
     pub suggested_result_name: String,
     pub file_details: Vec<FileDetail>,

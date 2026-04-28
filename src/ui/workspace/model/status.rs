@@ -82,7 +82,11 @@ pub(in crate::ui::workspace) fn resolve_window_chrome_mode(
     is_windows: bool,
     is_linux: bool,
     is_macos: bool,
+    prefer_custom_titlebar: bool,
 ) -> WindowChromeMode {
+    if !prefer_custom_titlebar {
+        return WindowChromeMode::CompactHeaderFallback;
+    }
     if is_windows || is_macos {
         return WindowChromeMode::CustomTitleBar;
     }
@@ -111,15 +115,19 @@ pub(in crate::ui::workspace) fn build_workspace_chrome_view_model(
             merged_file_size_hint,
         )),
         status_tone: workspace_chrome_tone(process.ui_status),
-        version_label: SharedString::from(app_metadata::version_label()),
+        version_label: SharedString::from(format!(
+            "{}{}",
+            tr(language, "version_prefix"),
+            app_metadata::version()
+        )),
         repository_tooltip: SharedString::from(format!(
             "{}{}",
             tr(language, "repository_tooltip"),
             app_metadata::repository_url()
         )),
         language_button_label: SharedString::from(match language {
-            Language::Zh => "EN",
-            Language::En => "中文",
+            Language::Zh => tr(language, "language_switch_en"),
+            Language::En => tr(language, "language_switch_zh"),
         }),
     }
 }

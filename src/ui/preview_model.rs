@@ -5,7 +5,7 @@ use std::sync::mpsc::Receiver;
 use gpui::SharedString;
 
 use crate::services::preview::{PreviewDocument, PreviewEvent, PreviewRequest};
-use crate::ui::state::{DeferredPreviewState, PreviewPanelState};
+use crate::ui::state::{DeferredPreviewState, PreviewLoadRequestKind, PreviewPanelState};
 
 pub struct PreviewModel {
     state: PreviewPanelState,
@@ -57,6 +57,7 @@ impl PreviewModel {
                 self.state.preview_error = None;
                 self.state.preview_requested_range = None;
                 self.state.queued_preview_range = None;
+                self.state.pending_request_type = None;
                 self.state.clear_loaded_chunks();
                 self.state.store_chunk_with_focus(
                     loaded_range,
@@ -103,6 +104,7 @@ impl PreviewModel {
                 }
                 self.state.preview_error = Some(error.to_string());
                 self.state.preview_requested_range = None;
+                self.state.pending_request_type = None;
                 if self.state.preview_document.is_none() {
                     self.state.clear_loaded_chunks();
                 }
@@ -134,6 +136,7 @@ impl PreviewModel {
 
     pub fn clear_request(&mut self) {
         self.state.preview_requested_range = None;
+        self.state.pending_request_type = None;
     }
 
     pub fn take_queued_preview_range(&mut self) -> Option<Range<usize>> {
@@ -145,7 +148,11 @@ impl PreviewModel {
     }
 
     pub fn open_preview(&mut self, file_id: u32, path: PathBuf) -> PreviewRequest {
-        self.prepare_open_preview(file_id, path, None)
+        self.prepare_open_preview(file_id, path, None, PreviewLoadRequestKind::File)
+    }
+
+    pub fn open_deferred_full_preview(&mut self, file_id: u32, path: PathBuf) -> PreviewRequest {
+        self.prepare_open_preview(file_id, path, None, PreviewLoadRequestKind::DeferredFull)
     }
 
     pub fn open_deferred_excerpt_preview(
@@ -165,6 +172,7 @@ impl PreviewModel {
                 excerpt_byte_len,
                 excerpt_path: Some(excerpt_path),
             }),
+            PreviewLoadRequestKind::DeferredExcerpt,
         )
     }
 
@@ -181,6 +189,7 @@ impl PreviewModel {
         self.state.preview_rx = None;
         self.state.preview_requested_range = None;
         self.state.queued_preview_range = None;
+        self.state.pending_request_type = None;
         self.state.preview_document = None;
         self.state.deferred_preview = Some(DeferredPreviewState {
             source_path,
@@ -211,6 +220,7 @@ impl PreviewModel {
         file_id: u32,
         path: PathBuf,
         deferred_preview: Option<DeferredPreviewState>,
+        request_type: PreviewLoadRequestKind,
     ) -> PreviewRequest {
         self.state.preview_revision += 1;
         self.state.selected_preview_file_id = Some(file_id);
@@ -219,6 +229,7 @@ impl PreviewModel {
         self.state.preview_requested_range =
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.queued_preview_range = None;
+        self.state.pending_request_type = Some(request_type);
         self.state.preview_document = None;
         self.state.deferred_preview = deferred_preview;
         self.state.clear_loaded_chunks();
@@ -233,6 +244,9 @@ impl PreviewModel {
     }
 
     pub fn set_preview_rx(&mut self, rx: Option<Receiver<PreviewEvent>>) {
+        if rx.is_none() {
+            self.state.pending_request_type = None;
+        }
         self.state.preview_rx = rx;
     }
 
@@ -347,6 +361,7 @@ pub enum PreviewEventEffect {
 mod tests {
     use super::{PreviewEventEffect, PreviewModel, PreviewScrollDirection};
     use crate::services::preview::{PreviewEvent, PreviewRequest, index_document};
+    use crate::ui::state::PreviewLoadRequestKind;
     use std::fs;
     use std::path::PathBuf;
 
@@ -521,5 +536,46 @@ mod tests {
             deferred.excerpt_path.as_ref(),
             Some(&PathBuf::from("merged_excerpt.txt"))
         );
+        assert_eq!(
+            model.state().pending_request_type,
+            Some(PreviewLoadRequestKind::DeferredExcerpt)
+        );
+    }
+
+    #[test]
+    fn preview_open_completion_clears_pending_request_type() {
+        let root = std::env::temp_dir().join(format!(
+            "codemerge_preview_model_pending_tests_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock drift")
+                .as_nanos()
+        ));
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("preview.txt");
+        fs::write(&path, "a\nb\n").expect("write preview");
+
+        let mut model = PreviewModel::new();
+        let request = model.open_deferred_full_preview(5, path.clone());
+        assert_eq!(
+            model.state().pending_request_type,
+            Some(PreviewLoadRequestKind::DeferredFull)
+        );
+        let revision = match request {
+            PreviewRequest::Open { revision, .. } => revision,
+            _ => unreachable!(),
+        };
+        let document = index_document(&path).expect("index document");
+        let _ = model.apply_event(PreviewEvent::Opened {
+            revision,
+            file_id: 5,
+            document,
+            loaded_range: 0..2,
+            lines: vec!["a".into(), "b".into()],
+        });
+
+        assert_eq!(model.state().pending_request_type, None);
+        let _ = fs::remove_dir_all(root);
     }
 }

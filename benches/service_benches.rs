@@ -3,7 +3,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[path = "support/mod.rs"]
 mod support;
 
-use codemerge::domain::OutputFormat;
+use codemerge::domain::{Language, OutputFormat};
 use codemerge::processor::merger;
 use codemerge::processor::reader::{compress_by_extension, count_chars_tokens};
 use codemerge::processor::walker;
@@ -98,7 +98,12 @@ fn bench_full_pipeline(c: &mut Criterion) {
                 });
 
                 // Phase 3: Merge
-                merger::merge_content(OutputFormat::Default, &walker_output.tree, &merged_files);
+                merger::merge_content(
+                    OutputFormat::Default,
+                    &walker_output.tree,
+                    &merged_files,
+                    Language::En,
+                );
             });
         });
     }

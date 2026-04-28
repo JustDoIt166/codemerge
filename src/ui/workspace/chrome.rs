@@ -22,6 +22,7 @@ impl Workspace {
             cfg!(target_os = "windows"),
             cfg!(target_os = "linux"),
             cfg!(target_os = "macos"),
+            crate::ui::custom_titlebar_enabled(),
         );
         let chrome = self.build_workspace_chrome_view_model(cx);
 

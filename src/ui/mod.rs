@@ -35,17 +35,29 @@ fn main_window_options() -> WindowOptions {
         cfg!(target_os = "windows"),
         cfg!(target_os = "linux"),
         cfg!(target_os = "macos"),
+        custom_titlebar_enabled(),
     )
 }
 
-fn build_main_window_options(is_windows: bool, is_linux: bool, is_macos: bool) -> WindowOptions {
+pub(crate) fn custom_titlebar_enabled() -> bool {
+    !std::env::var("CODEMERGE_SYSTEM_TITLEBAR")
+        .map(|value| matches!(value.to_ascii_lowercase().as_str(), "1" | "true" | "yes"))
+        .unwrap_or(false)
+}
+
+fn build_main_window_options(
+    is_windows: bool,
+    is_linux: bool,
+    is_macos: bool,
+    prefer_custom_titlebar: bool,
+) -> WindowOptions {
     let mut options = WindowOptions::default();
 
-    if is_windows || is_macos {
+    if prefer_custom_titlebar && (is_windows || is_macos) {
         options.titlebar = Some(gpui_component::TitleBar::title_bar_options());
     }
 
-    if is_linux {
+    if prefer_custom_titlebar && is_linux {
         options.window_decorations = Some(WindowDecorations::Client);
     }
 
@@ -59,8 +71,8 @@ mod tests {
 
     #[test]
     fn main_window_options_enable_custom_titlebar_on_windows_and_macos() {
-        let windows = build_main_window_options(true, false, false);
-        let macos = build_main_window_options(false, false, true);
+        let windows = build_main_window_options(true, false, false, true);
+        let macos = build_main_window_options(false, false, true, true);
 
         let windows_titlebar = windows.titlebar.expect("windows titlebar");
         assert!(windows_titlebar.appears_transparent);
@@ -73,7 +85,7 @@ mod tests {
 
     #[test]
     fn main_window_options_prefer_client_decorations_on_linux() {
-        let linux = build_main_window_options(false, true, false);
+        let linux = build_main_window_options(false, true, false, true);
 
         assert_eq!(linux.window_decorations, Some(WindowDecorations::Client));
         assert!(
@@ -84,7 +96,7 @@ mod tests {
 
     #[test]
     fn main_window_options_keep_default_decorations_on_other_platforms() {
-        let other = build_main_window_options(false, false, false);
+        let other = build_main_window_options(false, false, false, false);
 
         assert!(other.window_decorations.is_none());
         assert!(
@@ -93,6 +105,18 @@ mod tests {
                 .expect("default titlebar")
                 .appears_transparent,
             "unknown platforms should keep default titlebar settings"
+        );
+    }
+
+    #[test]
+    fn main_window_options_can_disable_custom_titlebar_on_macos() {
+        let macos = build_main_window_options(false, false, true, false);
+        assert!(
+            !macos
+                .titlebar
+                .expect("default macos titlebar")
+                .appears_transparent,
+            "macOS fallback should keep the default system titlebar configuration"
         );
     }
 }

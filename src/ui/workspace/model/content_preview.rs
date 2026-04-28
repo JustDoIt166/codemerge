@@ -81,12 +81,14 @@ pub(in crate::ui::workspace) struct PreviewDeferredViewModel {
     pub detail: SharedString,
     pub source_byte_size: SharedString,
     pub excerpt_byte_size: SharedString,
+    pub actions_disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::ui::workspace) struct PreviewExcerptBannerViewModel {
     pub title: SharedString,
     pub detail: SharedString,
+    pub actions_disabled: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -365,6 +367,7 @@ pub(in crate::ui::workspace) fn build_preview_pane_view_model(
                 excerpt_byte_size: SharedString::from(super::super::view::format_size(
                     deferred.excerpt_byte_len,
                 )),
+                actions_disabled: preview_loading,
             }),
         };
     }
@@ -421,6 +424,7 @@ pub(in crate::ui::workspace) fn build_preview_pane_view_model(
                 tr(language, "large_preview_excerpt_hint"),
                 super::super::view::format_size(state.source_byte_len)
             )),
+            actions_disabled: preview_loading,
         });
 
     PreviewPaneViewModel {

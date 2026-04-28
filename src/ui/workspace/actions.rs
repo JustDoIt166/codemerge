@@ -18,7 +18,7 @@ use windows::Win32::{
 
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
-use super::{BlacklistItemKind, PreviewTableDelegate, Workspace};
+use super::{BlacklistItemKind, ConfigAlertAction, PreviewTableDelegate, Workspace};
 use crate::domain::{FileEntry, OutputFormat, ResultTab};
 use crate::services::external_link;
 use crate::services::process::ProcessRequest;
@@ -50,13 +50,61 @@ impl Workspace {
         cx.spawn(async move |this, cx| {
             let result =
                 crate::services::settings::execute(crate::domain::SettingsCommand::Save(config));
-            let _ = this.update(cx, |_, cx| {
-                if let Err(err) = result {
+            let _ = this.update(cx, |workspace, cx| match result {
+                Ok(_) => workspace.clear_config_alert(cx),
+                Err(err) => {
                     Self::notify_active_window(cx, NotificationType::Error, err.to_string());
+                    workspace.set_config_save_error(err.to_string(), cx);
                 }
             });
         })
         .detach();
+    }
+
+    pub(super) fn handle_config_alert_action(
+        &mut self,
+        _: &ClickEvent,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(action) = self.config_alert.as_ref().map(|alert| alert.action) else {
+            return;
+        };
+        match action {
+            ConfigAlertAction::RetrySave => self.persist_settings_async(cx),
+            ConfigAlertAction::ResetDefaults => {
+                cx.spawn(async move |this, cx| {
+                    let result = crate::services::settings::execute(
+                        crate::domain::SettingsCommand::ResetToDefault,
+                    );
+                    let _ = this.update(cx, |workspace, cx| match result {
+                        Ok(config) => {
+                            workspace.settings.update(cx, |settings, settings_cx| {
+                                settings.apply_config(config);
+                                settings_cx.notify();
+                            });
+                            let language = workspace.language(cx);
+                            workspace.clear_config_alert(cx);
+                            workspace.refresh_preflight(cx);
+                            Self::notify_active_window(
+                                cx,
+                                NotificationType::Success,
+                                tr(language, "config_reset_done"),
+                            );
+                        }
+                        Err(err) => {
+                            Self::notify_active_window(
+                                cx,
+                                NotificationType::Error,
+                                err.to_string(),
+                            );
+                            workspace.set_config_save_error(err.to_string(), cx);
+                        }
+                    });
+                })
+                .detach();
+            }
+        }
     }
 
     pub(super) fn push_notice(
@@ -80,6 +128,19 @@ impl Workspace {
             selection_cx.notify();
         });
         self.refresh_preflight(cx);
+    }
+
+    pub(super) fn refresh_selected_folder_gitignore_rules(&mut self, cx: &mut Context<Self>) {
+        let Some(selected_folder) = self.selection_snapshot(cx).selected_folder else {
+            return;
+        };
+        let gitignore_rules =
+            crate::processor::walker::load_gitignore_rules_for_root(&selected_folder);
+        self.selection.update(cx, |selection, selection_cx| {
+            if selection.set_selected_folder_gitignore_rules(gitignore_rules) {
+                selection_cx.notify();
+            }
+        });
     }
 
     pub(super) fn apply_selected_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
@@ -134,10 +195,11 @@ impl Workspace {
         _: &Entity<InputState>,
         event: &InputEvent,
         _: &mut Window,
-        _: &mut Context<Self>,
+        cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
             self.invalidate_rules_panel_cache();
+            cx.notify();
         }
     }
 
@@ -258,13 +320,7 @@ impl Workspace {
                 .map(|handle| handle.path().to_path_buf());
             let gitignore_rules = picked
                 .as_ref()
-                .map(|path| {
-                    let gitignore = crate::processor::walker::auto_gitignore_path(path);
-                    std::fs::read_to_string(gitignore)
-                        .ok()
-                        .map(|content| crate::processor::walker::parse_gitignore_rules(&content))
-                        .unwrap_or_default()
-                })
+                .map(|path| crate::processor::walker::load_gitignore_rules_for_root(path))
                 .unwrap_or_default();
             let _ = this.update(cx, |this, cx| {
                 if let Some(path) = picked {
@@ -499,6 +555,7 @@ impl Workspace {
         self.clear_pending_confirmation(cx);
         self.sync_tree(cx);
         self.sync_preview_table(cx);
+        self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_blacklists = self.effective_blacklists(cx);

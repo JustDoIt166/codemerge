@@ -79,6 +79,7 @@ fn preview_table_selects_first_row_when_current_selection_disappears() {
         stats: ProcessingStats::default(),
         tree_string: String::new(),
         tree_nodes: Vec::new(),
+        process_dir: None,
         merged_content_path: None,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
@@ -737,7 +738,7 @@ fn tree_structure_signature_only_changes_when_visible_structure_changes() {
 #[test]
 fn window_chrome_mode_matches_platform_and_decorations() {
     assert_eq!(
-        resolve_window_chrome_mode(Decorations::Server, true, false, false),
+        resolve_window_chrome_mode(Decorations::Server, true, false, false, true),
         WindowChromeMode::CustomTitleBar
     );
     assert_eq!(
@@ -748,16 +749,21 @@ fn window_chrome_mode_matches_platform_and_decorations() {
             false,
             true,
             false,
+            true,
         ),
         WindowChromeMode::CustomTitleBar
     );
     assert_eq!(
-        resolve_window_chrome_mode(Decorations::Server, false, true, false),
+        resolve_window_chrome_mode(Decorations::Server, false, true, false, true),
         WindowChromeMode::CompactHeaderFallback
     );
     assert_eq!(
-        resolve_window_chrome_mode(Decorations::Server, false, false, true),
+        resolve_window_chrome_mode(Decorations::Server, false, false, true, true),
         WindowChromeMode::CustomTitleBar
+    );
+    assert_eq!(
+        resolve_window_chrome_mode(Decorations::Server, false, false, true, false),
+        WindowChromeMode::CompactHeaderFallback
     );
 }
 
@@ -826,7 +832,14 @@ fn chrome_view_model_localizes_language_button_and_completed_message() {
     let en = build_workspace_chrome_view_model(&process, Language::En, Some("1.2 MB".into()));
 
     assert_eq!(zh.title.as_ref(), "CodeMerge");
-    assert_eq!(zh.version_label.as_ref(), app_metadata::version_label());
+    assert_eq!(
+        zh.version_label.as_ref(),
+        format!(
+            "{}{}",
+            tr(Language::Zh, "version_prefix"),
+            app_metadata::version()
+        )
+    );
     assert_eq!(zh.language_button_label.as_ref(), "EN");
     assert_eq!(en.language_button_label.as_ref(), "中文");
     assert_eq!(
@@ -1075,6 +1088,7 @@ fn sample_result() -> ProcessResult {
                 children: Vec::new(),
             },
         ],
+        process_dir: None,
         merged_content_path: None,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
@@ -1125,6 +1139,7 @@ fn sample_archive_result() -> ProcessResult {
                 }],
             }],
         }],
+        process_dir: None,
         merged_content_path: None,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
@@ -1149,6 +1164,7 @@ fn sample_sort_result() -> ProcessResult {
         stats: ProcessingStats::default(),
         tree_string: String::new(),
         tree_nodes: Vec::new(),
+        process_dir: None,
         merged_content_path: None,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
@@ -1226,6 +1242,7 @@ fn nested_result() -> ProcessResult {
                 children: Vec::new(),
             },
         ],
+        process_dir: None,
         merged_content_path: None,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),

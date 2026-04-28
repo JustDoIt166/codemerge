@@ -7,6 +7,8 @@ use crate::ui::state::{
 };
 use crate::utils::i18n::tr;
 
+const MAX_PROCESSING_RECORDS: usize = 1000;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EffectiveBlacklistRules {
     pub folder_blacklist: Vec<String>,
@@ -40,6 +42,13 @@ impl SettingsModel {
             folder_blacklist: self.state.folder_blacklist.clone(),
             ext_blacklist: self.state.ext_blacklist.clone(),
         }
+    }
+
+    pub fn apply_config(&mut self, config: AppConfigV1) {
+        self.state.language = config.language;
+        self.state.options = config.options;
+        self.state.folder_blacklist = config.folder_blacklist;
+        self.state.ext_blacklist = config.ext_blacklist;
     }
 
     pub fn language(&self) -> crate::domain::Language {
@@ -249,6 +258,7 @@ impl ProcessModel {
     }
 
     pub fn start_run(&mut self, handle: ProcessHandle, scanning_label: String) {
+        self.state.discard_preflight_for_run();
         self.state.reset_for_run(scanning_label);
         self.state.process_handle = Some(handle);
     }
@@ -325,6 +335,11 @@ impl ProcessModel {
                 candidates,
                 skipped,
             } => {
+                self.state.preflight.scanned_entries = scanned;
+                self.state.preflight.to_process_files = candidates;
+                self.state.preflight.skipped_files = skipped;
+                self.state.preflight.total_files = candidates + skipped;
+                self.state.preflight.is_scanning = true;
                 self.state.processing_scanned = scanned;
                 self.state.processing_candidates = candidates;
                 self.state.processing_skipped = skipped;
@@ -338,6 +353,7 @@ impl ProcessModel {
                 ProcessEventEffect::Continue
             }
             ProcessEvent::Completed(result) => {
+                self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Completed;
                 self.state.last_error = None;
                 self.state.processing_current_file =
@@ -345,12 +361,14 @@ impl ProcessModel {
                 ProcessEventEffect::Completed(Box::new(result))
             }
             ProcessEvent::Cancelled => {
+                self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Cancelled;
                 self.state.processing_current_file =
                     tr(language, "status_cancelled_hint").to_string();
                 ProcessEventEffect::Finish
             }
             ProcessEvent::Failed(err) => {
+                self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Error;
                 self.state.last_error = Some(err.to_string());
                 self.state.processing_current_file = err.to_string();
@@ -366,6 +384,10 @@ impl ProcessModel {
             self.state.processing_skipped += 1;
         }
         self.state.processing_records.push(record);
+        if self.state.processing_records.len() > MAX_PROCESSING_RECORDS {
+            let overflow = self.state.processing_records.len() - MAX_PROCESSING_RECORDS;
+            self.state.processing_records.drain(0..overflow);
+        }
     }
 }
 
@@ -385,8 +407,12 @@ mod tests {
         ProcessingOptions,
     };
     use crate::processor::stats::ProcessingStats;
+    use crate::services::preflight::PreflightEvent;
     use crate::services::process::ProcessEvent;
+    use crate::services::process::ProcessHandle;
     use crate::ui::state::{NarrowContentTab, PendingConfirmation, SelectionState, SidePanelTab};
+    use std::sync::mpsc;
+    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn effective_blacklists_respect_use_gitignore_and_temporary_rules() {
@@ -480,6 +506,7 @@ mod tests {
             stats: ProcessingStats::default(),
             tree_string: String::new(),
             tree_nodes: Vec::new(),
+            process_dir: None,
             merged_content_path: None,
             suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
@@ -501,6 +528,67 @@ mod tests {
     }
 
     #[test]
+    fn process_model_start_run_discards_stale_preflight_events() {
+        let mut process = ProcessModel::new("ready".into());
+        let (_preflight_tx, preflight_rx) = mpsc::channel();
+        process.state_mut().preflight_revision = 7;
+        process.state_mut().preflight_rx = Some(preflight_rx);
+        process.state_mut().preflight.total_files = 9;
+        process.state_mut().preflight.to_process_files = 8;
+
+        let (_tx, rx) = mpsc::channel();
+        process.start_run(
+            ProcessHandle {
+                receiver: rx,
+                cancel: CancellationToken::new(),
+            },
+            "Scanning files".into(),
+        );
+
+        assert!(process.state().preflight_rx.is_none());
+        assert_eq!(process.state().preflight_revision, 8);
+        assert_eq!(process.state().preflight.total_files, 0);
+
+        process.apply_preflight_event(
+            PreflightEvent::Completed {
+                revision: 7,
+                stats: crate::domain::PreflightStats {
+                    total_files: 11,
+                    skipped_files: 2,
+                    to_process_files: 9,
+                    scanned_entries: 11,
+                    is_scanning: false,
+                },
+            },
+            Language::En,
+        );
+
+        assert_eq!(process.state().preflight.total_files, 0);
+        assert_eq!(process.state().preflight.to_process_files, 0);
+    }
+
+    #[test]
+    fn process_model_scanning_event_updates_visible_preflight_metrics() {
+        let mut process = ProcessModel::new("ready".into());
+
+        let effect = process.apply_process_event(
+            ProcessEvent::Scanning {
+                scanned: 12,
+                candidates: 9,
+                skipped: 3,
+            },
+            Language::En,
+        );
+
+        assert!(matches!(effect, ProcessEventEffect::Continue));
+        assert_eq!(process.state().preflight.scanned_entries, 12);
+        assert_eq!(process.state().preflight.total_files, 12);
+        assert_eq!(process.state().preflight.to_process_files, 9);
+        assert_eq!(process.state().preflight.skipped_files, 3);
+        assert!(process.state().preflight.is_scanning);
+    }
+
+    #[test]
     fn process_model_counts_failed_records_as_skipped() {
         let mut process = ProcessModel::new("ready".into());
 
@@ -518,6 +606,30 @@ mod tests {
         assert!(matches!(effect, ProcessEventEffect::Continue));
         assert_eq!(process.state().processing_skipped, 1);
         assert_eq!(process.state().processing_records.len(), 1);
+    }
+
+    #[test]
+    fn process_model_caps_processing_records() {
+        let mut process = ProcessModel::new("ready".into());
+
+        for ix in 0..1_050 {
+            let _ = process.apply_process_event(
+                ProcessEvent::Record(crate::domain::ProcessRecord {
+                    file_name: format!("file-{ix}.rs"),
+                    status: ProcessStatus::Success,
+                    chars: Some(1),
+                    tokens: Some(1),
+                    error: None,
+                }),
+                Language::En,
+            );
+        }
+
+        assert_eq!(process.state().processing_records.len(), 1_000);
+        assert_eq!(
+            process.state().processing_records[0].file_name,
+            "file-50.rs"
+        );
     }
 
     #[test]

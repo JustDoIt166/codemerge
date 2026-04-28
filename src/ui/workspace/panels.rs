@@ -49,6 +49,9 @@ struct SelectedFilesResizeDrag {
     start_y: gpui::Pixels,
 }
 
+const SELECTED_FILES_RESIZE_STEP_PX: f32 = 6.0;
+const PREVIEW_PENDING_RANGE_PADDING_LINES: usize = 24;
+
 impl Render for SelectedFilesResizeDrag {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
         Empty
@@ -219,8 +222,11 @@ impl Workspace {
                       cx: &mut App| {
                     let drag = event.drag(cx);
                     let delta = f32::from(event.event.position.y - drag.start_y);
-                    let next_height =
-                        (f32::from(drag.start_height) + delta).round().max(0.0) as u16;
+                    let quantized_delta = (delta / SELECTED_FILES_RESIZE_STEP_PX).round()
+                        * SELECTED_FILES_RESIZE_STEP_PX;
+                    let next_height = (f32::from(drag.start_height) + quantized_delta)
+                        .round()
+                        .max(0.0) as u16;
                     resize_ui_for_drag.update(cx, |ui, ui_cx| {
                         if ui.set_selected_files_panel_height(next_height) {
                             ui_cx.notify();
@@ -720,6 +726,39 @@ impl Workspace {
                 vm.status,
                 cx,
             ));
+
+        let content = if let Some(alert) = self.config_alert.as_ref() {
+            let tone = if alert.is_error {
+                cx.theme().danger.opacity(0.16)
+            } else {
+                cx.theme().warning.opacity(0.16)
+            };
+            content.child(
+                v_flex()
+                    .gap_2()
+                    .p_3()
+                    .rounded(px(12.))
+                    .border_1()
+                    .border_color(cx.theme().border)
+                    .bg(tone)
+                    .child(div().font_semibold().child(alert.title.clone()))
+                    .child(
+                        div()
+                            .text_sm()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(alert.detail.clone()),
+                    )
+                    .child(
+                        Button::new("config-alert-action")
+                            .outline()
+                            .with_size(Size::Small)
+                            .label(alert.action_label.clone())
+                            .on_click(cx.listener(Self::handle_config_alert_action)),
+                    ),
+            )
+        } else {
+            content
+        };
 
         let content = if let Some(archive_summary) = vm.archive_summary.as_ref() {
             content.child(render_info_block(
@@ -1855,12 +1894,14 @@ impl PreviewPaneView {
                     .child(
                         Button::new("deferred-merged-load-1mb")
                             .primary()
+                            .disabled(deferred.actions_disabled)
                             .label(tr(language, "load_1mb"))
                             .on_click(cx.listener(Self::load_deferred_excerpt)),
                     )
                     .child(
                         Button::new("deferred-merged-load-all")
                             .outline()
+                            .disabled(deferred.actions_disabled)
                             .label(tr(language, "load_all"))
                             .on_click(cx.listener(Self::load_deferred_full)),
                     ),
@@ -1900,6 +1941,7 @@ impl PreviewPaneView {
                     .child(
                         Button::new("deferred-merged-load-all-after-excerpt")
                             .outline()
+                            .disabled(banner.actions_disabled)
                             .label(tr(language, "load_all"))
                             .on_click(cx.listener(Self::load_deferred_full)),
                     ),
@@ -1925,10 +1967,20 @@ impl PreviewPaneView {
         cx: &mut App,
     ) {
         if let Some(pending) = self.pending_visible_range.as_ref() {
-            if range_contains_range(pending, &visible) {
+            if range_effectively_contains_range(
+                pending,
+                &visible,
+                PREVIEW_PENDING_RANGE_PADDING_LINES,
+            ) {
                 return;
             }
-            if self.scheduled_visible_sync && range_contains_range(&visible, pending) {
+            if self.scheduled_visible_sync
+                && range_effectively_contains_range(
+                    &visible,
+                    pending,
+                    PREVIEW_PENDING_RANGE_PADDING_LINES,
+                )
+            {
                 self.pending_visible_range = Some(visible);
                 return;
             }
@@ -2150,6 +2202,18 @@ fn range_contains_range(
     container.start <= candidate.start && container.end >= candidate.end
 }
 
+fn range_effectively_contains_range(
+    container: &std::ops::Range<usize>,
+    candidate: &std::ops::Range<usize>,
+    padding: usize,
+) -> bool {
+    if container.is_empty() {
+        return false;
+    }
+    container.start.saturating_sub(padding) <= candidate.start
+        && container.end.saturating_add(padding) >= candidate.end
+}
+
 impl UniformListDecoration for PreviewVisibleRangeDecoration {
     fn compute(
         &self,
@@ -2165,5 +2229,30 @@ impl UniformListDecoration for PreviewVisibleRangeDecoration {
             view.queue_visible_range_sync(visible_range, cx);
         });
         Empty.into_any_element()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{bucket_visible_range, range_effectively_contains_range};
+
+    #[test]
+    fn effective_range_containment_accepts_small_scroll_adjustments() {
+        assert!(range_effectively_contains_range(
+            &(100..200),
+            &(120..220),
+            24
+        ));
+        assert!(!range_effectively_contains_range(
+            &(100..200),
+            &(120..260),
+            24
+        ));
+    }
+
+    #[test]
+    fn bucket_visible_range_clamps_to_document_bounds() {
+        assert_eq!(bucket_visible_range(0..0, 192, 0), 0..0);
+        assert_eq!(bucket_visible_range(190..260, 192, 300), 0..300);
     }
 }

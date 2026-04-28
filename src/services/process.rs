@@ -150,6 +150,7 @@ async fn run_process_with_walker(
             stats,
             tree_string: walker.tree,
             tree_nodes,
+            process_dir: None,
             merged_content_path: None,
             suggested_result_name,
             file_details: Vec::new(),
@@ -170,7 +171,7 @@ async fn run_process_with_walker(
         }
     };
     if let Err(err) = output
-        .write_all(render_prefix(output_format, &walker.tree).as_bytes())
+        .write_all(render_prefix(output_format, &walker.tree, lang).as_bytes())
         .await
     {
         cleanup_failed_run(&process_dir);
@@ -227,7 +228,7 @@ async fn run_process_with_walker(
                 stats.total_chars += chars;
                 stats.total_tokens += tokens;
                 if let Err(err) = output
-                    .write_all(render_file_entry(output_format, &merged).as_bytes())
+                    .write_all(render_file_entry(output_format, &merged, lang).as_bytes())
                     .await
                 {
                     cleanup_failed_run(&process_dir);
@@ -276,6 +277,7 @@ async fn run_process_with_walker(
         stats,
         tree_string: walker.tree,
         tree_nodes,
+        process_dir: Some(process_dir),
         merged_content_path: Some(result_path),
         suggested_result_name,
         file_details,
@@ -314,7 +316,6 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
     let archive_path = file.archive_path;
     let rel_for_error = relative.clone();
     match tokio::task::spawn_blocking(move || {
-        let archive = archive_entry_source(archive_path.as_deref(), &relative);
         let raw = match archive_entry.as_deref() {
             Some(entry_name) => read_zip_entry_text(&absolute, entry_name),
             None => read_text_blocking(&absolute),
@@ -335,6 +336,9 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
         let (compressed, _warn) = compress_by_extension(compression_path, &raw, compress);
         let (chars, tokens) = count_chars_tokens(&compressed);
         FileProcessOutcome::Processed {
+            archive: archive_path
+                .as_deref()
+                .and_then(|archive_path| archive_entry_source(archive_path, &relative)),
             detail: FileDetail {
                 path: relative.clone(),
                 chars,
@@ -348,7 +352,6 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
             },
             chars,
             tokens,
-            archive,
         }
     })
     .await
@@ -361,11 +364,7 @@ async fn process_candidate_file(file: CandidateFile, compress: bool) -> FileProc
     }
 }
 
-fn archive_entry_source(
-    archive_path: Option<&str>,
-    display_path: &str,
-) -> Option<ArchiveEntrySource> {
-    let archive_path = archive_path?;
+fn archive_entry_source(archive_path: &str, display_path: &str) -> Option<ArchiveEntrySource> {
     let entry_path = display_path
         .strip_prefix(archive_path)?
         .strip_prefix('/')?
@@ -386,7 +385,7 @@ fn file_concurrency_limit(total_files: usize) -> usize {
     let workers = std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(4);
-    workers.saturating_mul(4).clamp(4, 64).min(total_files)
+    workers.saturating_mul(2).clamp(2, 32).min(total_files)
 }
 
 #[cfg(test)]
@@ -399,7 +398,10 @@ mod tests {
     use zip::CompressionMethod;
     use zip::write::SimpleFileOptions;
 
-    use super::{ProcessEvent, ProcessRequest, cleanup_failed_run, start};
+    use super::{
+        ProcessEvent, ProcessRequest, archive_entry_source, cleanup_failed_run,
+        file_concurrency_limit, start,
+    };
     use crate::domain::{Language, OutputFormat, ProcessingMode, ProcessingOptions};
     use crate::utils::temp_file::{
         make_temp_preview_dir_in, make_temp_process_dir, make_temp_result_path_in,
@@ -426,6 +428,23 @@ mod tests {
 
         cleanup_failed_run(&process_dir);
         cleanup_failed_run(&process_dir);
+    }
+
+    #[test]
+    fn archive_entry_source_only_builds_archive_metadata_for_archive_paths() {
+        assert_eq!(
+            archive_entry_source("bundle.zip", "bundle.zip/src/lib.rs")
+                .map(|source| (source.archive_path, source.entry_path)),
+            Some(("bundle.zip".to_string(), "src/lib.rs".to_string()))
+        );
+        assert!(archive_entry_source("bundle.zip", "src/lib.rs").is_none());
+    }
+
+    #[test]
+    fn file_concurrency_limit_stays_bounded_for_large_runs() {
+        assert_eq!(file_concurrency_limit(0), 1);
+        assert_eq!(file_concurrency_limit(1), 1);
+        assert!(file_concurrency_limit(10_000) <= 32);
     }
 
     #[test]

@@ -384,3 +384,10 @@ pub fn unique_paths(paths: &[PathBuf]) -> Vec<PathBuf> {
 pub fn auto_gitignore_path(root: &Path) -> PathBuf {
     root.join(".gitignore")
 }
+
+pub fn load_gitignore_rules_for_root(root: &Path) -> Vec<String> {
+    std::fs::read_to_string(auto_gitignore_path(root))
+        .ok()
+        .map(|content| parse_gitignore_rules(&content))
+        .unwrap_or_default()
+}
