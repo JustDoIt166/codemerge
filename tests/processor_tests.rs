@@ -1,4 +1,4 @@
-use codemerge::domain::{Language, OutputFormat};
+use codemerge::domain::{Language, OutputFormat, TemporaryWhitelistMode};
 use codemerge::processor::{merger, reader, walker};
 use std::fs;
 use std::io::Write;
@@ -69,8 +69,13 @@ fn collect_candidates_honors_gitignore_and_ext_blacklist() {
     let out = walker::collect_candidates(
         Some(&root.to_path_buf()),
         &[],
-        &[],
-        &[String::from(".tmp")],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[],
+            ext_blacklist: &[String::from(".tmp")],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: true,
             ignore_git: false,
@@ -96,8 +101,13 @@ fn collect_candidates_can_disable_gitignore_rules() {
     let out = walker::collect_candidates(
         Some(&root.to_path_buf()),
         &[],
-        &[],
-        &[],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[],
+            ext_blacklist: &[],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: false,
             ignore_git: false,
@@ -120,8 +130,13 @@ fn collect_candidates_can_ignore_git_directory() {
     let out = walker::collect_candidates(
         Some(&root.to_path_buf()),
         &[],
-        &[],
-        &[],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[],
+            ext_blacklist: &[],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: false,
             ignore_git: true,
@@ -142,8 +157,13 @@ fn collect_candidates_keeps_explicit_selected_file_even_if_blacklisted() {
     let out = walker::collect_candidates(
         None,
         std::slice::from_ref(&file_path),
-        &[String::from("blocked.log")],
-        &[String::from(".log")],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[String::from("blocked.log")],
+            ext_blacklist: &[String::from(".log")],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: false,
             ignore_git: false,
@@ -172,8 +192,13 @@ fn collect_candidates_selected_zip_honors_blacklist_inside_archive() {
     let out = walker::collect_candidates(
         None,
         std::slice::from_ref(&zip_path),
-        &[String::from("src")],
-        &[String::from(".png")],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[String::from("src")],
+            ext_blacklist: &[String::from(".png")],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: false,
             ignore_git: false,
@@ -202,8 +227,13 @@ fn collect_candidates_folder_scan_still_honors_blacklist_inside_archive() {
     let out = walker::collect_candidates(
         Some(&root.to_path_buf()),
         &[],
-        &[String::from("src")],
-        &[String::from(".png")],
+        walker::WalkerFilterRules {
+            folder_blacklist: &[String::from("src")],
+            ext_blacklist: &[String::from(".png")],
+            folder_whitelist: &[],
+            ext_whitelist: &[],
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+        },
         walker::WalkerOptions {
             use_gitignore: false,
             ignore_git: false,

@@ -32,7 +32,7 @@ use super::{
     PreviewPaneView, TreePaneView, TreeViewMode, Workspace, fixed_list_sizes, preview_line_height,
     workspace_panel_min_height,
 };
-use crate::domain::OutputFormat;
+use crate::domain::{OutputFormat, TemporaryWhitelistMode};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
 use crate::ui::state::{PendingConfirmation, SidePanelTab};
@@ -321,6 +321,83 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn render_temporary_whitelist_sections(
+        &self,
+        language: crate::domain::Language,
+        selection: &crate::ui::state::SelectionState,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let sections = Rc::new(super::model::build_blacklist_sections(
+            &selection.temp_folder_whitelist,
+            &selection.temp_ext_whitelist,
+            "",
+            language,
+        ));
+
+        div()
+            .flex_1()
+            .min_h(px(0.))
+            .overflow_hidden()
+            .border_1()
+            .border_color(cx.theme().border)
+            .rounded(px(12.))
+            .bg(cx.theme().secondary.opacity(0.22))
+            .child(if sections.is_empty() {
+                empty_box(
+                    tr(language, "temporary_whitelist_empty_title"),
+                    tr(language, "temporary_whitelist_empty_hint"),
+                    IconName::File,
+                    cx,
+                )
+                .into_any_element()
+            } else {
+                div()
+                    .size_full()
+                    .min_h(px(0.))
+                    .overflow_x_hidden()
+                    .overflow_y_scrollbar()
+                    .p_2()
+                    .child(v_flex().gap_3().children(sections.iter().enumerate().map(
+                        |(section_ix, section)| {
+                            let tags = section
+                                .items
+                                .iter()
+                                .enumerate()
+                                .map(|(ix, item)| {
+                                    let kind = item.kind;
+                                    let value = item.value.clone();
+                                    render_blacklist_tag(
+                                        item,
+                                        Button::new((
+                                            "remove-temporary-whitelist",
+                                            section_ix * 1000 + ix,
+                                        ))
+                                        .ghost()
+                                        .compact()
+                                        .with_size(Size::Small)
+                                        .icon(IconName::Delete)
+                                        .disabled(!item.deletable)
+                                        .on_click(cx.listener(move |this, _, window, cx| {
+                                            this.remove_temporary_whitelist_item(
+                                                kind,
+                                                value.clone(),
+                                                window,
+                                                cx,
+                                            );
+                                        }))
+                                        .into_any_element(),
+                                        cx,
+                                    )
+                                })
+                                .collect::<Vec<_>>();
+                            render_blacklist_section(section, tags, cx)
+                        },
+                    )))
+                    .into_any_element()
+            })
+            .into_any_element()
+    }
+
     fn render_temporary_rules_section(
         &self,
         language: crate::domain::Language,
@@ -331,6 +408,19 @@ impl Workspace {
     ) -> AnyElement {
         let has_temporary_rules =
             !selection.temp_folder_blacklist.is_empty() || !selection.temp_ext_blacklist.is_empty();
+        let has_temporary_whitelist = !selection.temp_folder_whitelist.is_empty()
+            || !selection.temp_ext_whitelist.is_empty()
+            || selection.temp_whitelist_mode != TemporaryWhitelistMode::WhitelistThenBlacklist;
+        let whitelist_mode_index = match selection.temp_whitelist_mode {
+            TemporaryWhitelistMode::WhitelistThenBlacklist => 0,
+            TemporaryWhitelistMode::WhitelistOnly => 1,
+        };
+        let whitelist_hint_key = match selection.temp_whitelist_mode {
+            TemporaryWhitelistMode::WhitelistThenBlacklist => {
+                "temporary_whitelist_hint_then_blacklist"
+            }
+            TemporaryWhitelistMode::WhitelistOnly => "temporary_whitelist_hint_whitelist_only",
+        };
 
         v_flex()
             .gap_3()
@@ -398,6 +488,76 @@ impl Workspace {
                     .label(tr(language, "clear_temporary_rules"))
                     .disabled(!has_temporary_rules)
                     .on_click(cx.listener(Self::clear_temporary_blacklist)),
+            )
+            .child(
+                div()
+                    .pt_2()
+                    .border_t_1()
+                    .border_color(cx.theme().border)
+                    .child(
+                        v_flex()
+                            .gap_3()
+                            .child(section_caption(
+                                tr(language, "temporary_whitelist_section"),
+                                IconName::File,
+                                cx,
+                            ))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(tr(language, whitelist_hint_key)),
+                            )
+                            .child(
+                                TabBar::new("temporary-whitelist-mode")
+                                    .selected_index(whitelist_mode_index)
+                                    .on_click(cx.listener(Self::set_temporary_whitelist_mode))
+                                    .child(
+                                        Tab::new()
+                                            .label(tr(language, "whitelist_mode_then_blacklist")),
+                                    )
+                                    .child(
+                                        Tab::new()
+                                            .label(tr(language, "whitelist_mode_whitelist_only")),
+                                    ),
+                            )
+                            .child(
+                                Input::new(&self.temp_whitelist_add_input).prefix(IconName::Plus),
+                            )
+                            .child(
+                                h_flex()
+                                    .gap_2()
+                                    .child(
+                                        Button::new("add-temporary-folder-whitelist")
+                                            .outline()
+                                            .icon(IconName::Folder)
+                                            .label(tr(language, "add_temp_whitelist_folder"))
+                                            .on_click(
+                                                cx.listener(Self::add_temporary_folder_whitelist),
+                                            ),
+                                    )
+                                    .child(
+                                        Button::new("add-temporary-ext-whitelist")
+                                            .outline()
+                                            .icon(IconName::File)
+                                            .label(tr(language, "add_temp_whitelist_ext"))
+                                            .on_click(
+                                                cx.listener(Self::add_temporary_ext_whitelist),
+                                            ),
+                                    ),
+                            )
+                            .child(
+                                self.render_temporary_whitelist_sections(language, selection, cx),
+                            )
+                            .child(
+                                Button::new("clear-temporary-whitelist")
+                                    .outline()
+                                    .icon(IconName::Delete)
+                                    .label(tr(language, "clear_temporary_whitelist"))
+                                    .disabled(!has_temporary_whitelist)
+                                    .on_click(cx.listener(Self::clear_temporary_whitelist)),
+                            ),
+                    ),
             )
             .into_any_element()
     }

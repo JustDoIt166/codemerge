@@ -2,6 +2,7 @@ use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use crate::domain::FileEntry;
+use crate::domain::TemporaryWhitelistMode;
 use crate::ui::state::SelectionState;
 use crate::ui::workspace::BlacklistItemKind;
 
@@ -33,6 +34,9 @@ impl SelectionModel {
             gitignore_rules: self.state.gitignore_rules.clone(),
             temp_folder_blacklist: self.state.temp_folder_blacklist.clone(),
             temp_ext_blacklist: self.state.temp_ext_blacklist.clone(),
+            temp_folder_whitelist: self.state.temp_folder_whitelist.clone(),
+            temp_ext_whitelist: self.state.temp_ext_whitelist.clone(),
+            temp_whitelist_mode: self.state.temp_whitelist_mode,
         }
     }
 
@@ -110,6 +114,21 @@ impl SelectionModel {
         added
     }
 
+    pub fn add_temporary_whitelist_tokens(&mut self, tokens: &[String], as_ext: bool) -> usize {
+        let mut added = 0;
+        for token in tokens {
+            if as_ext {
+                let normalized = crate::processor::walker::normalize_ext(token);
+                if push_unique(&mut self.state.temp_ext_whitelist, normalized) {
+                    added += 1;
+                }
+            } else if push_unique(&mut self.state.temp_folder_whitelist, token.clone()) {
+                added += 1;
+            }
+        }
+        added
+    }
+
     pub fn remove_temporary_blacklist_item(&mut self, kind: BlacklistItemKind, value: &str) {
         match kind {
             BlacklistItemKind::Folder => {
@@ -123,6 +142,19 @@ impl SelectionModel {
         }
     }
 
+    pub fn remove_temporary_whitelist_item(&mut self, kind: BlacklistItemKind, value: &str) {
+        match kind {
+            BlacklistItemKind::Folder => {
+                self.state
+                    .temp_folder_whitelist
+                    .retain(|item| item != value);
+            }
+            BlacklistItemKind::Ext => {
+                self.state.temp_ext_whitelist.retain(|item| item != value);
+            }
+        }
+    }
+
     pub fn clear_temporary_blacklist(&mut self) -> bool {
         let changed = !self.state.temp_folder_blacklist.is_empty()
             || !self.state.temp_ext_blacklist.is_empty();
@@ -131,8 +163,27 @@ impl SelectionModel {
         changed
     }
 
+    pub fn clear_temporary_whitelist(&mut self) -> bool {
+        let changed = !self.state.temp_folder_whitelist.is_empty()
+            || !self.state.temp_ext_whitelist.is_empty()
+            || self.state.temp_whitelist_mode != TemporaryWhitelistMode::default();
+        self.state.temp_folder_whitelist.clear();
+        self.state.temp_ext_whitelist.clear();
+        self.state.temp_whitelist_mode = TemporaryWhitelistMode::default();
+        changed
+    }
+
+    pub fn set_temporary_whitelist_mode(&mut self, mode: TemporaryWhitelistMode) -> bool {
+        let changed = self.state.temp_whitelist_mode != mode;
+        self.state.temp_whitelist_mode = mode;
+        changed
+    }
+
     pub fn clear_temporary_merge_filters(&mut self) -> bool {
-        let changed = self.clear_temporary_blacklist() || self.state.gitignore_file.is_some();
+        let cleared_blacklist = self.clear_temporary_blacklist();
+        let cleared_whitelist = self.clear_temporary_whitelist();
+        let had_gitignore_file = self.state.gitignore_file.is_some();
+        let changed = cleared_blacklist || cleared_whitelist || had_gitignore_file;
         self.state.gitignore_file = None;
         changed
     }
@@ -149,7 +200,7 @@ fn push_unique(values: &mut Vec<String>, value: String) -> bool {
 #[cfg(test)]
 mod tests {
     use super::SelectionModel;
-    use crate::domain::FileEntry;
+    use crate::domain::{FileEntry, TemporaryWhitelistMode};
     use crate::ui::workspace::BlacklistItemKind;
     use std::path::PathBuf;
 
@@ -176,6 +227,12 @@ mod tests {
         assert!(model.state().gitignore_rules.is_empty());
         assert!(model.state().temp_folder_blacklist.is_empty());
         assert!(model.state().temp_ext_blacklist.is_empty());
+        assert!(model.state().temp_folder_whitelist.is_empty());
+        assert!(model.state().temp_ext_whitelist.is_empty());
+        assert_eq!(
+            model.state().temp_whitelist_mode,
+            TemporaryWhitelistMode::WhitelistThenBlacklist
+        );
     }
 
     #[test]
@@ -208,6 +265,9 @@ mod tests {
         model.set_gitignore_file(Some(PathBuf::from(".gitignore")));
         model.add_temporary_blacklist_tokens(&["target".into()], false);
         model.add_temporary_blacklist_tokens(&["tmp".into()], true);
+        model.add_temporary_whitelist_tokens(&["src".into()], false);
+        model.add_temporary_whitelist_tokens(&["rs".into()], true);
+        assert!(model.set_temporary_whitelist_mode(TemporaryWhitelistMode::WhitelistOnly));
 
         let changed = model.clear_temporary_merge_filters();
 
@@ -222,6 +282,12 @@ mod tests {
         );
         assert!(model.state().temp_folder_blacklist.is_empty());
         assert!(model.state().temp_ext_blacklist.is_empty());
+        assert!(model.state().temp_folder_whitelist.is_empty());
+        assert!(model.state().temp_ext_whitelist.is_empty());
+        assert_eq!(
+            model.state().temp_whitelist_mode,
+            TemporaryWhitelistMode::WhitelistThenBlacklist
+        );
     }
 
     #[test]
@@ -245,5 +311,47 @@ mod tests {
 
         assert!(model.state().temp_folder_blacklist.is_empty());
         assert!(model.state().temp_ext_blacklist.is_empty());
+    }
+
+    #[test]
+    fn temporary_whitelist_normalizes_dedupes_and_tracks_mode() {
+        let mut model = SelectionModel::new();
+
+        let added_folders = model.add_temporary_whitelist_tokens(
+            &["src".into(), "src".into(), "workspace".into()],
+            false,
+        );
+        let added_exts =
+            model.add_temporary_whitelist_tokens(&["rs".into(), ".md".into(), ".rs".into()], true);
+
+        assert_eq!(added_folders, 2);
+        assert_eq!(added_exts, 2);
+        assert_eq!(
+            model.state().temp_folder_whitelist,
+            vec!["src".to_string(), "workspace".to_string()]
+        );
+        assert_eq!(
+            model.state().temp_ext_whitelist,
+            vec![".rs".to_string(), ".md".to_string()]
+        );
+        assert!(model.set_temporary_whitelist_mode(TemporaryWhitelistMode::WhitelistOnly));
+        assert_eq!(
+            model.state().temp_whitelist_mode,
+            TemporaryWhitelistMode::WhitelistOnly
+        );
+        assert!(!model.set_temporary_whitelist_mode(TemporaryWhitelistMode::WhitelistOnly));
+    }
+
+    #[test]
+    fn remove_temporary_whitelist_item_updates_matching_collection() {
+        let mut model = SelectionModel::new();
+        model.add_temporary_whitelist_tokens(&["src".into()], false);
+        model.add_temporary_whitelist_tokens(&["rs".into()], true);
+
+        model.remove_temporary_whitelist_item(BlacklistItemKind::Folder, "src");
+        model.remove_temporary_whitelist_item(BlacklistItemKind::Ext, ".rs");
+
+        assert!(model.state().temp_folder_whitelist.is_empty());
+        assert!(model.state().temp_ext_whitelist.is_empty());
     }
 }

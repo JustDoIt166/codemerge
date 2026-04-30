@@ -632,7 +632,7 @@ impl Workspace {
         self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
-        let effective_blacklists = self.effective_blacklists(cx);
+        let effective_filters = self.effective_filters(cx);
         let revision = self.process.update(cx, |process, process_cx| {
             let is_processing = process.is_processing();
             let state = process.state_mut();
@@ -657,8 +657,11 @@ impl Workspace {
                     .iter()
                     .map(|f| f.path.clone())
                     .collect(),
-                folder_blacklist: effective_blacklists.folder_blacklist,
-                ext_blacklist: effective_blacklists.ext_blacklist,
+                folder_blacklist: effective_filters.folder_blacklist,
+                ext_blacklist: effective_filters.ext_blacklist,
+                folder_whitelist: effective_filters.folder_whitelist,
+                ext_whitelist: effective_filters.ext_whitelist,
+                whitelist_mode: effective_filters.whitelist_mode,
             },
             crate::processor::walker::WalkerOptions {
                 use_gitignore: settings.options.use_gitignore,

@@ -367,6 +367,7 @@ pub struct Workspace {
     blacklist_filter_input: Entity<InputState>,
     blacklist_add_input: Entity<InputState>,
     temp_blacklist_add_input: Entity<InputState>,
+    temp_whitelist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
     input_panel_view: Entity<InputPanelView>,
     status_panel_view: Entity<StatusPanelView>,
@@ -408,6 +409,10 @@ impl Workspace {
         let temp_blacklist_add_input = cx.new(|cx| {
             InputState::new(window, cx)
                 .placeholder(tr(cfg.language, "temporary_rules_unified_hint"))
+        });
+        let temp_whitelist_add_input = cx.new(|cx| {
+            InputState::new(window, cx)
+                .placeholder(tr(cfg.language, "temporary_whitelist_unified_hint"))
         });
         let tree_state = cx.new(|cx| TreeState::new(cx));
         let preview_table = cx.new(|cx| {
@@ -540,6 +545,7 @@ impl Workspace {
             blacklist_filter_input,
             blacklist_add_input,
             temp_blacklist_add_input,
+            temp_whitelist_add_input,
             rules_panel: RulesPanelController {
                 revision: 0,
                 cache: RulesPanelCache::default(),
@@ -631,12 +637,9 @@ impl Workspace {
         self.settings.read(cx).language()
     }
 
-    pub(super) fn effective_blacklists(
-        &self,
-        cx: &App,
-    ) -> crate::ui::models::EffectiveBlacklistRules {
+    pub(super) fn effective_filters(&self, cx: &App) -> crate::ui::models::EffectiveMergeFilters {
         let selection = self.selection_snapshot(cx);
-        self.settings.read(cx).effective_blacklists(&selection)
+        self.settings.read(cx).effective_filters(&selection)
     }
 
     pub(super) fn result_has_content(&self, cx: &App) -> bool {
@@ -714,6 +717,9 @@ impl Workspace {
         self.temp_blacklist_add_input.update(cx, |state, cx| {
             state.set_placeholder(tr(language, "temporary_rules_unified_hint"), window, cx)
         });
+        self.temp_whitelist_add_input.update(cx, |state, cx| {
+            state.set_placeholder(tr(language, "temporary_whitelist_unified_hint"), window, cx)
+        });
         self.preview_table.update(cx, |table, cx| {
             table.delegate_mut().set_language(language);
             cx.notify();
@@ -767,6 +773,9 @@ impl Workspace {
                 selection.gitignore_rules,
                 selection.temp_folder_blacklist,
                 selection.temp_ext_blacklist,
+                selection.temp_folder_whitelist,
+                selection.temp_ext_whitelist,
+                selection.temp_whitelist_mode,
             ),
             (ui.selected_files_panel_height, ui.pending_confirmation),
         ))
@@ -1556,6 +1565,11 @@ mod tests {
                 selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
                 selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
                 selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                let _ = selection.set_temporary_whitelist_mode(
+                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                );
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
@@ -1575,6 +1589,12 @@ mod tests {
             assert!(selection.gitignore_file.is_none());
             assert!(selection.temp_folder_blacklist.is_empty());
             assert!(selection.temp_ext_blacklist.is_empty());
+            assert!(selection.temp_folder_whitelist.is_empty());
+            assert!(selection.temp_ext_whitelist.is_empty());
+            assert_eq!(
+                selection.temp_whitelist_mode,
+                crate::domain::TemporaryWhitelistMode::WhitelistThenBlacklist
+            );
             assert!(workspace.process.read(cx).state().preflight_rx.is_some());
         });
     }
@@ -1591,6 +1611,10 @@ mod tests {
                 selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
                 selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
                 selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                let _ = selection.set_temporary_whitelist_mode(
+                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                );
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
@@ -1623,6 +1647,11 @@ mod tests {
                 selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
                 selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
                 selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                let _ = selection.set_temporary_whitelist_mode(
+                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                );
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
@@ -1647,6 +1676,12 @@ mod tests {
                 vec!["node_modules".to_string()]
             );
             assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
+            assert_eq!(selection.temp_folder_whitelist, vec!["src".to_string()]);
+            assert_eq!(selection.temp_ext_whitelist, vec![".rs".to_string()]);
+            assert_eq!(
+                selection.temp_whitelist_mode,
+                crate::domain::TemporaryWhitelistMode::WhitelistOnly
+            );
         });
     }
 
@@ -1709,6 +1744,11 @@ mod tests {
                 selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
                 selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
                 selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                let _ = selection.set_temporary_whitelist_mode(
+                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                );
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
@@ -1734,6 +1774,12 @@ mod tests {
                 vec!["node_modules".to_string()]
             );
             assert_eq!(selection.temp_ext_blacklist, vec![".tmp".to_string()]);
+            assert_eq!(selection.temp_folder_whitelist, vec!["src".to_string()]);
+            assert_eq!(selection.temp_ext_whitelist, vec![".rs".to_string()]);
+            assert_eq!(
+                selection.temp_whitelist_mode,
+                crate::domain::TemporaryWhitelistMode::WhitelistOnly
+            );
         });
     }
 

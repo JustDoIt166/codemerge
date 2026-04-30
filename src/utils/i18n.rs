@@ -165,22 +165,54 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "temporary_rules_unified_hint") => {
             "Input one-run filters, supports newline/comma/space"
         }
+        (Language::Zh, "temporary_whitelist_section") => "临时白名单",
+        (Language::En, "temporary_whitelist_section") => "Temporary Whitelist",
+        (Language::Zh, "temporary_whitelist_hint") => {
+            "仅本次合并生效，不会写入配置；可限定目录范围或只保留指定类型。"
+        }
+        (Language::En, "temporary_whitelist_hint") => {
+            "Applies to this merge only and is not saved; use it to scope folders or keep specific file types."
+        }
+        (Language::Zh, "temporary_whitelist_hint_then_blacklist") => {
+            "先保留命中白名单的文件，再用当前黑名单继续排除。"
+        }
+        (Language::En, "temporary_whitelist_hint_then_blacklist") => {
+            "Keep whitelist matches first, then exclude anything matched by the current blacklist."
+        }
+        (Language::Zh, "temporary_whitelist_hint_whitelist_only") => {
+            "只按白名单命中保留文件，当前黑名单不会参与过滤。"
+        }
+        (Language::En, "temporary_whitelist_hint_whitelist_only") => {
+            "Keep only whitelist matches; the current blacklist is ignored."
+        }
+        (Language::Zh, "temporary_whitelist_unified_hint") => {
+            "输入本次白名单文件夹或扩展名，支持换行/逗号/空格批量粘贴"
+        }
+        (Language::En, "temporary_whitelist_unified_hint") => {
+            "Input one-run whitelist folders/extensions, supports newline/comma/space"
+        }
         (Language::Zh, "add_folder") => "添加文件夹",
         (Language::En, "add_folder") => "Add Folder",
         (Language::Zh, "add_temp_folder") => "本次文件夹",
         (Language::En, "add_temp_folder") => "Run Folder",
+        (Language::Zh, "add_temp_whitelist_folder") => "白名单文件夹",
+        (Language::En, "add_temp_whitelist_folder") => "Keep Folder",
         (Language::Zh, "extension") => "扩展名",
         (Language::En, "extension") => ".ext",
         (Language::Zh, "add_ext") => "添加扩展名",
         (Language::En, "add_ext") => "Add Ext",
         (Language::Zh, "add_temp_ext") => "本次扩展名",
         (Language::En, "add_temp_ext") => "Run Ext",
+        (Language::Zh, "add_temp_whitelist_ext") => "白名单扩展名",
+        (Language::En, "add_temp_whitelist_ext") => "Keep Ext",
         (Language::Zh, "rules_group_folders") => "文件夹规则",
         (Language::En, "rules_group_folders") => "Folders",
         (Language::Zh, "rules_group_extensions") => "扩展名规则",
         (Language::En, "rules_group_extensions") => "Extensions",
         (Language::Zh, "clear_temporary_rules") => "清空本次规则",
         (Language::En, "clear_temporary_rules") => "Clear One-Run Rules",
+        (Language::Zh, "clear_temporary_whitelist") => "清空本次白名单",
+        (Language::En, "clear_temporary_whitelist") => "Clear One-Run Whitelist",
         (Language::Zh, "temporary_rules_empty_title") => "当前没有本次合并规则",
         (Language::En, "temporary_rules_empty_title") => "No one-run rules yet",
         (Language::Zh, "temporary_rules_empty_hint") => {
@@ -189,6 +221,18 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "temporary_rules_empty_hint") => {
             "Rules added here or imported from .gitignore will appear here for this run."
         }
+        (Language::Zh, "temporary_whitelist_empty_title") => "当前没有临时白名单",
+        (Language::En, "temporary_whitelist_empty_title") => "No temporary whitelist yet",
+        (Language::Zh, "temporary_whitelist_empty_hint") => {
+            "添加目录或扩展名后，这里会显示本次合并要保留的范围。"
+        }
+        (Language::En, "temporary_whitelist_empty_hint") => {
+            "Folders or extensions added here define what this merge should keep."
+        }
+        (Language::Zh, "whitelist_mode_then_blacklist") => "白名单后套黑名单",
+        (Language::En, "whitelist_mode_then_blacklist") => "Whitelist Then Blacklist",
+        (Language::Zh, "whitelist_mode_whitelist_only") => "只按白名单",
+        (Language::En, "whitelist_mode_whitelist_only") => "Whitelist Only",
         (Language::Zh, "blacklist_no_match") => "无匹配条目",
         (Language::En, "blacklist_no_match") => "No matching entries",
         (Language::Zh, "blacklist_match_count") => "匹配条数:",
@@ -545,6 +589,8 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "blacklist_removed") => "Blacklist item removed",
         (Language::Zh, "blacklist_empty") => "没有可添加的条目",
         (Language::En, "blacklist_empty") => "No entries to add",
+        (Language::Zh, "temporary_whitelist_empty") => "没有可添加的白名单条目",
+        (Language::En, "temporary_whitelist_empty") => "No whitelist entries to add",
         (Language::Zh, "blacklist_deleted_selected") => "已删除选中条目:",
         (Language::En, "blacklist_deleted_selected") => "Deleted selected entries:",
         (Language::Zh, "blacklist_reset_default") => "已重置为默认黑名单",
@@ -553,6 +599,14 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "blacklist_cleared") => "Blacklist cleared",
         (Language::Zh, "temporary_rules_cleared") => "本次合并规则已清空",
         (Language::En, "temporary_rules_cleared") => "One-run rules cleared",
+        (Language::Zh, "temporary_whitelist_added") => "已添加临时白名单项",
+        (Language::En, "temporary_whitelist_added") => "Temporary whitelist item added",
+        (Language::Zh, "temporary_whitelist_removed") => "已移除临时白名单项",
+        (Language::En, "temporary_whitelist_removed") => "Temporary whitelist item removed",
+        (Language::Zh, "temporary_whitelist_cleared") => "临时白名单已清空",
+        (Language::En, "temporary_whitelist_cleared") => "Temporary whitelist cleared",
+        (Language::Zh, "temporary_whitelist_mode_updated") => "临时白名单模式已更新",
+        (Language::En, "temporary_whitelist_mode_updated") => "Temporary whitelist mode updated",
         (Language::Zh, "blacklist_imported") => "已导入条目数:",
         (Language::En, "blacklist_imported") => "Imported entries:",
         (Language::Zh, "blacklist_exported") => "黑名单已导出",

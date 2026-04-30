@@ -3,7 +3,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 #[path = "support/mod.rs"]
 mod support;
 
-use codemerge::domain::{Language, OutputFormat};
+use codemerge::domain::{Language, OutputFormat, TemporaryWhitelistMode};
 use codemerge::processor::merger;
 use codemerge::processor::reader::{compress_by_extension, count_chars_tokens};
 use codemerge::processor::walker;
@@ -66,8 +66,13 @@ fn bench_full_pipeline(c: &mut Criterion) {
                 let walker_output = walker::collect_candidates(
                     Some(root),
                     &[],
-                    &["node_modules".into(), ".git".into()],
-                    &[],
+                    walker::WalkerFilterRules {
+                        folder_blacklist: &["node_modules".into(), ".git".into()],
+                        ext_blacklist: &[],
+                        folder_whitelist: &[],
+                        ext_whitelist: &[],
+                        whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+                    },
                     walker::WalkerOptions {
                         use_gitignore: false,
                         ignore_git: true,

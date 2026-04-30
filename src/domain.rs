@@ -35,6 +35,13 @@ pub enum ProcessingMode {
     TreeOnly,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum TemporaryWhitelistMode {
+    #[default]
+    WhitelistThenBlacklist,
+    WhitelistOnly,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
 pub struct ProcessingOptions {
     pub compress: bool,

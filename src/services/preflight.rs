@@ -3,8 +3,11 @@ use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
 use crate::domain::PreflightStats;
+use crate::domain::TemporaryWhitelistMode;
 use crate::error::AppError;
-use crate::processor::walker::{WalkerOptions, collect_candidates_with_progress};
+use crate::processor::walker::{
+    WalkerFilterRules, WalkerOptions, collect_candidates_with_progress,
+};
 use crate::services::settings;
 
 #[derive(Debug, Clone)]
@@ -35,6 +38,9 @@ pub struct PreflightRequest {
     pub selected_files: Vec<PathBuf>,
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
+    pub folder_whitelist: Vec<String>,
+    pub ext_whitelist: Vec<String>,
+    pub whitelist_mode: TemporaryWhitelistMode,
 }
 
 pub fn start(request: PreflightRequest) -> Receiver<PreflightEvent> {
@@ -61,8 +67,13 @@ pub fn start_with_options(
             collect_candidates_with_progress(
                 request.selected_folder.as_ref(),
                 &request.selected_files,
-                &request.folder_blacklist,
-                &request.ext_blacklist,
+                WalkerFilterRules {
+                    folder_blacklist: &request.folder_blacklist,
+                    ext_blacklist: &request.ext_blacklist,
+                    folder_whitelist: &request.folder_whitelist,
+                    ext_whitelist: &request.ext_whitelist,
+                    whitelist_mode: request.whitelist_mode,
+                },
                 options,
                 move |scanned, candidates, skipped| {
                     let _ = progress_tx.send(PreflightEvent::Progress {
@@ -108,6 +119,7 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::{PreflightEvent, PreflightRequest, start_with_options};
+    use crate::domain::TemporaryWhitelistMode;
     use crate::processor::walker::WalkerOptions;
 
     #[test]
@@ -126,6 +138,9 @@ mod tests {
                 selected_files: Vec::new(),
                 folder_blacklist: Vec::new(),
                 ext_blacklist: Vec::new(),
+                folder_whitelist: Vec::new(),
+                ext_whitelist: Vec::new(),
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
             },
             WalkerOptions {
                 use_gitignore: false,
@@ -168,6 +183,9 @@ mod tests {
                 selected_files: Vec::new(),
                 folder_blacklist: Vec::new(),
                 ext_blacklist: Vec::new(),
+                folder_whitelist: Vec::new(),
+                ext_whitelist: Vec::new(),
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
             },
             WalkerOptions {
                 use_gitignore: false,
@@ -204,6 +222,9 @@ mod tests {
                 selected_files: vec![file_path],
                 folder_blacklist: vec!["blocked.log".to_string()],
                 ext_blacklist: vec![".log".to_string()],
+                folder_whitelist: Vec::new(),
+                ext_whitelist: Vec::new(),
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
             },
             WalkerOptions {
                 use_gitignore: false,
@@ -248,6 +269,9 @@ mod tests {
                 selected_files: vec![zip_path],
                 folder_blacklist: vec!["src".to_string()],
                 ext_blacklist: vec![".png".to_string()],
+                folder_whitelist: Vec::new(),
+                ext_whitelist: Vec::new(),
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
             },
             WalkerOptions {
                 use_gitignore: false,
@@ -270,6 +294,48 @@ mod tests {
         assert_eq!(stats.skipped_files, 2);
         assert_eq!(stats.total_files, 3);
         assert_eq!(stats.scanned_entries, 3);
+    }
+
+    #[test]
+    fn start_with_options_whitelist_then_blacklist_updates_stats() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        fs::write(root.join("src/lib.rs"), "lib").expect("write lib");
+        fs::write(root.join("docs/guide.md"), "guide").expect("write guide");
+
+        let rx = start_with_options(
+            PreflightRequest {
+                revision: 5,
+                selected_folder: Some(root.to_path_buf()),
+                selected_files: Vec::new(),
+                folder_blacklist: Vec::new(),
+                ext_blacklist: Vec::new(),
+                folder_whitelist: vec!["src".to_string()],
+                ext_whitelist: Vec::new(),
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions {
+                use_gitignore: false,
+                ignore_git: false,
+            },
+        );
+
+        let stats = loop {
+            let event = rx
+                .recv_timeout(Duration::from_secs(10))
+                .expect("preflight event");
+            match event {
+                PreflightEvent::Completed { stats, .. } => break stats,
+                PreflightEvent::Failed { error, .. } => panic!("unexpected failure: {error}"),
+                PreflightEvent::Started { .. } | PreflightEvent::Progress { .. } => {}
+            }
+        };
+
+        assert_eq!(stats.to_process_files, 1);
+        assert_eq!(stats.skipped_files, 1);
+        assert_eq!(stats.total_files, 2);
     }
 
     fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {

@@ -19,7 +19,7 @@ use windows::Win32::{
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{BlacklistItemKind, ConfigAlertAction, PreviewTableDelegate, Workspace};
-use crate::domain::{FileEntry, OutputFormat, ResultTab};
+use crate::domain::{FileEntry, OutputFormat, ResultTab, TemporaryWhitelistMode};
 use crate::services::external_link;
 use crate::services::process::ProcessRequest;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
@@ -562,7 +562,7 @@ impl Workspace {
         self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
-        let effective_blacklists = self.effective_blacklists(cx);
+        let effective_filters = self.effective_filters(cx);
         let handle = crate::services::process::start(ProcessRequest {
             selected_folder: selection.selected_folder.clone(),
             selected_files: selection
@@ -570,8 +570,11 @@ impl Workspace {
                 .iter()
                 .map(|entry| entry.path.clone())
                 .collect(),
-            folder_blacklist: effective_blacklists.folder_blacklist,
-            ext_blacklist: effective_blacklists.ext_blacklist,
+            folder_blacklist: effective_filters.folder_blacklist,
+            ext_blacklist: effective_filters.ext_blacklist,
+            folder_whitelist: effective_filters.folder_whitelist,
+            ext_whitelist: effective_filters.ext_whitelist,
+            whitelist_mode: effective_filters.whitelist_mode,
             options: settings.options.clone(),
             language: settings.language,
         });
@@ -655,6 +658,32 @@ impl Workspace {
     ) {
         self.clear_pending_confirmation(cx);
         let added = self.consume_temporary_blacklist_input(true, window, cx);
+        if added > 0 {
+            self.refresh_preflight(cx);
+        }
+    }
+
+    pub(super) fn add_temporary_folder_whitelist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let added = self.consume_temporary_whitelist_input(false, window, cx);
+        if added > 0 {
+            self.refresh_preflight(cx);
+        }
+    }
+
+    pub(super) fn add_temporary_ext_whitelist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let added = self.consume_temporary_whitelist_input(true, window, cx);
         if added > 0 {
             self.refresh_preflight(cx);
         }
@@ -746,6 +775,51 @@ impl Workspace {
         self.push_notice(
             NotificationType::Success,
             tr(self.language(cx), "temporary_rules_added"),
+            window,
+            cx,
+        );
+        added
+    }
+
+    pub(super) fn consume_temporary_whitelist_input(
+        &mut self,
+        as_ext: bool,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> usize {
+        let raw = self.temp_whitelist_add_input.read(cx).value().to_string();
+        let tokens = Self::parse_blacklist_tokens(&raw);
+        if tokens.is_empty() {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "temporary_whitelist_empty"),
+                window,
+                cx,
+            );
+            return 0;
+        }
+
+        let added = self.selection.update(cx, |selection, selection_cx| {
+            let added = selection.add_temporary_whitelist_tokens(&tokens, as_ext);
+            if added > 0 {
+                selection_cx.notify();
+            }
+            added
+        });
+        if added == 0 {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "temporary_whitelist_empty"),
+                window,
+                cx,
+            );
+            return 0;
+        }
+        self.temp_whitelist_add_input
+            .update(cx, |state, cx| state.set_value("", window, cx));
+        self.push_notice(
+            NotificationType::Success,
+            tr(self.language(cx), "temporary_whitelist_added"),
             window,
             cx,
         );
@@ -947,6 +1021,68 @@ impl Workspace {
         self.push_notice(
             NotificationType::Info,
             tr(self.language(cx), "temporary_rules_cleared"),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn clear_temporary_whitelist(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let cleared = self.selection.update(cx, |selection, selection_cx| {
+            let cleared = selection.clear_temporary_whitelist();
+            if cleared {
+                selection_cx.notify();
+            }
+            cleared
+        });
+        if !cleared {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "temporary_whitelist_empty"),
+                window,
+                cx,
+            );
+            return;
+        }
+        self.refresh_preflight(cx);
+        self.push_notice(
+            NotificationType::Info,
+            tr(self.language(cx), "temporary_whitelist_cleared"),
+            window,
+            cx,
+        );
+    }
+
+    pub(super) fn set_temporary_whitelist_mode(
+        &mut self,
+        ix: &usize,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let mode = match *ix {
+            1 => TemporaryWhitelistMode::WhitelistOnly,
+            _ => TemporaryWhitelistMode::WhitelistThenBlacklist,
+        };
+        let changed = self.selection.update(cx, |selection, selection_cx| {
+            let changed = selection.set_temporary_whitelist_mode(mode);
+            if changed {
+                selection_cx.notify();
+            }
+            changed
+        });
+        if !changed {
+            return;
+        }
+        self.refresh_preflight(cx);
+        self.push_notice(
+            NotificationType::Info,
+            tr(self.language(cx), "temporary_whitelist_mode_updated"),
             window,
             cx,
         );
@@ -1224,6 +1360,36 @@ impl Workspace {
             self.push_notice(
                 NotificationType::Info,
                 tr(self.language(cx), "temporary_rule_removed"),
+                window,
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn remove_temporary_whitelist_item(
+        &mut self,
+        kind: BlacklistItemKind,
+        value: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let removed = self.selection.update(cx, |selection, selection_cx| {
+            let before = selection.snapshot();
+            selection.remove_temporary_whitelist_item(kind, &value);
+            let after = selection.snapshot();
+            let removed = before.temp_folder_whitelist != after.temp_folder_whitelist
+                || before.temp_ext_whitelist != after.temp_ext_whitelist;
+            if removed {
+                selection_cx.notify();
+            }
+            removed
+        });
+        if removed {
+            self.refresh_preflight(cx);
+            self.push_notice(
+                NotificationType::Info,
+                tr(self.language(cx), "temporary_whitelist_removed"),
                 window,
                 cx,
             );

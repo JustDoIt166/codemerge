@@ -1,4 +1,4 @@
-use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult};
+use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult, TemporaryWhitelistMode};
 use crate::services::preflight::PreflightEvent;
 use crate::services::process::{ProcessEvent, ProcessHandle};
 use crate::ui::state::{
@@ -10,9 +10,12 @@ use crate::utils::i18n::tr;
 const MAX_PROCESSING_RECORDS: usize = 1000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct EffectiveBlacklistRules {
+pub struct EffectiveMergeFilters {
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
+    pub folder_whitelist: Vec<String>,
+    pub ext_whitelist: Vec<String>,
+    pub whitelist_mode: TemporaryWhitelistMode,
 }
 
 pub struct SettingsModel {
@@ -61,7 +64,7 @@ impl SettingsModel {
         self.state.language
     }
 
-    pub fn effective_blacklists(&self, selection: &SelectionState) -> EffectiveBlacklistRules {
+    pub fn effective_filters(&self, selection: &SelectionState) -> EffectiveMergeFilters {
         let mut folder_blacklist = self.state.folder_blacklist.clone();
         if self.state.options.use_gitignore {
             append_unique_rules(&mut folder_blacklist, &selection.gitignore_rules);
@@ -71,9 +74,12 @@ impl SettingsModel {
         let mut ext_blacklist = self.state.ext_blacklist.clone();
         append_unique_rules(&mut ext_blacklist, &selection.temp_ext_blacklist);
 
-        EffectiveBlacklistRules {
+        EffectiveMergeFilters {
             folder_blacklist,
             ext_blacklist,
+            folder_whitelist: selection.temp_folder_whitelist.clone(),
+            ext_whitelist: selection.temp_ext_whitelist.clone(),
+            whitelist_mode: selection.temp_whitelist_mode,
         }
     }
 
@@ -404,11 +410,11 @@ pub enum ProcessEventEffect {
 #[cfg(test)]
 mod tests {
     use super::{
-        EffectiveBlacklistRules, ProcessEventEffect, ProcessModel, SettingsModel, WorkspaceUiModel,
+        EffectiveMergeFilters, ProcessEventEffect, ProcessModel, SettingsModel, WorkspaceUiModel,
     };
     use crate::domain::{
         AppConfigV1, Language, OutputFormat, ProcessResult, ProcessStatus, ProcessingMode,
-        ProcessingOptions,
+        ProcessingOptions, TemporaryWhitelistMode,
     };
     use crate::processor::stats::ProcessingStats;
     use crate::services::preflight::PreflightEvent;
@@ -421,7 +427,7 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     #[test]
-    fn effective_blacklists_respect_use_gitignore_and_temporary_rules() {
+    fn effective_filters_respect_use_gitignore_and_temporary_rules() {
         let config = AppConfigV1 {
             version: crate::domain::APP_CONFIG_VERSION,
             language: Language::En,
@@ -440,30 +446,54 @@ mod tests {
             gitignore_rules: vec!["node_modules".into()],
             temp_folder_blacklist: vec!["coverage".into()],
             temp_ext_blacklist: vec![".tmp".into()],
+            temp_folder_whitelist: vec!["src".into()],
+            temp_ext_whitelist: vec![".rs".into()],
+            temp_whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
             ..SelectionState::default()
         };
 
         let mut settings = model;
         assert_eq!(
-            settings.effective_blacklists(&selection),
-            EffectiveBlacklistRules {
+            settings.effective_filters(&selection),
+            EffectiveMergeFilters {
                 folder_blacklist: vec![
                     "target".to_string(),
                     "node_modules".to_string(),
                     "coverage".to_string()
                 ],
                 ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+                folder_whitelist: vec!["src".to_string()],
+                ext_whitelist: vec![".rs".to_string()],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
             }
         );
 
         settings.set_use_gitignore(false);
         assert_eq!(
-            settings.effective_blacklists(&selection),
-            EffectiveBlacklistRules {
+            settings.effective_filters(&selection),
+            EffectiveMergeFilters {
                 folder_blacklist: vec!["target".to_string(), "coverage".to_string()],
                 ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+                folder_whitelist: vec!["src".to_string()],
+                ext_whitelist: vec![".rs".to_string()],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
             }
         );
+    }
+
+    #[test]
+    fn to_config_does_not_persist_temporary_whitelist_state() {
+        let settings = SettingsModel::from_config(AppConfigV1::default());
+
+        let config = settings.to_config();
+
+        assert!(
+            !config
+                .folder_blacklist
+                .iter()
+                .any(|item| item == "src" || item == "workspace")
+        );
+        assert!(!config.ext_blacklist.iter().any(|item| item == ".rs"));
     }
 
     #[test]

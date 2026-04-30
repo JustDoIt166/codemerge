@@ -8,7 +8,7 @@ use tokio_util::sync::CancellationToken;
 
 use crate::domain::{
     ArchiveEntrySource, FileDetail, Language, PreviewFileEntry, ProcessRecord, ProcessResult,
-    ProcessStatus, ProcessingMode, ProcessingOptions,
+    ProcessStatus, ProcessingMode, ProcessingOptions, TemporaryWhitelistMode,
 };
 use crate::error::AppError;
 use crate::processor::archive::read_zip_entry_text;
@@ -16,7 +16,7 @@ use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, ren
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text_blocking};
 use crate::processor::stats::ProcessingStats;
 use crate::processor::walker::{
-    CandidateFile, WalkerOptions, WalkerOutput, collect_candidates_with_progress,
+    CandidateFile, WalkerFilterRules, WalkerOptions, WalkerOutput, collect_candidates_with_progress,
 };
 use crate::services::runtime::RUNTIME;
 use crate::services::tree::build_tree_nodes;
@@ -49,6 +49,9 @@ pub struct ProcessRequest {
     pub selected_files: Vec<PathBuf>,
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
+    pub folder_whitelist: Vec<String>,
+    pub ext_whitelist: Vec<String>,
+    pub whitelist_mode: TemporaryWhitelistMode,
     pub options: ProcessingOptions,
     pub language: Language,
 }
@@ -95,8 +98,13 @@ async fn run_process(
     let walker = collect_candidates_with_progress(
         request.selected_folder.as_ref(),
         &request.selected_files,
-        &request.folder_blacklist,
-        &request.ext_blacklist,
+        WalkerFilterRules {
+            folder_blacklist: &request.folder_blacklist,
+            ext_blacklist: &request.ext_blacklist,
+            folder_whitelist: &request.folder_whitelist,
+            ext_whitelist: &request.ext_whitelist,
+            whitelist_mode: request.whitelist_mode,
+        },
         WalkerOptions {
             use_gitignore: request.options.use_gitignore,
             ignore_git: request.options.ignore_git,
@@ -402,7 +410,9 @@ mod tests {
         ProcessEvent, ProcessRequest, archive_entry_source, cleanup_failed_run,
         file_concurrency_limit, start,
     };
-    use crate::domain::{Language, OutputFormat, ProcessingMode, ProcessingOptions};
+    use crate::domain::{
+        Language, OutputFormat, ProcessingMode, ProcessingOptions, TemporaryWhitelistMode,
+    };
     use crate::utils::temp_file::{
         make_temp_preview_dir_in, make_temp_process_dir, make_temp_result_path_in,
     };
@@ -465,6 +475,9 @@ mod tests {
             selected_files: vec![zip_path],
             folder_blacklist: vec!["src".to_string()],
             ext_blacklist: vec![".png".to_string()],
+            folder_whitelist: Vec::new(),
+            ext_whitelist: Vec::new(),
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
             options: ProcessingOptions {
                 compress: false,
                 use_gitignore: false,
@@ -505,6 +518,54 @@ mod tests {
         assert!(!merged.contains("文件路径: bundle.zip/src/lib.rs"));
         assert!(!merged.contains("pub fn from_zip() -> bool { true }"));
         assert!(!merged.contains("文件路径: bundle.zip/assets/logo.png"));
+    }
+
+    #[test]
+    fn start_whitelist_then_blacklist_limits_processed_files() {
+        let dir = tempdir().expect("tempdir");
+        let root = dir.path();
+        fs::create_dir_all(root.join("src")).expect("mkdir src");
+        fs::create_dir_all(root.join("docs")).expect("mkdir docs");
+        fs::write(root.join("src/lib.rs"), "pub fn scoped() {}\n").expect("write lib");
+        fs::write(root.join("docs/guide.md"), "# guide\n").expect("write guide");
+
+        let handle = start(ProcessRequest {
+            selected_folder: Some(root.to_path_buf()),
+            selected_files: Vec::new(),
+            folder_blacklist: Vec::new(),
+            ext_blacklist: Vec::new(),
+            folder_whitelist: vec!["src".to_string()],
+            ext_whitelist: Vec::new(),
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            options: ProcessingOptions {
+                compress: false,
+                use_gitignore: false,
+                ignore_git: false,
+                output_format: OutputFormat::Default,
+                mode: ProcessingMode::Full,
+            },
+            language: Language::Zh,
+        });
+
+        let result = loop {
+            match handle
+                .receiver
+                .recv_timeout(Duration::from_secs(10))
+                .expect("process event")
+            {
+                ProcessEvent::Completed(result) => break result,
+                ProcessEvent::Failed(error) => panic!("unexpected failure: {error}"),
+                ProcessEvent::Cancelled => panic!("unexpected cancellation"),
+                ProcessEvent::Scanning { .. } | ProcessEvent::Record(_) => {}
+            }
+        };
+
+        assert_eq!(result.file_details.len(), 1);
+        assert_eq!(result.file_details[0].path, "src/lib.rs");
+        let merged_path = result.merged_content_path.expect("merged path");
+        let merged = fs::read_to_string(merged_path).expect("read merged");
+        assert!(merged.contains("文件路径: src/lib.rs"));
+        assert!(!merged.contains("文件路径: docs/guide.md"));
     }
 
     fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {

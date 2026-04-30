@@ -5,6 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use ignore::{DirEntry, WalkBuilder, WalkState};
 
+use crate::domain::TemporaryWhitelistMode;
 use crate::processor::archive::{is_zip_path, list_zip_file_entries};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,18 +29,33 @@ pub struct WalkerOptions {
     pub ignore_git: bool,
 }
 
+#[derive(Clone, Copy)]
+pub struct WalkerFilterRules<'a> {
+    pub folder_blacklist: &'a [String],
+    pub ext_blacklist: &'a [String],
+    pub folder_whitelist: &'a [String],
+    pub ext_whitelist: &'a [String],
+    pub whitelist_mode: TemporaryWhitelistMode,
+}
+
+struct ResolvedFilterRules {
+    folder_blacklist: HashSet<String>,
+    ext_blacklist: HashSet<String>,
+    folder_whitelist: HashSet<String>,
+    ext_whitelist: HashSet<String>,
+    whitelist_mode: TemporaryWhitelistMode,
+}
+
 pub fn collect_candidates(
     selected_folder: Option<&PathBuf>,
     selected_files: &[PathBuf],
-    folder_blacklist: &[String],
-    ext_blacklist: &[String],
+    filters: WalkerFilterRules<'_>,
     options: WalkerOptions,
 ) -> WalkerOutput {
     collect_candidates_with_progress(
         selected_folder,
         selected_files,
-        folder_blacklist,
-        ext_blacklist,
+        filters,
         options,
         |_scanned, _candidates, _skipped| {},
     )
@@ -48,18 +64,36 @@ pub fn collect_candidates(
 pub fn collect_candidates_with_progress<F>(
     selected_folder: Option<&PathBuf>,
     selected_files: &[PathBuf],
-    folder_blacklist: &[String],
-    ext_blacklist: &[String],
+    filters: WalkerFilterRules<'_>,
     options: WalkerOptions,
     on_progress: F,
 ) -> WalkerOutput
 where
     F: Fn(usize, usize, usize) + Send + Sync + 'static,
 {
-    let folder_blacklist_set: HashSet<String> =
-        folder_blacklist.iter().map(|v| v.to_lowercase()).collect();
-    let ext_blacklist_set: HashSet<String> =
-        ext_blacklist.iter().map(|v| v.to_lowercase()).collect();
+    let resolved_filters = Arc::new(ResolvedFilterRules {
+        folder_blacklist: filters
+            .folder_blacklist
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect(),
+        ext_blacklist: filters
+            .ext_blacklist
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect(),
+        folder_whitelist: filters
+            .folder_whitelist
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect(),
+        ext_whitelist: filters
+            .ext_whitelist
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect(),
+        whitelist_mode: filters.whitelist_mode,
+    });
 
     let on_progress: Arc<dyn Fn(usize, usize, usize) + Send + Sync> = Arc::new(on_progress);
     let mut candidates = Vec::new();
@@ -70,8 +104,7 @@ where
         let candidates_acc = Arc::new(Mutex::new(Vec::new()));
         let skipped_acc = Arc::new(AtomicUsize::new(0));
         let scanned_acc = Arc::new(AtomicUsize::new(0));
-        let folder_blacklist_set = Arc::new(folder_blacklist_set.clone());
-        let ext_blacklist_set = Arc::new(ext_blacklist_set.clone());
+        let resolved_filters = Arc::clone(&resolved_filters);
         let on_progress = Arc::clone(&on_progress);
         let root = root.clone();
 
@@ -92,8 +125,7 @@ where
             let candidates_acc = Arc::clone(&candidates_acc);
             let skipped_acc = Arc::clone(&skipped_acc);
             let scanned_acc = Arc::clone(&scanned_acc);
-            let folder_blacklist_set = Arc::clone(&folder_blacklist_set);
-            let ext_blacklist_set = Arc::clone(&ext_blacklist_set);
+            let resolved_filters = Arc::clone(&resolved_filters);
             let on_progress = Arc::clone(&on_progress);
             let root = root.clone();
 
@@ -102,8 +134,7 @@ where
                     let scanned_delta = process_entry(
                         &entry,
                         &root,
-                        &folder_blacklist_set,
-                        &ext_blacklist_set,
+                        &resolved_filters,
                         options.ignore_git,
                         &candidates_acc,
                         &skipped_acc,
@@ -147,14 +178,8 @@ where
             .map(|v| v.to_string_lossy().to_string())
             .unwrap_or_else(|| path.to_string_lossy().to_string());
         // Explicitly selected file paths bypass root-level blacklist matching.
-        let result = collect_path_candidates(
-            path,
-            rel,
-            &folder_blacklist_set,
-            &ext_blacklist_set,
-            options.ignore_git,
-            true,
-        );
+        let result =
+            collect_path_candidates(path, rel, &resolved_filters, options.ignore_git, true);
         scanned_total += result.scanned;
         skipped += result.skipped;
         candidates.extend(result.candidates);
@@ -174,8 +199,7 @@ where
 fn process_entry(
     entry: &DirEntry,
     root: &Path,
-    folder_blacklist: &HashSet<String>,
-    ext_blacklist: &HashSet<String>,
+    filters: &ResolvedFilterRules,
     ignore_git: bool,
     candidates: &Arc<Mutex<Vec<CandidateFile>>>,
     skipped: &Arc<AtomicUsize>,
@@ -191,14 +215,7 @@ fn process_entry(
         .to_string_lossy()
         .replace('\\', "/");
 
-    let result = collect_path_candidates(
-        &path,
-        rel,
-        folder_blacklist,
-        ext_blacklist,
-        ignore_git,
-        false,
-    );
+    let result = collect_path_candidates(&path, rel, filters, ignore_git, false);
     if result.skipped > 0 {
         skipped.fetch_add(result.skipped, Ordering::Relaxed);
     }
@@ -210,7 +227,27 @@ fn process_entry(
     result.scanned
 }
 
-fn should_skip(
+fn matches_folder_rule(path: &str, folder_rules: &HashSet<String>) -> bool {
+    if folder_rules.is_empty() {
+        return false;
+    }
+
+    let lower = path.to_lowercase();
+    folder_rules.iter().any(|rule| {
+        if rule.contains('/') {
+            lower.contains(rule)
+        } else {
+            lower.split('/').any(|segment| segment == rule)
+        }
+    })
+}
+
+fn matches_ext_rule(path: &str, ext_rules: &HashSet<String>) -> bool {
+    let lower = path.to_lowercase();
+    ext_rules.iter().any(|ext| lower.ends_with(ext))
+}
+
+fn should_skip_blacklist(
     path: &str,
     folder_blacklist: &HashSet<String>,
     ext_blacklist: &HashSet<String>,
@@ -224,14 +261,63 @@ fn should_skip(
         return true;
     }
 
-    if lower
-        .split('/')
-        .any(|segment| folder_blacklist.contains(segment))
-    {
+    if matches_folder_rule(&lower, folder_blacklist) {
         return true;
     }
 
-    ext_blacklist.iter().any(|ext| lower.ends_with(ext))
+    matches_ext_rule(&lower, ext_blacklist)
+}
+
+fn should_keep_whitelist(
+    path: &str,
+    folder_whitelist: &HashSet<String>,
+    ext_whitelist: &HashSet<String>,
+    whitelist_mode: TemporaryWhitelistMode,
+) -> bool {
+    let folder_match = matches_folder_rule(path, folder_whitelist);
+    let ext_match = matches_ext_rule(path, ext_whitelist);
+    let any_whitelist = !folder_whitelist.is_empty() || !ext_whitelist.is_empty();
+
+    match whitelist_mode {
+        TemporaryWhitelistMode::WhitelistThenBlacklist => {
+            !any_whitelist || folder_match || ext_match
+        }
+        TemporaryWhitelistMode::WhitelistOnly => folder_match || ext_match,
+    }
+}
+
+fn should_skip(
+    path: &str,
+    filters: &ResolvedFilterRules,
+    ignore_git: bool,
+    bypass_blacklist: bool,
+) -> bool {
+    if !should_keep_whitelist(
+        path,
+        &filters.folder_whitelist,
+        &filters.ext_whitelist,
+        filters.whitelist_mode,
+    ) {
+        return true;
+    }
+
+    if matches!(
+        filters.whitelist_mode,
+        TemporaryWhitelistMode::WhitelistOnly
+    ) {
+        return false;
+    }
+
+    if bypass_blacklist {
+        return false;
+    }
+
+    should_skip_blacklist(
+        path,
+        &filters.folder_blacklist,
+        &filters.ext_blacklist,
+        ignore_git,
+    )
 }
 
 fn build_tree(selected_folder: Option<&PathBuf>, candidates: &[CandidateFile]) -> String {
@@ -273,20 +359,19 @@ struct CandidateCollection {
 fn collect_path_candidates(
     path: &Path,
     relative: String,
-    folder_blacklist: &HashSet<String>,
-    ext_blacklist: &HashSet<String>,
+    filters: &ResolvedFilterRules,
     ignore_git: bool,
     bypass_blacklist: bool,
 ) -> CandidateCollection {
-    if !bypass_blacklist && should_skip(&relative, folder_blacklist, ext_blacklist, ignore_git) {
-        return CandidateCollection {
-            skipped: 1,
-            scanned: 1,
-            ..CandidateCollection::default()
-        };
-    }
-
     if !is_zip_path(path) {
+        if should_skip(&relative, filters, ignore_git, bypass_blacklist) {
+            return CandidateCollection {
+                skipped: 1,
+                scanned: 1,
+                ..CandidateCollection::default()
+            };
+        }
+
         return CandidateCollection {
             candidates: vec![CandidateFile {
                 absolute: path.to_path_buf(),
@@ -296,6 +381,21 @@ fn collect_path_candidates(
             }],
             scanned: 1,
             skipped: 0,
+        };
+    }
+
+    if !bypass_blacklist
+        && should_skip_blacklist(
+            &relative,
+            &filters.folder_blacklist,
+            &filters.ext_blacklist,
+            ignore_git,
+        )
+    {
+        return CandidateCollection {
+            skipped: 1,
+            scanned: 1,
+            ..CandidateCollection::default()
         };
     }
 
@@ -321,12 +421,7 @@ fn collect_path_candidates(
     for entry in entries {
         result.scanned += 1;
         let combined_relative = format!("{relative}/{}", entry.display_name);
-        if should_skip(
-            &combined_relative,
-            folder_blacklist,
-            ext_blacklist,
-            ignore_git,
-        ) {
+        if should_skip(&combined_relative, filters, ignore_git, false) {
             result.skipped += 1;
             continue;
         }
@@ -390,4 +485,196 @@ pub fn load_gitignore_rules_for_root(root: &Path) -> Vec<String> {
         .ok()
         .map(|content| parse_gitignore_rules(&content))
         .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{WalkerFilterRules, WalkerOptions, collect_candidates, normalize_ext};
+    use crate::domain::TemporaryWhitelistMode;
+    use std::fs;
+    use std::io::Write;
+    use tempfile::tempdir;
+    use zip::CompressionMethod;
+    use zip::write::SimpleFileOptions;
+
+    #[test]
+    fn whitelist_then_blacklist_keeps_only_whitelisted_matches() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::write(dir.path().join("src/lib.rs"), "lib").expect("write");
+        fs::write(dir.path().join("notes.md"), "notes").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(
+            out.candidates
+                .iter()
+                .map(|item| item.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn whitelist_then_blacklist_respects_blacklist_after_whitelist_match() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::write(dir.path().join("src/lib.rs"), "lib").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[normalize_ext("rs")],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.skipped, 1);
+    }
+
+    #[test]
+    fn whitelist_only_ignores_blacklist_after_whitelist_match() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::write(dir.path().join("src/lib.rs"), "lib").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[normalize_ext("rs")],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].relative, "src/lib.rs");
+    }
+
+    #[test]
+    fn whitelist_only_without_rules_keeps_nothing() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("lib.rs"), "lib").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                folder_whitelist: &[],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.skipped, 1);
+    }
+
+    #[test]
+    fn whitelist_then_blacklist_allows_folder_or_extension_matches() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::create_dir_all(dir.path().join("docs")).expect("mkdir");
+        fs::write(dir.path().join("src/lib.rs"), "lib").expect("write");
+        fs::write(dir.path().join("src/tmp.log"), "log").expect("write");
+        fs::write(dir.path().join("docs/guide.md"), "guide").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[normalize_ext("log")],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[normalize_ext("md")],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(
+            out.candidates
+                .iter()
+                .map(|item| item.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["docs/guide.md", "src/lib.rs"]
+        );
+    }
+
+    #[test]
+    fn selected_file_still_respects_whitelist_when_blacklist_is_bypassed() {
+        let dir = tempdir().expect("tempdir");
+        let file_path = dir.path().join("notes.md");
+        fs::write(&file_path, "notes").expect("write");
+
+        let out = collect_candidates(
+            None,
+            std::slice::from_ref(&file_path),
+            WalkerFilterRules {
+                folder_blacklist: &["notes.md".into()],
+                ext_blacklist: &[normalize_ext("md")],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert!(out.candidates.is_empty());
+        assert_eq!(out.skipped, 1);
+    }
+
+    #[test]
+    fn zip_entries_follow_whitelist_rules() {
+        let dir = tempdir().expect("tempdir");
+        let zip_path = dir.path().join("bundle.zip");
+        let file = fs::File::create(&zip_path).expect("create zip");
+        let mut zip = zip::ZipWriter::new(file);
+        let options = SimpleFileOptions::default().compression_method(CompressionMethod::Stored);
+        zip.start_file("src/lib.rs", options).expect("start file");
+        zip.write_all(b"lib").expect("write");
+        zip.start_file("README.md", options).expect("start file");
+        zip.write_all(b"readme").expect("write");
+        zip.finish().expect("finish");
+
+        let out = collect_candidates(
+            None,
+            std::slice::from_ref(&zip_path),
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                folder_whitelist: &["src".into()],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].relative, "bundle.zip/src/lib.rs");
+    }
 }

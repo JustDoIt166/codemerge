@@ -100,6 +100,9 @@ pub struct SelectionState {
     pub gitignore_rules: Vec<String>,
     pub temp_folder_blacklist: Vec<String>,
     pub temp_ext_blacklist: Vec<String>,
+    pub temp_folder_whitelist: Vec<String>,
+    pub temp_ext_whitelist: Vec<String>,
+    pub temp_whitelist_mode: crate::domain::TemporaryWhitelistMode,
 }
 
 #[derive(Clone)]
