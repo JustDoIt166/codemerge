@@ -71,6 +71,28 @@ pub fn collect_candidates_with_progress<F>(
 where
     F: Fn(usize, usize, usize) + Send + Sync + 'static,
 {
+    collect_candidates_with_progress_and_cancel(
+        selected_folder,
+        selected_files,
+        filters,
+        options,
+        on_progress,
+        || false,
+    )
+}
+
+pub fn collect_candidates_with_progress_and_cancel<F, C>(
+    selected_folder: Option<&PathBuf>,
+    selected_files: &[PathBuf],
+    filters: WalkerFilterRules<'_>,
+    options: WalkerOptions,
+    on_progress: F,
+    is_cancelled: C,
+) -> WalkerOutput
+where
+    F: Fn(usize, usize, usize) + Send + Sync + 'static,
+    C: Fn() -> bool + Send + Sync + 'static,
+{
     let resolved_filters = Arc::new(ResolvedFilterRules {
         folder_blacklist: filters
             .folder_blacklist
@@ -96,6 +118,7 @@ where
     });
 
     let on_progress: Arc<dyn Fn(usize, usize, usize) + Send + Sync> = Arc::new(on_progress);
+    let is_cancelled: Arc<dyn Fn() -> bool + Send + Sync> = Arc::new(is_cancelled);
     let mut candidates = Vec::new();
     let mut skipped = 0usize;
     let mut scanned_total = 0usize;
@@ -106,6 +129,7 @@ where
         let scanned_acc = Arc::new(AtomicUsize::new(0));
         let resolved_filters = Arc::clone(&resolved_filters);
         let on_progress = Arc::clone(&on_progress);
+        let is_cancelled = Arc::clone(&is_cancelled);
         let root = root.clone();
 
         let mut builder = WalkBuilder::new(&root);
@@ -127,32 +151,38 @@ where
             let scanned_acc = Arc::clone(&scanned_acc);
             let resolved_filters = Arc::clone(&resolved_filters);
             let on_progress = Arc::clone(&on_progress);
+            let is_cancelled = Arc::clone(&is_cancelled);
             let root = root.clone();
 
-            Box::new(move |entry| match entry {
-                Ok(entry) => {
-                    let scanned_delta = process_entry(
-                        &entry,
-                        &root,
-                        &resolved_filters,
-                        options.ignore_git,
-                        &candidates_acc,
-                        &skipped_acc,
-                    );
-                    if scanned_delta > 0 {
-                        let scanned_before =
-                            scanned_acc.fetch_add(scanned_delta, Ordering::Relaxed);
-                        let scanned = scanned_before + scanned_delta;
-                        if scanned / 200 > scanned_before / 200 {
-                            let current_skipped = skipped_acc.load(Ordering::Relaxed);
-                            let current_candidates =
-                                candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
-                            on_progress(scanned, current_candidates, current_skipped);
-                        }
-                    }
-                    WalkState::Continue
+            Box::new(move |entry| {
+                if is_cancelled() {
+                    return WalkState::Quit;
                 }
-                Err(_) => WalkState::Continue,
+                match entry {
+                    Ok(entry) => {
+                        let scanned_delta = process_entry(
+                            &entry,
+                            &root,
+                            &resolved_filters,
+                            options.ignore_git,
+                            &candidates_acc,
+                            &skipped_acc,
+                        );
+                        if scanned_delta > 0 {
+                            let scanned_before =
+                                scanned_acc.fetch_add(scanned_delta, Ordering::Relaxed);
+                            let scanned = scanned_before + scanned_delta;
+                            if scanned / 200 > scanned_before / 200 {
+                                let current_skipped = skipped_acc.load(Ordering::Relaxed);
+                                let current_candidates =
+                                    candidates_acc.lock().map(|v| v.len()).unwrap_or_default();
+                                on_progress(scanned, current_candidates, current_skipped);
+                            }
+                        }
+                        WalkState::Continue
+                    }
+                    Err(_) => WalkState::Continue,
+                }
             })
         });
 
@@ -162,10 +192,15 @@ where
             Ok(mutex) => mutex.into_inner().unwrap_or_default(),
             Err(arc) => arc.lock().map(|v| v.clone()).unwrap_or_default(),
         };
-        on_progress(scanned_total, candidates.len(), skipped);
+        if !is_cancelled() {
+            on_progress(scanned_total, candidates.len(), skipped);
+        }
     }
 
     for path in selected_files {
+        if is_cancelled() {
+            break;
+        }
         if !path.is_file() {
             scanned_total += 1;
             skipped += 1;
@@ -489,7 +524,10 @@ pub fn load_gitignore_rules_for_root(root: &Path) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{WalkerFilterRules, WalkerOptions, collect_candidates, normalize_ext};
+    use super::{
+        WalkerFilterRules, WalkerOptions, collect_candidates,
+        collect_candidates_with_progress_and_cancel, normalize_ext,
+    };
     use crate::domain::TemporaryWhitelistMode;
     use std::fs;
     use std::io::Write;
@@ -524,6 +562,29 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["src/lib.rs"]
         );
+    }
+
+    #[test]
+    fn cancelled_scan_stops_before_collecting_candidates() {
+        let dir = tempdir().expect("tempdir");
+        fs::write(dir.path().join("lib.rs"), "lib").expect("write");
+
+        let out = collect_candidates_with_progress_and_cancel(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                folder_whitelist: &[],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+            |_, _, _| {},
+            || true,
+        );
+
+        assert!(out.candidates.is_empty());
     }
 
     #[test]

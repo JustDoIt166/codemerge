@@ -3,6 +3,7 @@ use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
 use gpui::Context;
+use gpui_component::notification::NotificationType;
 
 use super::view::TreeExpansionMode;
 use super::{Workspace, model};
@@ -259,13 +260,25 @@ impl Workspace {
             }
             (events, disconnected)
         });
-        let mut finish_processing = disconnected;
+        let mut finish_processing = false;
         let mut completed_successfully = false;
+        let mut terminal_received = false;
         for event in events {
             received_events = true;
             let (event_completed, event_finished) = self.apply_process_event(event, cx);
             completed_successfully |= event_completed;
+            terminal_received |= event_finished;
             finish_processing = event_finished || finish_processing;
+        }
+        if disconnected && !terminal_received {
+            let language = self.language(cx);
+            let error =
+                crate::utils::i18n::tr(language, "process_channel_disconnected").to_string();
+            self.process.update(cx, |process, process_cx| {
+                process.state_mut().fail_disconnected_run(error.clone());
+                process_cx.notify();
+            });
+            Self::notify_active_window(cx, NotificationType::Error, error);
         }
         if finish_processing {
             self.process
@@ -399,9 +412,53 @@ impl Workspace {
             ProcessEventEffect::Continue => (false, false),
             ProcessEventEffect::Completed(result) => {
                 self.set_result(*result, cx);
+                let language = self.language(cx);
+                let (completed, succeeded) = self.process.update(cx, |process, _| {
+                    (
+                        process.state().processing_completed,
+                        process.state().processing_succeeded,
+                    )
+                });
+                let failed = completed.saturating_sub(succeeded);
+                if failed == 0 {
+                    Self::notify_active_window(
+                        cx,
+                        NotificationType::Success,
+                        crate::utils::i18n::tr(language, "process_completed_notice"),
+                    );
+                } else {
+                    Self::notify_active_window(
+                        cx,
+                        NotificationType::Warning,
+                        format!(
+                            "{} {failed}",
+                            crate::utils::i18n::tr(language, "process_completed_with_failures")
+                        ),
+                    );
+                }
                 (true, true)
             }
-            ProcessEventEffect::Finish => (false, true),
+            ProcessEventEffect::Cancelled => {
+                Self::notify_active_window(
+                    cx,
+                    NotificationType::Warning,
+                    crate::utils::i18n::tr(language, "cancelled"),
+                );
+                (false, true)
+            }
+            ProcessEventEffect::Failed => {
+                let error = self
+                    .process
+                    .read(cx)
+                    .state()
+                    .last_error
+                    .clone()
+                    .unwrap_or_else(|| {
+                        crate::utils::i18n::tr(language, "status_error_hint").to_string()
+                    });
+                Self::notify_active_window(cx, NotificationType::Error, error);
+                (false, true)
+            }
         }
     }
 

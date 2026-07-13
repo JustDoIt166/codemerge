@@ -287,6 +287,12 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "status_preflight_hint") => "Scanning candidate files, scanned",
         (Language::Zh, "status_running") => "处理中",
         (Language::En, "status_running") => "Processing",
+        (Language::Zh, "status_cancelling") => "正在取消",
+        (Language::En, "status_cancelling") => "Cancelling",
+        (Language::Zh, "status_cancelling_hint") => "已请求取消，正在等待后台任务安全停止。",
+        (Language::En, "status_cancelling_hint") => {
+            "Cancellation requested. Waiting for the worker to stop safely."
+        }
         (Language::Zh, "status_completed") => "已完成",
         (Language::En, "status_completed") => "Completed",
         (Language::Zh, "status_completed_hint") => "处理完成，可以查看目录树或合并内容。",
@@ -533,12 +539,30 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "no_valid_files") => "No valid files after filtering. skipped=",
         (Language::Zh, "no_valid_files_short") => "无有效文件",
         (Language::En, "no_valid_files_short") => "No valid files",
+        (Language::Zh, "no_content_generated") => "所有候选文件均处理失败，没有生成可用内容",
+        (Language::En, "no_content_generated") => {
+            "All candidate files failed; no usable content was generated"
+        }
         (Language::Zh, "tree_mode_hint") => "仅目录树模式：将只生成目录树",
         (Language::En, "tree_mode_hint") => {
             "TreeOnly mode enabled: will generate directory tree only. valid_files="
         }
         (Language::Zh, "cancelled") => "已取消",
         (Language::En, "cancelled") => "Cancelled",
+        (Language::Zh, "cancel_requested") => "已请求取消，正在等待任务停止",
+        (Language::En, "cancel_requested") => {
+            "Cancellation requested; waiting for the task to stop"
+        }
+        (Language::Zh, "process_completed_notice") => "处理已完成",
+        (Language::En, "process_completed_notice") => "Processing completed",
+        (Language::Zh, "process_completed_with_failures") => "处理已完成，未成功文件数:",
+        (Language::En, "process_completed_with_failures") => {
+            "Processing completed; unsuccessful files:"
+        }
+        (Language::Zh, "process_channel_disconnected") => "后台任务意外中断，未收到完成状态",
+        (Language::En, "process_channel_disconnected") => {
+            "The background task disconnected before reporting a final status"
+        }
         (Language::Zh, "done") => "完成",
         (Language::En, "done") => "Done.",
 

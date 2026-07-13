@@ -656,7 +656,9 @@ pub(super) fn status_banner(
 ) -> AnyElement {
     let tone = match status {
         ProcessUiStatus::Completed => cx.theme().primary.opacity(0.18),
-        ProcessUiStatus::Cancelled => cx.theme().warning.opacity(0.22),
+        ProcessUiStatus::Cancelled | ProcessUiStatus::Cancelling => {
+            cx.theme().warning.opacity(0.22)
+        }
         ProcessUiStatus::Error => cx.theme().danger.opacity(0.18),
         ProcessUiStatus::Running | ProcessUiStatus::Preflight => cx.theme().accent.opacity(0.18),
         ProcessUiStatus::Idle => cx.theme().secondary,

@@ -583,14 +583,11 @@ impl Workspace {
 
         self.poll_task_running = true;
         self.poll_task = Some(cx.spawn(async move |this, cx| {
-            loop {
-                let Some(delay) = this
-                    .update(cx, |this, cx| this.poll_background(cx))
-                    .ok()
-                    .flatten()
-                else {
-                    break;
-                };
+            while let Some(delay) = this
+                .update(cx, |this, cx| this.poll_background(cx))
+                .ok()
+                .flatten()
+            {
                 Timer::after(delay).await;
             }
         }));
@@ -1573,11 +1570,13 @@ mod tests {
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::Completed(sample_result()))
+            tx.send(ProcessEvent::completed(1, sample_result()))
                 .expect("send completed");
             drop(tx);
             workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(1);
                 process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 1,
                     receiver: rx,
                     cancel: CancellationToken::new(),
                 });
@@ -1618,11 +1617,13 @@ mod tests {
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::Completed(sample_result()))
+            tx.send(ProcessEvent::completed(1, sample_result()))
                 .expect("send completed");
             drop(tx);
             workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(1);
                 process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 1,
                     receiver: rx,
                     cancel: CancellationToken::new(),
                 });
@@ -1655,10 +1656,12 @@ mod tests {
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::Cancelled).expect("send cancelled");
+            tx.send(ProcessEvent::cancelled(1)).expect("send cancelled");
             drop(tx);
             workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(1);
                 process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 1,
                     receiver: rx,
                     cancel: CancellationToken::new(),
                 });
@@ -1692,12 +1695,14 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::Completed(sample_result()))
+            tx.send(ProcessEvent::completed(1, sample_result()))
                 .expect("send completed");
             drop(tx);
             let cancel = CancellationToken::new();
             workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(1);
                 process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 1,
                     receiver: rx,
                     cancel: cancel.clone(),
                 });
@@ -1752,11 +1757,13 @@ mod tests {
                 selection_cx.notify();
             });
             let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::Failed(crate::error::AppError::new("boom")))
+            tx.send(ProcessEvent::failed(1, crate::error::AppError::new("boom")))
                 .expect("send failed");
             drop(tx);
             workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(1);
                 process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 1,
                     receiver: rx,
                     cancel: CancellationToken::new(),
                 });
@@ -1780,6 +1787,38 @@ mod tests {
                 selection.temp_whitelist_mode,
                 crate::domain::TemporaryWhitelistMode::WhitelistOnly
             );
+        });
+    }
+
+    #[gpui::test]
+    fn disconnected_process_channel_becomes_diagnostic_error(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let (tx, rx) = mpsc::channel();
+            drop(tx);
+            workspace.process.update(cx, |process, _| {
+                process.state_mut().current_run_id = Some(7);
+                process.state_mut().ui_status = ProcessUiStatus::Running;
+                process.state_mut().processing_started_at = Some(std::time::Instant::now());
+                process.state_mut().process_handle = Some(ProcessHandle {
+                    run_id: 7,
+                    receiver: rx,
+                    cancel: CancellationToken::new(),
+                });
+            });
+
+            let _ = workspace.poll_background(cx);
+
+            let process = workspace.process.read(cx).state();
+            assert_eq!(process.ui_status, ProcessUiStatus::Error);
+            assert!(process.process_handle.is_none());
+            assert_eq!(
+                process.last_error.as_deref(),
+                Some("后台任务意外中断，未收到完成状态")
+            );
+            assert!(process.processing_elapsed.is_some());
         });
     }
 

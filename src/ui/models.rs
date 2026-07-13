@@ -1,6 +1,6 @@
 use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult, TemporaryWhitelistMode};
 use crate::services::preflight::PreflightEvent;
-use crate::services::process::{ProcessEvent, ProcessHandle};
+use crate::services::process::{ProcessEvent, ProcessEventKind, ProcessHandle};
 use crate::ui::state::{
     NarrowContentTab, PendingConfirmation, ProcessState, ProcessUiStatus, SelectionState,
     SettingsState, SidePanelTab, WorkspaceUiState, clamp_selected_files_panel_height,
@@ -267,6 +267,7 @@ impl ProcessModel {
     pub fn start_run(&mut self, handle: ProcessHandle, scanning_label: String) {
         self.state.discard_preflight_for_run();
         self.state.reset_for_run(scanning_label);
+        self.state.current_run_id = Some(handle.run_id);
         self.state.process_handle = Some(handle);
     }
 
@@ -275,7 +276,7 @@ impl ProcessModel {
             return false;
         };
         handle.cancel.cancel();
-        self.state.ui_status = ProcessUiStatus::Cancelled;
+        self.state.ui_status = ProcessUiStatus::Cancelling;
         true
     }
 
@@ -339,12 +340,20 @@ impl ProcessModel {
         event: ProcessEvent,
         language: crate::domain::Language,
     ) -> ProcessEventEffect {
-        match event {
-            ProcessEvent::Scanning {
+        if self.state.current_run_id != Some(event.run_id) {
+            return ProcessEventEffect::Continue;
+        }
+
+        let accepts_progress = self.state.ui_status == ProcessUiStatus::Running;
+        match event.kind {
+            ProcessEventKind::Scanning {
                 scanned,
                 candidates,
                 skipped,
             } => {
+                if !accepts_progress {
+                    return ProcessEventEffect::Continue;
+                }
                 self.state.preflight.scanned_entries = scanned;
                 self.state.preflight.to_process_files = candidates;
                 self.state.preflight.skipped_files = skipped;
@@ -358,11 +367,14 @@ impl ProcessModel {
                     format!("{} {}", tr(language, "scanning_files"), scanned);
                 ProcessEventEffect::Continue
             }
-            ProcessEvent::Record(record) => {
+            ProcessEventKind::Record(record) => {
+                if !accepts_progress {
+                    return ProcessEventEffect::Continue;
+                }
                 self.push_record(record);
                 ProcessEventEffect::Continue
             }
-            ProcessEvent::Completed(result) => {
+            ProcessEventKind::Completed(result) => {
                 self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Completed;
                 self.state.last_error = None;
@@ -370,19 +382,19 @@ impl ProcessModel {
                     tr(language, "status_completed_hint").to_string();
                 ProcessEventEffect::Completed(Box::new(result))
             }
-            ProcessEvent::Cancelled => {
+            ProcessEventKind::Cancelled => {
                 self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Cancelled;
                 self.state.processing_current_file =
                     tr(language, "status_cancelled_hint").to_string();
-                ProcessEventEffect::Finish
+                ProcessEventEffect::Cancelled
             }
-            ProcessEvent::Failed(err) => {
+            ProcessEventKind::Failed(err) => {
                 self.state.preflight.is_scanning = false;
                 self.state.ui_status = ProcessUiStatus::Error;
                 self.state.last_error = Some(err.to_string());
                 self.state.processing_current_file = err.to_string();
-                ProcessEventEffect::Finish
+                ProcessEventEffect::Failed
             }
         }
     }
@@ -390,8 +402,14 @@ impl ProcessModel {
     fn push_record(&mut self, record: ProcessRecord) {
         self.state.ui_status = ProcessUiStatus::Running;
         self.state.processing_current_file = record.file_name.clone();
-        if !matches!(record.status, crate::domain::ProcessStatus::Success) {
-            self.state.processing_skipped += 1;
+        self.state.processing_completed += 1;
+        match record.status {
+            crate::domain::ProcessStatus::Success => self.state.processing_succeeded += 1,
+            crate::domain::ProcessStatus::Skipped => self.state.processing_skipped += 1,
+            crate::domain::ProcessStatus::Failed => {
+                self.state.processing_failed += 1;
+                self.state.processing_skipped += 1;
+            }
         }
         self.state.processing_records.push(record);
         if self.state.processing_records.len() > MAX_PROCESSING_RECORDS {
@@ -404,7 +422,8 @@ impl ProcessModel {
 pub enum ProcessEventEffect {
     Continue,
     Completed(Box<ProcessResult>),
-    Finish,
+    Cancelled,
+    Failed,
 }
 
 #[cfg(test)]
@@ -540,6 +559,7 @@ mod tests {
     #[test]
     fn process_model_reports_completed_runs() {
         let mut process = ProcessModel::new("ready".into());
+        process.state_mut().current_run_id = Some(1);
         let result = ProcessResult {
             stats: ProcessingStats::default(),
             tree_string: String::new(),
@@ -552,7 +572,7 @@ mod tests {
             preview_blob_dir: None,
         };
 
-        let effect = process.apply_process_event(ProcessEvent::Completed(result), Language::En);
+        let effect = process.apply_process_event(ProcessEvent::completed(1, result), Language::En);
 
         assert!(matches!(effect, ProcessEventEffect::Completed(_)));
         assert_eq!(
@@ -577,6 +597,7 @@ mod tests {
         let (_tx, rx) = mpsc::channel();
         process.start_run(
             ProcessHandle {
+                run_id: 8,
                 receiver: rx,
                 cancel: CancellationToken::new(),
             },
@@ -608,15 +629,10 @@ mod tests {
     #[test]
     fn process_model_scanning_event_updates_visible_preflight_metrics() {
         let mut process = ProcessModel::new("ready".into());
+        process.state_mut().current_run_id = Some(1);
+        process.state_mut().ui_status = ProcessUiStatus::Running;
 
-        let effect = process.apply_process_event(
-            ProcessEvent::Scanning {
-                scanned: 12,
-                candidates: 9,
-                skipped: 3,
-            },
-            Language::En,
-        );
+        let effect = process.apply_process_event(ProcessEvent::scanning(1, 12, 9, 3), Language::En);
 
         assert!(matches!(effect, ProcessEventEffect::Continue));
         assert_eq!(process.state().preflight.scanned_entries, 12);
@@ -657,15 +673,20 @@ mod tests {
     #[test]
     fn process_model_counts_failed_records_as_skipped() {
         let mut process = ProcessModel::new("ready".into());
+        process.state_mut().current_run_id = Some(1);
+        process.state_mut().ui_status = ProcessUiStatus::Running;
 
         let effect = process.apply_process_event(
-            ProcessEvent::Record(crate::domain::ProcessRecord {
-                file_name: "broken.rs".into(),
-                status: ProcessStatus::Failed,
-                chars: None,
-                tokens: None,
-                error: Some("boom".into()),
-            }),
+            ProcessEvent::record(
+                1,
+                crate::domain::ProcessRecord {
+                    file_name: "broken.rs".into(),
+                    status: ProcessStatus::Failed,
+                    chars: None,
+                    tokens: None,
+                    error: Some("boom".into()),
+                },
+            ),
             Language::En,
         );
 
@@ -677,25 +698,88 @@ mod tests {
     #[test]
     fn process_model_caps_processing_records() {
         let mut process = ProcessModel::new("ready".into());
+        process.state_mut().current_run_id = Some(1);
+        process.state_mut().ui_status = ProcessUiStatus::Running;
 
         for ix in 0..1_050 {
             let _ = process.apply_process_event(
-                ProcessEvent::Record(crate::domain::ProcessRecord {
-                    file_name: format!("file-{ix}.rs"),
-                    status: ProcessStatus::Success,
-                    chars: Some(1),
-                    tokens: Some(1),
-                    error: None,
-                }),
+                ProcessEvent::record(
+                    1,
+                    crate::domain::ProcessRecord {
+                        file_name: format!("file-{ix}.rs"),
+                        status: ProcessStatus::Success,
+                        chars: Some(1),
+                        tokens: Some(1),
+                        error: None,
+                    },
+                ),
                 Language::En,
             );
         }
 
         assert_eq!(process.state().processing_records.len(), 1_000);
+        assert_eq!(process.state().processing_completed, 1_050);
+        assert_eq!(process.state().processing_succeeded, 1_050);
         assert_eq!(
             process.state().processing_records[0].file_name,
             "file-50.rs"
         );
+    }
+
+    #[test]
+    fn cancelling_run_ignores_late_progress_until_cancelled_terminal_event() {
+        let mut process = ProcessModel::new("ready".into());
+        let (_tx, rx) = mpsc::channel();
+        process.start_run(
+            ProcessHandle {
+                run_id: 11,
+                receiver: rx,
+                cancel: CancellationToken::new(),
+            },
+            "Scanning files".into(),
+        );
+
+        assert!(process.cancel_running());
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Cancelling);
+        let _ = process.apply_process_event(ProcessEvent::scanning(11, 200, 150, 50), Language::En);
+        let _ = process.apply_process_event(
+            ProcessEvent::record(
+                11,
+                crate::domain::ProcessRecord {
+                    file_name: "late.rs".into(),
+                    status: ProcessStatus::Success,
+                    chars: Some(1),
+                    tokens: Some(1),
+                    error: None,
+                },
+            ),
+            Language::En,
+        );
+
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Cancelling);
+        assert_eq!(process.state().processing_completed, 0);
+        assert!(process.state().processing_records.is_empty());
+        assert!(matches!(
+            process.apply_process_event(ProcessEvent::cancelled(11), Language::En),
+            ProcessEventEffect::Cancelled
+        ));
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Cancelled);
+        let _ = process.apply_process_event(ProcessEvent::scanning(11, 300, 250, 50), Language::En);
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Cancelled);
+    }
+
+    #[test]
+    fn process_model_ignores_events_from_an_old_run() {
+        let mut process = ProcessModel::new("ready".into());
+        process.state_mut().current_run_id = Some(22);
+        process.state_mut().ui_status = ProcessUiStatus::Running;
+
+        let effect =
+            process.apply_process_event(ProcessEvent::scanning(21, 99, 88, 11), Language::En);
+
+        assert!(matches!(effect, ProcessEventEffect::Continue));
+        assert_eq!(process.state().processing_scanned, 0);
+        assert_eq!(process.state().ui_status, ProcessUiStatus::Running);
     }
 
     #[test]

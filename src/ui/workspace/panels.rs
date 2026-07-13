@@ -35,7 +35,7 @@ use super::{
 use crate::domain::{OutputFormat, TemporaryWhitelistMode};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
-use crate::ui::state::{PendingConfirmation, SidePanelTab};
+use crate::ui::state::{PendingConfirmation, ProcessUiStatus, SidePanelTab};
 use crate::utils::i18n::tr;
 
 #[derive(Clone)]
@@ -63,6 +63,7 @@ impl Workspace {
         let language = self.language(cx);
         let has_inputs = self.has_inputs(cx);
         let is_processing = self.is_processing(cx);
+        let is_cancelling = self.process.read(cx).state().ui_status == ProcessUiStatus::Cancelling;
 
         h_flex()
             .gap_2()
@@ -79,7 +80,7 @@ impl Workspace {
                     .outline()
                     .icon(IconName::Close)
                     .label(tr(language, "cancel"))
-                    .disabled(!is_processing)
+                    .disabled(!is_processing || is_cancelling)
                     .on_click(cx.listener(Self::cancel_process)),
             )
     }

@@ -36,7 +36,11 @@ impl Workspace {
             .collect::<Vec<_>>()
     }
 
-    fn notify_active_window(cx: &mut App, kind: NotificationType, message: impl Into<String>) {
+    pub(super) fn notify_active_window(
+        cx: &mut App,
+        kind: NotificationType,
+        message: impl Into<String>,
+    ) {
         if let Some(window) = cx.active_window() {
             let message = SharedString::from(message.into());
             let _ = window.update(cx, |_, window, cx| {
@@ -47,14 +51,20 @@ impl Workspace {
 
     fn persist_settings_async(&self, cx: &mut Context<Self>) {
         let config = self.settings.read(cx).to_config();
+        let revision = crate::services::settings::begin_save();
         cx.spawn(async move |this, cx| {
-            let result =
-                crate::services::settings::execute(crate::domain::SettingsCommand::Save(config));
-            let _ = this.update(cx, |workspace, cx| match result {
-                Ok(_) => workspace.clear_config_alert(cx),
-                Err(err) => {
-                    Self::notify_active_window(cx, NotificationType::Error, err.to_string());
-                    workspace.set_config_save_error(err.to_string(), cx);
+            let result = crate::services::settings::save_if_latest(revision, config);
+            let _ = this.update(cx, |workspace, cx| {
+                if !crate::services::settings::is_latest_save(revision) {
+                    return;
+                }
+                match result {
+                    Ok(Some(_)) => workspace.clear_config_alert(cx),
+                    Ok(None) => {}
+                    Err(err) => {
+                        Self::notify_active_window(cx, NotificationType::Error, err.to_string());
+                        workspace.set_config_save_error(err.to_string(), cx);
+                    }
                 }
             });
         })
@@ -73,32 +83,40 @@ impl Workspace {
         match action {
             ConfigAlertAction::RetrySave => self.persist_settings_async(cx),
             ConfigAlertAction::ResetDefaults => {
+                let revision = crate::services::settings::begin_save();
                 cx.spawn(async move |this, cx| {
-                    let result = crate::services::settings::execute(
-                        crate::domain::SettingsCommand::ResetToDefault,
+                    let result = crate::services::settings::save_if_latest(
+                        revision,
+                        crate::domain::AppConfigV1::default(),
                     );
-                    let _ = this.update(cx, |workspace, cx| match result {
-                        Ok(config) => {
-                            workspace.settings.update(cx, |settings, settings_cx| {
-                                settings.apply_config(config);
-                                settings_cx.notify();
-                            });
-                            let language = workspace.language(cx);
-                            workspace.clear_config_alert(cx);
-                            workspace.refresh_preflight(cx);
-                            Self::notify_active_window(
-                                cx,
-                                NotificationType::Success,
-                                tr(language, "config_reset_done"),
-                            );
+                    let _ = this.update(cx, |workspace, cx| {
+                        if !crate::services::settings::is_latest_save(revision) {
+                            return;
                         }
-                        Err(err) => {
-                            Self::notify_active_window(
-                                cx,
-                                NotificationType::Error,
-                                err.to_string(),
-                            );
-                            workspace.set_config_save_error(err.to_string(), cx);
+                        match result {
+                            Ok(Some(config)) => {
+                                workspace.settings.update(cx, |settings, settings_cx| {
+                                    settings.apply_config(config);
+                                    settings_cx.notify();
+                                });
+                                let language = workspace.language(cx);
+                                workspace.clear_config_alert(cx);
+                                workspace.refresh_preflight(cx);
+                                Self::notify_active_window(
+                                    cx,
+                                    NotificationType::Success,
+                                    tr(language, "config_reset_done"),
+                                );
+                            }
+                            Ok(None) => {}
+                            Err(err) => {
+                                Self::notify_active_window(
+                                    cx,
+                                    NotificationType::Error,
+                                    err.to_string(),
+                                );
+                                workspace.set_config_save_error(err.to_string(), cx);
+                            }
                         }
                     });
                 })
@@ -604,7 +622,7 @@ impl Workspace {
         }) {
             self.push_notice(
                 NotificationType::Info,
-                tr(self.language(cx), "cancelled"),
+                tr(self.language(cx), "cancel_requested"),
                 window,
                 cx,
             );

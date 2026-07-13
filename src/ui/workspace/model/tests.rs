@@ -368,6 +368,9 @@ fn status_panel_view_model_derives_metrics_progress_and_recent_activity() {
             ..PreflightStats::default()
         },
         processing_candidates: 20,
+        processing_completed: 18,
+        processing_succeeded: 17,
+        processing_failed: 1,
         processing_current_file: "src/current.rs".to_string(),
         processing_started_at: Some(Instant::now() - Duration::from_secs(125)),
         ..ProcessState::default()
@@ -789,6 +792,7 @@ fn chrome_view_model_maps_all_statuses_to_labels_and_tones() {
         (ProcessUiStatus::Idle, WorkspaceChromeTone::Neutral),
         (ProcessUiStatus::Preflight, WorkspaceChromeTone::Accent),
         (ProcessUiStatus::Running, WorkspaceChromeTone::Accent),
+        (ProcessUiStatus::Cancelling, WorkspaceChromeTone::Warning),
         (ProcessUiStatus::Completed, WorkspaceChromeTone::Success),
         (ProcessUiStatus::Cancelled, WorkspaceChromeTone::Warning),
         (ProcessUiStatus::Error, WorkspaceChromeTone::Danger),

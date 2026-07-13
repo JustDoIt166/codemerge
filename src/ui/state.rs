@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use gpui::SharedString;
 
@@ -21,6 +21,7 @@ pub enum ProcessUiStatus {
     Idle,
     Preflight,
     Running,
+    Cancelling,
     Completed,
     Cancelled,
     Error,
@@ -132,13 +133,18 @@ pub struct ProcessState {
     pub preflight_preserves_status: bool,
     pub preflight_rx: Option<std::sync::mpsc::Receiver<PreflightEvent>>,
     pub process_handle: Option<ProcessHandle>,
+    pub current_run_id: Option<crate::services::process::ProcessRunId>,
     pub ui_status: ProcessUiStatus,
     pub processing_records: Vec<ProcessRecord>,
     pub processing_scanned: usize,
     pub processing_candidates: usize,
     pub processing_skipped: usize,
+    pub processing_completed: usize,
+    pub processing_succeeded: usize,
+    pub processing_failed: usize,
     pub processing_current_file: String,
     pub processing_started_at: Option<Instant>,
+    pub processing_elapsed: Option<Duration>,
     pub last_error: Option<String>,
 }
 
@@ -157,13 +163,26 @@ impl ProcessState {
         self.processing_scanned = 0;
         self.processing_candidates = 0;
         self.processing_skipped = 0;
+        self.processing_completed = 0;
+        self.processing_succeeded = 0;
+        self.processing_failed = 0;
         self.processing_current_file = scanning_label;
         self.processing_started_at = Some(Instant::now());
+        self.processing_elapsed = None;
     }
 
     pub fn finish_run(&mut self) {
+        self.processing_elapsed = self.processing_started_at.map(|start| start.elapsed());
         self.process_handle = None;
         self.processing_started_at = None;
+    }
+
+    pub fn fail_disconnected_run(&mut self, error: String) {
+        self.preflight.is_scanning = false;
+        self.ui_status = ProcessUiStatus::Error;
+        self.processing_current_file = error.clone();
+        self.last_error = Some(error);
+        self.finish_run();
     }
 }
 
@@ -336,6 +355,8 @@ fn range_center(range: &Range<usize>) -> usize {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use super::{AppState, PreviewPanelState};
     use crate::domain::{AppConfigV1, Language, OutputFormat, ProcessingMode, ProcessingOptions};
 
@@ -360,6 +381,23 @@ mod tests {
         state.clear_inputs();
 
         assert!(state.workspace.tree_panel.selected_node_id.is_none());
+    }
+
+    #[test]
+    fn finish_run_preserves_terminal_elapsed_duration() {
+        let mut state = super::ProcessState {
+            processing_started_at: Some(Instant::now() - Duration::from_secs(2)),
+            ..super::ProcessState::default()
+        };
+
+        state.finish_run();
+
+        assert!(state.processing_started_at.is_none());
+        assert!(
+            state
+                .processing_elapsed
+                .is_some_and(|elapsed| elapsed >= Duration::from_secs(2))
+        );
     }
 
     #[test]

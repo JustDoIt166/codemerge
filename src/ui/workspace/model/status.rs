@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use gpui::{Decorations, SharedString};
 
-use crate::domain::{Language, ProcessRecord, ProcessResult, ProcessStatus};
+use crate::domain::{Language, ProcessRecord, ProcessResult};
 use crate::services::preflight::PreflightEvent;
 use crate::ui::state::{ProcessState, ProcessUiStatus};
 use crate::utils::{app_metadata, i18n::tr};
@@ -140,11 +140,7 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
 ) -> StatusPanelViewModel {
     let archive_totals = summarize_archive_entries(result);
     let result_stats = result.map(|result| &result.stats);
-    let failed_count = process
-        .processing_records
-        .iter()
-        .filter(|record| matches!(record.status, ProcessStatus::Failed))
-        .count();
+    let failed_count = process.processing_failed;
     let activity_rows = process
         .processing_records
         .iter()
@@ -152,7 +148,7 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
         .take(16)
         .cloned()
         .collect::<Vec<_>>();
-    let processed_count = process.processing_records.len();
+    let processed_count = process.processing_completed;
     let progress_total = process
         .processing_candidates
         .max(process.preflight.to_process_files)
@@ -160,7 +156,9 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
     let progress_value = processed_count.min(progress_total);
     let elapsed = process
         .processing_started_at
-        .map(|start| super::super::view::format_duration(start.elapsed()))
+        .map(|start| start.elapsed())
+        .or(process.processing_elapsed)
+        .map(super::super::view::format_duration)
         .unwrap_or_else(|| "--:--".to_string());
 
     StatusPanelViewModel {
@@ -239,6 +237,7 @@ pub(in crate::ui::workspace) fn process_status_title(
         ProcessUiStatus::Idle => tr(language, "status_idle"),
         ProcessUiStatus::Preflight => tr(language, "status_preflight"),
         ProcessUiStatus::Running => tr(language, "status_running"),
+        ProcessUiStatus::Cancelling => tr(language, "status_cancelling"),
         ProcessUiStatus::Completed => tr(language, "status_completed"),
         ProcessUiStatus::Cancelled => tr(language, "status_cancelled"),
         ProcessUiStatus::Error => tr(language, "status_error"),
@@ -258,6 +257,7 @@ pub(in crate::ui::workspace) fn process_status_message(
             process.preflight.scanned_entries
         ),
         ProcessUiStatus::Running => process.processing_current_file.clone(),
+        ProcessUiStatus::Cancelling => tr(language, "status_cancelling_hint").to_string(),
         ProcessUiStatus::Completed => {
             let base = tr(language, "status_completed_hint").to_string();
             match merged_file_size_hint {
@@ -277,6 +277,7 @@ fn workspace_chrome_tone(status: ProcessUiStatus) -> WorkspaceChromeTone {
     match status {
         ProcessUiStatus::Idle => WorkspaceChromeTone::Neutral,
         ProcessUiStatus::Preflight | ProcessUiStatus::Running => WorkspaceChromeTone::Accent,
+        ProcessUiStatus::Cancelling => WorkspaceChromeTone::Warning,
         ProcessUiStatus::Completed => WorkspaceChromeTone::Success,
         ProcessUiStatus::Cancelled => WorkspaceChromeTone::Warning,
         ProcessUiStatus::Error => WorkspaceChromeTone::Danger,
