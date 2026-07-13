@@ -211,6 +211,7 @@ pub(super) struct TreePanelController {
     total_summary: model::TreeCountSummary,
     last_filter: String,
     last_interaction: Option<model::TreeInteractionSnapshot>,
+    input_exclusion_enabled: bool,
 }
 
 struct RulesPanelController {
@@ -536,6 +537,7 @@ impl Workspace {
                 total_summary: model::TreeCountSummary::default(),
                 last_filter: String::new(),
                 last_interaction: None,
+                input_exclusion_enabled: false,
             },
             preview_table,
             preview_filter_input,

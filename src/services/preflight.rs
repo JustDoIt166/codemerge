@@ -1,9 +1,11 @@
+use std::collections::HashSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver};
 use std::thread;
 
-use crate::domain::PreflightStats;
 use crate::domain::TemporaryWhitelistMode;
+use crate::domain::{FileEntry, PreflightStats};
 use crate::error::AppError;
 use crate::processor::walker::{
     WalkerFilterRules, WalkerOptions, collect_candidates_with_progress,
@@ -24,6 +26,7 @@ pub enum PreflightEvent {
     Completed {
         revision: u64,
         stats: PreflightStats,
+        files: Arc<[FileEntry]>,
     },
     Failed {
         revision: u64,
@@ -38,6 +41,7 @@ pub struct PreflightRequest {
     pub selected_files: Vec<PathBuf>,
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
+    pub excluded_files: Vec<String>,
     pub folder_whitelist: Vec<String>,
     pub ext_whitelist: Vec<String>,
     pub whitelist_mode: TemporaryWhitelistMode,
@@ -61,6 +65,12 @@ pub fn start_with_options(
     let (tx, rx) = mpsc::channel();
     thread::spawn(move || {
         let revision = request.revision;
+        let has_selected_folder = request.selected_folder.is_some();
+        let explicitly_selected = request
+            .selected_files
+            .iter()
+            .cloned()
+            .collect::<HashSet<_>>();
         let _ = tx.send(PreflightEvent::Started { revision });
         let progress_tx = tx.clone();
         let result = std::panic::catch_unwind(|| {
@@ -70,6 +80,7 @@ pub fn start_with_options(
                 WalkerFilterRules {
                     folder_blacklist: &request.folder_blacklist,
                     ext_blacklist: &request.ext_blacklist,
+                    excluded_files: &request.excluded_files,
                     folder_whitelist: &request.folder_whitelist,
                     ext_whitelist: &request.ext_whitelist,
                     whitelist_mode: request.whitelist_mode,
@@ -95,7 +106,24 @@ pub fn start_with_options(
                     scanned_entries: out.candidates.len() + out.skipped,
                     is_scanning: false,
                 };
-                let _ = tx.send(PreflightEvent::Completed { revision, stats });
+                let files = out
+                    .candidates
+                    .into_iter()
+                    .filter(|candidate| {
+                        has_selected_folder && !explicitly_selected.contains(&candidate.absolute)
+                    })
+                    .map(|candidate| FileEntry {
+                        size: 0,
+                        path: candidate.absolute,
+                        name: candidate.relative,
+                    })
+                    .collect::<Vec<_>>()
+                    .into();
+                let _ = tx.send(PreflightEvent::Completed {
+                    revision,
+                    stats,
+                    files,
+                });
             }
             Err(_) => {
                 let _ = tx.send(PreflightEvent::Failed {
@@ -138,6 +166,7 @@ mod tests {
                 selected_files: Vec::new(),
                 folder_blacklist: Vec::new(),
                 ext_blacklist: Vec::new(),
+                excluded_files: Vec::new(),
                 folder_whitelist: Vec::new(),
                 ext_whitelist: Vec::new(),
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -149,7 +178,7 @@ mod tests {
         );
 
         let mut last_progress = 0usize;
-        let completed = loop {
+        let (completed, files) = loop {
             let event = rx
                 .recv_timeout(Duration::from_secs(10))
                 .expect("preflight event");
@@ -158,14 +187,16 @@ mod tests {
                 PreflightEvent::Progress { scanned, .. } => {
                     last_progress = last_progress.max(scanned);
                 }
-                PreflightEvent::Completed { stats, .. } => {
-                    break stats;
+                PreflightEvent::Completed { stats, files, .. } => {
+                    break (stats, files);
                 }
                 PreflightEvent::Failed { error, .. } => panic!("unexpected failure: {error}"),
             }
         };
         assert!(completed.scanned_entries >= last_progress);
         assert_eq!(completed.scanned_entries, completed.total_files);
+        assert_eq!(files.len(), 205);
+        assert_eq!(files[0].name, "file_000.txt");
     }
 
     #[test]
@@ -183,6 +214,7 @@ mod tests {
                 selected_files: Vec::new(),
                 folder_blacklist: Vec::new(),
                 ext_blacklist: Vec::new(),
+                excluded_files: Vec::new(),
                 folder_whitelist: Vec::new(),
                 ext_whitelist: Vec::new(),
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -222,6 +254,7 @@ mod tests {
                 selected_files: vec![file_path],
                 folder_blacklist: vec!["blocked.log".to_string()],
                 ext_blacklist: vec![".log".to_string()],
+                excluded_files: Vec::new(),
                 folder_whitelist: Vec::new(),
                 ext_whitelist: Vec::new(),
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -269,6 +302,7 @@ mod tests {
                 selected_files: vec![zip_path],
                 folder_blacklist: vec!["src".to_string()],
                 ext_blacklist: vec![".png".to_string()],
+                excluded_files: Vec::new(),
                 folder_whitelist: Vec::new(),
                 ext_whitelist: Vec::new(),
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -312,6 +346,7 @@ mod tests {
                 selected_files: Vec::new(),
                 folder_blacklist: Vec::new(),
                 ext_blacklist: Vec::new(),
+                excluded_files: Vec::new(),
                 folder_whitelist: vec!["src".to_string()],
                 ext_whitelist: Vec::new(),
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,

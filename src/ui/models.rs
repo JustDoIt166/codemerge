@@ -13,6 +13,7 @@ const MAX_PROCESSING_RECORDS: usize = 1000;
 pub struct EffectiveMergeFilters {
     pub folder_blacklist: Vec<String>,
     pub ext_blacklist: Vec<String>,
+    pub excluded_files: Vec<String>,
     pub folder_whitelist: Vec<String>,
     pub ext_whitelist: Vec<String>,
     pub whitelist_mode: TemporaryWhitelistMode,
@@ -77,6 +78,7 @@ impl SettingsModel {
         EffectiveMergeFilters {
             folder_blacklist,
             ext_blacklist,
+            excluded_files: selection.excluded_folder_files.clone(),
             folder_whitelist: selection.temp_folder_whitelist.clone(),
             ext_whitelist: selection.temp_ext_whitelist.clone(),
             whitelist_mode: selection.temp_whitelist_mode,
@@ -314,7 +316,9 @@ impl ProcessModel {
                     }
                 }
             }
-            PreflightEvent::Completed { revision, stats } => {
+            PreflightEvent::Completed {
+                revision, stats, ..
+            } => {
                 if revision == self.state.preflight_revision {
                     self.state.preflight = stats;
                     self.state.preflight_preserves_status = false;
@@ -465,6 +469,7 @@ mod tests {
             gitignore_rules: vec!["node_modules".into()],
             temp_folder_blacklist: vec!["coverage".into()],
             temp_ext_blacklist: vec![".tmp".into()],
+            excluded_folder_files: vec!["src/generated.rs".into()],
             temp_folder_whitelist: vec!["src".into()],
             temp_ext_whitelist: vec![".rs".into()],
             temp_whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
@@ -481,6 +486,7 @@ mod tests {
                     "coverage".to_string()
                 ],
                 ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+                excluded_files: vec!["src/generated.rs".to_string()],
                 folder_whitelist: vec!["src".to_string()],
                 ext_whitelist: vec![".rs".to_string()],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
@@ -493,6 +499,7 @@ mod tests {
             EffectiveMergeFilters {
                 folder_blacklist: vec!["target".to_string(), "coverage".to_string()],
                 ext_blacklist: vec![".log".to_string(), ".tmp".to_string()],
+                excluded_files: vec!["src/generated.rs".to_string()],
                 folder_whitelist: vec!["src".to_string()],
                 ext_whitelist: vec![".rs".to_string()],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
@@ -611,6 +618,7 @@ mod tests {
         process.apply_preflight_event(
             PreflightEvent::Completed {
                 revision: 7,
+                files: Default::default(),
                 stats: crate::domain::PreflightStats {
                     total_files: 11,
                     skipped_files: 2,
@@ -653,6 +661,7 @@ mod tests {
         process.apply_preflight_event(
             PreflightEvent::Completed {
                 revision: 4,
+                files: Default::default(),
                 stats: crate::domain::PreflightStats {
                     total_files: 12,
                     skipped_files: 2,

@@ -25,8 +25,8 @@ pub(super) use self::tree::{
     FilterMatchKind, TreeCountSummary, TreeIconKind, TreeInteractionSnapshot,
     TreePaneBodyViewModel, TreePaneViewModel, TreePanelData, TreePanelEffect, TreeProjectionState,
     TreeRenderState, TreeRowViewModel, ancestor_node_ids, apply_tree_interaction,
-    build_tree_pane_view_model, build_tree_panel_data, build_tree_projection,
-    build_tree_render_state,
+    build_preflight_tree_panel_data, build_tree_pane_view_model, build_tree_panel_data,
+    build_tree_projection, build_tree_projection_with_exclusions, build_tree_render_state,
 };
 
 #[cfg(test)]

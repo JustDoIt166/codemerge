@@ -69,6 +69,7 @@ fn bench_full_pipeline(c: &mut Criterion) {
                     walker::WalkerFilterRules {
                         folder_blacklist: &["node_modules".into(), ".git".into()],
                         ext_blacklist: &[],
+                        excluded_files: &[],
                         folder_whitelist: &[],
                         ext_whitelist: &[],
                         whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,

@@ -328,7 +328,9 @@ pub(crate) fn apply_preflight_event(
                 }
             }
         }
-        PreflightEvent::Completed { revision, stats } => {
+        PreflightEvent::Completed {
+            revision, stats, ..
+        } => {
             if revision == process.preflight_revision {
                 process.preflight = stats;
                 process.preflight_preserves_status = false;

@@ -145,6 +145,14 @@ impl Workspace {
             selection.set_selected_folder(path, gitignore_rules);
             selection_cx.notify();
         });
+        self.tree_panel.data = None;
+        self.tree_panel.input_exclusion_enabled = false;
+        self.tree_panel.projection = model::TreeProjectionState::default();
+        self.tree_panel.render_state = model::TreeRenderState::default();
+        self.tree_panel.total_summary = model::TreeCountSummary::default();
+        self.tree_panel.last_filter.clear();
+        self.state.workspace.reset_tree();
+        self.sync_tree(cx);
         self.refresh_preflight(cx);
     }
 
@@ -207,10 +215,49 @@ impl Workspace {
             cleared
         });
         if cleared {
+            self.tree_panel.data =
+                model::build_tree_panel_data(self.result.read(cx).state().result.as_ref());
+            self.tree_panel.input_exclusion_enabled = false;
+            self.tree_panel.projection = model::TreeProjectionState::default();
+            self.tree_panel.render_state = model::TreeRenderState::default();
+            self.tree_panel.total_summary = model::TreeCountSummary::default();
+            self.tree_panel.last_filter.clear();
+            self.state.workspace.reset_tree();
+            if let Some(data) = self.tree_panel.data.as_ref() {
+                self.state.workspace.tree_panel.expanded_ids =
+                    data.index.default_expanded_ids.clone();
+            }
+            self.sync_tree(cx);
             self.refresh_preflight(cx);
             self.push_notice(
                 NotificationType::Info,
                 tr(self.language(cx), "folder_cleared"),
+                window,
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn exclude_folder_file(
+        &mut self,
+        relative_path: String,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let excluded = self.selection.update(cx, |selection, selection_cx| {
+            let excluded = selection.exclude_folder_file(relative_path);
+            if excluded {
+                selection_cx.notify();
+            }
+            excluded
+        });
+        if excluded {
+            self.tree_panel.projection = model::TreeProjectionState::default();
+            self.sync_tree(cx);
+            self.refresh_preflight(cx);
+            self.push_notice(
+                NotificationType::Info,
+                tr(self.language(cx), "selected_file_removed"),
                 window,
                 cx,
             );
@@ -563,6 +610,7 @@ impl Workspace {
             tree_interaction_guard.set(false);
         });
         self.tree_panel.data = None;
+        self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.total_summary = model::TreeCountSummary::default();
@@ -616,6 +664,7 @@ impl Workspace {
         });
         self.state.workspace.reset_tree();
         self.tree_panel.data = None;
+        self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.total_summary = model::TreeCountSummary::default();
@@ -638,6 +687,7 @@ impl Workspace {
                 .collect(),
             folder_blacklist: effective_filters.folder_blacklist,
             ext_blacklist: effective_filters.ext_blacklist,
+            excluded_files: effective_filters.excluded_files,
             folder_whitelist: effective_filters.folder_whitelist,
             ext_whitelist: effective_filters.ext_whitelist,
             whitelist_mode: effective_filters.whitelist_mode,

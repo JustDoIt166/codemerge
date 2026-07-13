@@ -21,6 +21,7 @@ fn bench_walker(c: &mut Criterion) {
                     walker::WalkerFilterRules {
                         folder_blacklist: &["node_modules".into(), ".git".into()],
                         ext_blacklist: &[".jpg".into(), ".png".into()],
+                        excluded_files: &[],
                         folder_whitelist: &[],
                         ext_whitelist: &[],
                         whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,

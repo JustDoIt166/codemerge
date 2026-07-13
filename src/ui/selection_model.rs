@@ -30,6 +30,7 @@ impl SelectionModel {
             dedupe_exact_path: self.state.dedupe_exact_path,
             selected_folder: self.state.selected_folder.clone(),
             selected_files: self.state.selected_files.clone(),
+            excluded_folder_files: self.state.excluded_folder_files.clone(),
             gitignore_file: self.state.gitignore_file.clone(),
             gitignore_rules: self.state.gitignore_rules.clone(),
             temp_folder_blacklist: self.state.temp_folder_blacklist.clone(),
@@ -54,6 +55,7 @@ impl SelectionModel {
     pub fn set_selected_folder(&mut self, path: PathBuf, gitignore_rules: Vec<String>) {
         self.state.selected_folder = Some(path);
         self.state.gitignore_rules = gitignore_rules;
+        self.state.excluded_folder_files.clear();
     }
 
     pub fn set_selected_folder_gitignore_rules(&mut self, gitignore_rules: Vec<String>) -> bool {
@@ -95,11 +97,17 @@ impl SelectionModel {
     }
 
     pub fn clear_selected_folder(&mut self) -> bool {
-        let changed =
-            self.state.selected_folder.is_some() || !self.state.gitignore_rules.is_empty();
+        let changed = self.state.selected_folder.is_some()
+            || !self.state.gitignore_rules.is_empty()
+            || !self.state.excluded_folder_files.is_empty();
         self.state.selected_folder = None;
         self.state.gitignore_rules.clear();
+        self.state.excluded_folder_files.clear();
         changed
+    }
+
+    pub fn exclude_folder_file(&mut self, relative_path: String) -> bool {
+        push_unique(&mut self.state.excluded_folder_files, relative_path)
     }
 
     pub fn set_gitignore_file(&mut self, path: Option<PathBuf>) {
@@ -311,6 +319,16 @@ mod tests {
             model.state().temp_folder_blacklist,
             vec!["dist".to_string()]
         );
+    }
+
+    #[test]
+    fn excluding_folder_file_updates_selection() {
+        let mut model = SelectionModel::new();
+        model.set_selected_folder(PathBuf::from("root"), Vec::new());
+
+        assert!(model.exclude_folder_file("src/lib.rs".into()));
+        assert!(!model.exclude_folder_file("src/lib.rs".into()));
+        assert_eq!(model.state().excluded_folder_files, vec!["src/lib.rs"]);
     }
 
     #[test]

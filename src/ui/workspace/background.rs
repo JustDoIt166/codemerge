@@ -350,6 +350,17 @@ impl Workspace {
     }
 
     fn apply_preflight_event(&mut self, event: PreflightEvent, cx: &mut Context<Self>) {
+        let current_revision = self.process.read(cx).state().preflight_revision;
+        let completed_files = match &event {
+            PreflightEvent::Completed {
+                revision, files, ..
+            } if *revision == current_revision
+                && self.selection_snapshot(cx).selected_folder.is_some() =>
+            {
+                Some(files.clone())
+            }
+            _ => None,
+        };
         let language = self.language(cx);
         self.process.update(cx, |process, process_cx| {
             let before = (
@@ -377,6 +388,30 @@ impl Workspace {
                 process_cx.notify();
             }
         });
+        if let Some(files) = completed_files {
+            let data = model::build_preflight_tree_panel_data(
+                files.as_ref(),
+                self.result.read(cx).state().result.as_ref(),
+            );
+            let initialize_expansion = !self.tree_panel.input_exclusion_enabled;
+            self.tree_panel.data = Some(data);
+            self.tree_panel.input_exclusion_enabled = true;
+            self.tree_panel.projection = model::TreeProjectionState::default();
+            self.tree_panel.render_state = model::TreeRenderState::default();
+            self.tree_panel.total_summary = model::TreeCountSummary::default();
+            self.tree_panel.last_filter.clear();
+            if initialize_expansion {
+                self.state.workspace.reset_tree();
+                if let Some(data) = self.tree_panel.data.as_ref() {
+                    self.state.workspace.tree_panel.expanded_ids =
+                        data.index.default_expanded_ids.clone();
+                }
+            }
+            self.tree_pane_view.update(cx, |view, _| {
+                view.view_mode = super::TreeViewMode::Tree;
+            });
+            self.sync_tree(cx);
+        }
     }
 
     fn apply_process_event(
@@ -507,6 +542,7 @@ impl Workspace {
         });
         let result = self.result.read(cx);
         self.tree_panel.data = model::build_tree_panel_data(result.state().result.as_ref());
+        self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.last_interaction = None;
         self.tree_panel.render_state = model::TreeRenderState::default();
@@ -547,8 +583,16 @@ impl Workspace {
             .to_ascii_lowercase();
         let filter_changed = self.tree_panel.last_filter != filter;
         if filter_changed || self.tree_panel.projection.roots.is_empty() {
-            self.tree_panel.projection =
-                model::build_tree_projection(self.tree_panel.data.as_ref(), filter.as_str());
+            self.tree_panel.projection = if self.tree_panel.input_exclusion_enabled {
+                let excluded_files = self.selection_snapshot(cx).excluded_folder_files;
+                model::build_tree_projection_with_exclusions(
+                    self.tree_panel.data.as_ref(),
+                    filter.as_str(),
+                    &excluded_files,
+                )
+            } else {
+                model::build_tree_projection(self.tree_panel.data.as_ref(), filter.as_str())
+            };
             self.tree_panel.total_summary = self.tree_panel.projection.total_summary;
             self.tree_panel.last_filter = filter.clone();
         }
@@ -717,6 +761,7 @@ impl Workspace {
                     .collect(),
                 folder_blacklist: effective_filters.folder_blacklist,
                 ext_blacklist: effective_filters.ext_blacklist,
+                excluded_files: effective_filters.excluded_files,
                 folder_whitelist: effective_filters.folder_whitelist,
                 ext_whitelist: effective_filters.ext_whitelist,
                 whitelist_mode: effective_filters.whitelist_mode,

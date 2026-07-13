@@ -173,27 +173,7 @@ impl Workspace {
         start_height: u16,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let file_rows = rows
-            .iter()
-            .enumerate()
-            .map(|(ix, entry)| {
-                let path = entry.path.clone();
-                selected_file_row(
-                    entry,
-                    Button::new(("remove-selected-file", ix))
-                        .ghost()
-                        .compact()
-                        .with_size(Size::Small)
-                        .icon(IconName::Delete)
-                        .tooltip(tr(self.language(cx), "remove_selected_file"))
-                        .on_click(cx.listener(move |this, _, window, cx| {
-                            this.remove_selected_file(path.clone(), window, cx);
-                        }))
-                        .into_any_element(),
-                    cx,
-                )
-            })
-            .collect::<Vec<_>>();
+        let row_count = rows.len();
 
         v_flex()
             .gap_1()
@@ -205,7 +185,50 @@ impl Workspace {
                     .border_color(cx.theme().border)
                     .rounded(px(12.))
                     .bg(cx.theme().secondary.opacity(0.22))
-                    .child(v_flex().w_full().children(file_rows).p_1()),
+                    .h(panel_height)
+                    .overflow_hidden()
+                    .child(
+                        uniform_list(
+                            "selected-input-files",
+                            row_count,
+                            cx.processor(move |view, range: std::ops::Range<usize>, _, app_cx| {
+                                range
+                                    .filter_map(|ix| {
+                                        if let Some(entry) = rows.get(ix) {
+                                            let path = entry.path.clone();
+                                            return Some(selected_file_row(
+                                                entry,
+                                                Button::new(("remove-selected-file", ix))
+                                                    .ghost()
+                                                    .compact()
+                                                    .with_size(Size::Small)
+                                                    .icon(IconName::Delete)
+                                                    .tooltip(tr(
+                                                        view.language(app_cx),
+                                                        "remove_selected_file",
+                                                    ))
+                                                    .on_click(app_cx.listener(
+                                                        move |this, _, window, cx| {
+                                                            this.remove_selected_file(
+                                                                path.clone(),
+                                                                window,
+                                                                cx,
+                                                            );
+                                                        },
+                                                    ))
+                                                    .into_any_element(),
+                                                app_cx,
+                                            ));
+                                        }
+                                        None
+                                    })
+                                    .collect()
+                            }),
+                        )
+                        .size_full()
+                        .with_sizing_behavior(ListSizingBehavior::Auto)
+                        .p_1(),
+                    ),
             )
             .child(self.render_selected_files_resize_handle(start_height, cx))
             .into_any_element()
@@ -1676,18 +1699,22 @@ impl TreePaneView {
         let collapse_workspace = self.workspace.clone();
 
         h_flex()
-            .gap_2()
+            .gap(px(6.))
             .items_center()
             .child(
-                Input::new(filter_input)
-                    .prefix(IconName::Search)
-                    .cleanable(true),
+                div().min_w(px(0.)).flex_1().child(
+                    Input::new(filter_input)
+                        .prefix(IconName::Search)
+                        .cleanable(true),
+                ),
             )
             .child(
                 Button::new("tree-expand")
-                    .outline()
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
                     .icon(IconName::ChevronDown)
-                    .label(tr(language, "tree_expand_all"))
+                    .tooltip(tr(language, "tree_expand_all"))
                     .disabled(disable_structure_actions)
                     .on_click(cx.listener(move |_, event, window, cx| {
                         expand_workspace.update(cx, |workspace, cx| {
@@ -1697,9 +1724,11 @@ impl TreePaneView {
             )
             .child(
                 Button::new("tree-collapse")
-                    .outline()
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
                     .icon(IconName::ChevronRight)
-                    .label(tr(language, "tree_collapse_all"))
+                    .tooltip(tr(language, "tree_collapse_all"))
                     .disabled(disable_structure_actions)
                     .on_click(cx.listener(move |_, event, window, cx| {
                         collapse_workspace.update(cx, |workspace, cx| {
@@ -1719,7 +1748,7 @@ impl TreePaneView {
         h_flex()
             .justify_between()
             .items_center()
-            .px_1()
+            .px_2()
             .child(
                 div()
                     .text_sm()
@@ -1732,7 +1761,9 @@ impl TreePaneView {
             )
             .child(
                 Button::new("tree-view-mode")
-                    .outline()
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
                     .label(view_model.view_mode_label.clone())
                     .on_click(cx.listener(Self::toggle_view_mode)),
             )
@@ -1747,9 +1778,13 @@ impl TreePaneView {
         let row_workspace = self.workspace.clone();
 
         tree(tree_state, move |ix, entry, selected, _, cx| {
-            let workspace = row_workspace.read(cx);
-            let Some(mut row) = workspace.tree_panel.render_state.rows.get(ix).cloned() else {
-                return ListItem::new(ix).child(entry.item().label.clone());
+            let (mut row, can_exclude) = {
+                let workspace = row_workspace.read(cx);
+                let Some(row) = workspace.tree_panel.render_state.rows.get(ix).cloned() else {
+                    return ListItem::new(ix).child(entry.item().label.clone());
+                };
+                let can_exclude = workspace.tree_panel.input_exclusion_enabled && !row.is_folder;
+                (row, can_exclude)
             };
             row.is_expanded = entry.is_expanded();
             if row.is_folder {
@@ -1759,7 +1794,24 @@ impl TreePaneView {
                     super::model::TreeIconKind::FolderClosed
                 };
             }
-            render_tree_row(ix, &row, selected, language, cx)
+            let action = can_exclude.then(|| {
+                let workspace = row_workspace.clone();
+                let relative_path = row.relative_path.to_string();
+                Button::new(("tree-exclude-file", ix))
+                    .ghost()
+                    .compact()
+                    .with_size(Size::Small)
+                    .icon(IconName::Delete)
+                    .tooltip(tr(language, "remove_selected_file"))
+                    .on_click(move |_, window, cx| {
+                        cx.stop_propagation();
+                        workspace.update(cx, |workspace, cx| {
+                            workspace.exclude_folder_file(relative_path.clone(), window, cx);
+                        });
+                    })
+                    .into_any_element()
+            });
+            render_tree_row(ix, &row, selected, language, action, cx)
         })
         .h_full()
         .into_any_element()
@@ -1802,9 +1854,9 @@ impl TreePaneView {
             .overflow_hidden()
             .border_1()
             .border_color(cx.theme().border)
-            .rounded(px(14.))
+            .rounded(px(12.))
             .bg(cx.theme().secondary.opacity(0.35))
-            .p_2()
+            .p_1()
             .child(content)
             .into_any_element()
     }
@@ -1814,7 +1866,7 @@ impl TreePaneView {
         let tree_view = self.render_tree_view(language, &tree_state);
 
         v_flex()
-            .gap_3()
+            .gap(px(10.))
             .size_full()
             .min_h(px(0.))
             .child(self.render_tree_toolbar(

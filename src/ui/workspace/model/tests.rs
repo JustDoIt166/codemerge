@@ -11,15 +11,16 @@ use super::{
     TreePanelEffect, TreeRenderState, WindowChromeMode, WindowZoomAction, WorkspaceChromeTone,
     ancestor_node_ids, apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
     build_compact_content_panel_view_model, build_content_panel_view_model,
-    build_preview_pane_view_model, build_preview_table_model, build_results_panel_view_model,
-    build_status_panel_view_model, build_tree_pane_view_model, build_tree_panel_data,
-    build_tree_projection, build_tree_render_state, build_workspace_chrome_view_model,
-    icon_kind_for_extension, preview_file_row, process_status_message, process_status_title,
-    resolve_window_chrome_mode, resolve_window_zoom_action, summarize_archive_entries,
+    build_preflight_tree_panel_data, build_preview_pane_view_model, build_preview_table_model,
+    build_results_panel_view_model, build_status_panel_view_model, build_tree_pane_view_model,
+    build_tree_panel_data, build_tree_projection, build_tree_projection_with_exclusions,
+    build_tree_render_state, build_workspace_chrome_view_model, icon_kind_for_extension,
+    preview_file_row, process_status_message, process_status_title, resolve_window_chrome_mode,
+    resolve_window_zoom_action, summarize_archive_entries,
 };
 use crate::domain::{
-    ArchiveEntrySource, Language, PreflightStats, PreviewFileEntry, ProcessRecord, ProcessResult,
-    ProcessStatus, ResultTab, TreeNode,
+    ArchiveEntrySource, FileEntry, Language, PreflightStats, PreviewFileEntry, ProcessRecord,
+    ProcessResult, ProcessStatus, ResultTab, TreeNode,
 };
 use crate::processor::stats::ProcessingStats;
 use crate::services::preflight::PreflightEvent;
@@ -42,6 +43,7 @@ fn stale_preflight_event_does_not_override_current_state() {
         &mut process,
         PreflightEvent::Completed {
             revision: 1,
+            files: Default::default(),
             stats: PreflightStats {
                 total_files: 99,
                 ..PreflightStats::default()
@@ -257,6 +259,46 @@ fn tree_panel_projection_links_preview_file_and_icons() {
     );
     assert_eq!(lib.icon_kind, TreeIconKind::Rust);
     assert_eq!(render.selected_row_ix, Some(2));
+}
+
+#[test]
+fn preflight_tree_supports_search_and_exact_file_exclusion() {
+    let files = [
+        FileEntry {
+            path: PathBuf::from("src/lib.rs"),
+            name: "src/lib.rs".into(),
+            size: 0,
+        },
+        FileEntry {
+            path: PathBuf::from("src/lib.rs.bak"),
+            name: "src/lib.rs.bak".into(),
+            size: 0,
+        },
+        FileEntry {
+            path: PathBuf::from("README.md"),
+            name: "README.md".into(),
+            size: 0,
+        },
+    ];
+    let data = build_preflight_tree_panel_data(&files, None);
+
+    let projection =
+        build_tree_projection_with_exclusions(Some(&data), "bak", &["src/lib.rs".into()]);
+    let render = build_tree_render_state(&projection, true, &BTreeSet::new(), None);
+
+    assert_eq!(render.visible_summary.files, 1);
+    assert!(
+        render
+            .rows
+            .iter()
+            .any(|row| row.relative_path.as_ref() == "src/lib.rs.bak")
+    );
+    assert!(
+        render
+            .rows
+            .iter()
+            .all(|row| row.relative_path.as_ref() != "src/lib.rs")
+    );
 }
 
 #[test]

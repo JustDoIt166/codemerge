@@ -33,6 +33,7 @@ pub struct WalkerOptions {
 pub struct WalkerFilterRules<'a> {
     pub folder_blacklist: &'a [String],
     pub ext_blacklist: &'a [String],
+    pub excluded_files: &'a [String],
     pub folder_whitelist: &'a [String],
     pub ext_whitelist: &'a [String],
     pub whitelist_mode: TemporaryWhitelistMode,
@@ -41,6 +42,7 @@ pub struct WalkerFilterRules<'a> {
 struct ResolvedFilterRules {
     folder_blacklist: HashSet<String>,
     ext_blacklist: HashSet<String>,
+    excluded_files: HashSet<String>,
     folder_whitelist: HashSet<String>,
     ext_whitelist: HashSet<String>,
     whitelist_mode: TemporaryWhitelistMode,
@@ -101,6 +103,11 @@ where
             .collect(),
         ext_blacklist: filters
             .ext_blacklist
+            .iter()
+            .map(|v| v.to_lowercase())
+            .collect(),
+        excluded_files: filters
+            .excluded_files
             .iter()
             .map(|v| v.to_lowercase())
             .collect(),
@@ -286,9 +293,14 @@ fn should_skip_blacklist(
     path: &str,
     folder_blacklist: &HashSet<String>,
     ext_blacklist: &HashSet<String>,
+    excluded_files: &HashSet<String>,
     ignore_git: bool,
 ) -> bool {
     let lower = path.to_lowercase();
+
+    if excluded_files.contains(&lower) {
+        return true;
+    }
 
     if (ignore_git || folder_blacklist.contains(".git"))
         && lower.split('/').any(|segment| segment == ".git")
@@ -351,6 +363,7 @@ fn should_skip(
         path,
         &filters.folder_blacklist,
         &filters.ext_blacklist,
+        &filters.excluded_files,
         ignore_git,
     )
 }
@@ -424,6 +437,7 @@ fn collect_path_candidates(
             &relative,
             &filters.folder_blacklist,
             &filters.ext_blacklist,
+            &filters.excluded_files,
             ignore_git,
         )
     {
@@ -548,6 +562,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -575,6 +590,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[],
+                excluded_files: &[],
                 folder_whitelist: &[],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -599,6 +615,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[normalize_ext("rs")],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -622,6 +639,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[normalize_ext("rs")],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
@@ -644,6 +662,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[],
+                excluded_files: &[],
                 folder_whitelist: &[],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistOnly,
@@ -670,6 +689,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[normalize_ext("log")],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[normalize_ext("md")],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -698,6 +718,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &["notes.md".into()],
                 ext_blacklist: &[normalize_ext("md")],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -728,6 +749,7 @@ mod tests {
             WalkerFilterRules {
                 folder_blacklist: &[],
                 ext_blacklist: &[],
+                excluded_files: &[],
                 folder_whitelist: &["src".into()],
                 ext_whitelist: &[],
                 whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -737,5 +759,30 @@ mod tests {
 
         assert_eq!(out.candidates.len(), 1);
         assert_eq!(out.candidates[0].relative, "bundle.zip/src/lib.rs");
+    }
+
+    #[test]
+    fn exact_file_exclusion_does_not_hide_similar_paths() {
+        let dir = tempdir().expect("tempdir");
+        fs::create_dir_all(dir.path().join("src")).expect("mkdir");
+        fs::write(dir.path().join("src/lib.rs"), "lib").expect("write");
+        fs::write(dir.path().join("src/lib.rs.bak"), "backup").expect("write");
+
+        let out = collect_candidates(
+            Some(&dir.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                excluded_files: &["src/lib.rs".into()],
+                folder_whitelist: &[],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(out.candidates.len(), 1);
+        assert_eq!(out.candidates[0].relative, "src/lib.rs.bak");
     }
 }

@@ -86,9 +86,19 @@ impl NodeBuilder {
 }
 
 pub fn build_tree_nodes(candidates: &[CandidateFile]) -> Vec<TreeNode> {
+    build_tree_nodes_from_relative_paths(
+        candidates
+            .iter()
+            .map(|candidate| candidate.relative.as_str()),
+    )
+}
+
+pub fn build_tree_nodes_from_relative_paths<'a>(
+    paths: impl IntoIterator<Item = &'a str>,
+) -> Vec<TreeNode> {
     let mut roots = BTreeMap::<String, NodeBuilder>::new();
-    for candidate in candidates {
-        let parts = candidate.relative.split('/').collect::<Vec<_>>();
+    for path in paths {
+        let parts = path.split('/').collect::<Vec<_>>();
         insert_parts(&mut roots, &parts, String::new());
     }
 
@@ -176,7 +186,7 @@ fn insert_parts(nodes: &mut BTreeMap<String, NodeBuilder>, parts: &[&str], mut p
 
 #[cfg(test)]
 mod tests {
-    use super::{build_tree_index, build_tree_nodes};
+    use super::{build_tree_index, build_tree_nodes, build_tree_nodes_from_relative_paths};
     use crate::domain::TreeNode;
     use crate::processor::walker::CandidateFile;
     use std::path::PathBuf;
@@ -269,5 +279,14 @@ mod tests {
         assert_eq!(src.stats.descendant_files, 2);
         assert_eq!(src.stats.subtree_folders, 2);
         assert_eq!(src.stats.subtree_files, 2);
+    }
+
+    #[test]
+    fn builds_tree_nodes_from_relative_paths() {
+        let nodes = build_tree_nodes_from_relative_paths(["src/main.rs", "README.md"]);
+
+        assert_eq!(nodes.len(), 2);
+        assert!(nodes.iter().any(|node| node.relative_path == "src"));
+        assert!(nodes.iter().any(|node| node.relative_path == "README.md"));
     }
 }

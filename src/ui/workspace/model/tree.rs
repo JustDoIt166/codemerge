@@ -1,4 +1,4 @@
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
 
@@ -157,6 +157,7 @@ struct VisibleTreeContext<'a> {
 struct TreeProjectionContext<'a> {
     filter: &'a str,
     preview_files: &'a HashMap<String, PreviewFileMeta>,
+    excluded_files: &'a HashSet<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -202,6 +203,7 @@ pub(in crate::ui::workspace) fn build_tree_pane_view_model(
 ) -> TreePaneViewModel {
     let filter_active = !tree_filter.trim().is_empty();
     let has_result = result.is_some();
+    let has_tree_data = has_result || total_summary.total() > 0;
 
     TreePaneViewModel {
         filter_active,
@@ -212,19 +214,19 @@ pub(in crate::ui::workspace) fn build_tree_pane_view_model(
         } else {
             tr(language, "tree_view_text")
         }),
-        disable_structure_actions: !has_result || filter_active || plain_text_mode,
+        disable_structure_actions: !has_tree_data || filter_active || plain_text_mode,
         body: if plain_text_mode {
             build_tree_plain_text_body(result, language)
         } else if !render_state.rows.is_empty() {
             TreePaneBodyViewModel::Tree
         } else {
             TreePaneBodyViewModel::Empty {
-                title: SharedString::from(if has_result {
+                title: SharedString::from(if has_tree_data {
                     tr(language, "tree_no_match")
                 } else {
                     tr(language, "tree_empty")
                 }),
-                hint: SharedString::from(if has_result && filter_active {
+                hint: SharedString::from(if has_tree_data && filter_active {
                     tr(language, "tree_no_match_hint")
                 } else {
                     tr(language, "tree_empty_hint")
@@ -243,9 +245,32 @@ pub(in crate::ui::workspace) fn build_tree_panel_data(
     })
 }
 
+pub(in crate::ui::workspace) fn build_preflight_tree_panel_data(
+    files: &[crate::domain::FileEntry],
+    result: Option<&ProcessResult>,
+) -> TreePanelData {
+    let nodes = crate::services::tree::build_tree_nodes_from_relative_paths(
+        files.iter().map(|file| file.name.as_str()),
+    );
+    TreePanelData {
+        index: crate::services::tree::build_tree_index(&nodes),
+        preview_files: result
+            .map(|result| preview_file_map(&result.preview_files))
+            .unwrap_or_default(),
+    }
+}
+
 pub(in crate::ui::workspace) fn build_tree_projection(
     data: Option<&TreePanelData>,
     filter: &str,
+) -> TreeProjectionState {
+    build_tree_projection_internal(data, filter, &HashSet::new())
+}
+
+fn build_tree_projection_internal(
+    data: Option<&TreePanelData>,
+    filter: &str,
+    excluded_files: &HashSet<String>,
 ) -> TreeProjectionState {
     let Some(data) = data else {
         return TreeProjectionState::default();
@@ -256,6 +281,7 @@ pub(in crate::ui::workspace) fn build_tree_projection(
     let context = TreeProjectionContext {
         filter: filter_lower.as_str(),
         preview_files: &data.preview_files,
+        excluded_files,
     };
     let mut roots = Vec::new();
 
@@ -272,6 +298,18 @@ pub(in crate::ui::workspace) fn build_tree_projection(
             files: data.index.total_files,
         },
     }
+}
+
+pub(in crate::ui::workspace) fn build_tree_projection_with_exclusions(
+    data: Option<&TreePanelData>,
+    filter: &str,
+    excluded_files: &[String],
+) -> TreeProjectionState {
+    let excluded_files = excluded_files
+        .iter()
+        .map(|path| path.to_ascii_lowercase())
+        .collect::<HashSet<_>>();
+    build_tree_projection_internal(data, filter, &excluded_files)
 }
 
 pub(in crate::ui::workspace) fn build_tree_render_state(
@@ -353,12 +391,23 @@ fn build_tree_projection_node(
     node: &IndexedTreeNode,
     context: &TreeProjectionContext<'_>,
 ) -> Option<TreeProjectionNode> {
+    if !node.is_folder
+        && context
+            .excluded_files
+            .contains(&node.relative_path.to_ascii_lowercase())
+    {
+        return None;
+    }
     let filter_match = filter_node(node, context.filter);
     let mut children = Vec::new();
     for child in &node.children {
         if let Some(projected) = build_tree_projection_node(child, context) {
             children.push(projected);
         }
+    }
+
+    if node.is_folder && !node.children.is_empty() && children.is_empty() {
+        return None;
     }
 
     if filter_match.is_none() && children.is_empty() && !context.filter.is_empty() {

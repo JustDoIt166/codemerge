@@ -97,6 +97,7 @@ pub struct SelectionState {
     pub dedupe_exact_path: bool,
     pub selected_folder: Option<PathBuf>,
     pub selected_files: Vec<FileEntry>,
+    pub excluded_folder_files: Vec<String>,
     pub gitignore_file: Option<PathBuf>,
     pub gitignore_rules: Vec<String>,
     pub temp_folder_blacklist: Vec<String>,

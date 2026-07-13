@@ -159,6 +159,7 @@ pub(super) fn render_tree_row(
     row: &TreeRowViewModel,
     selected: bool,
     language: Language,
+    action: Option<AnyElement>,
     cx: &App,
 ) -> ListItem {
     let chevron = row.is_folder.then_some(if row.is_expanded {
@@ -169,12 +170,12 @@ pub(super) fn render_tree_row(
     let badges = tree_badges(row, language);
     let palette = TreeRowPalette::new(selected, row.icon_kind, row.is_filter_match, row.match_kind)
         .resolve(cx.theme());
-    let row_indent = px((row.depth as f32) * 20.);
+    let row_indent = px((row.depth as f32) * 16.);
 
     ListItem::new(ix)
         .w_full()
-        .h(px(48.))
-        .rounded(px(8.))
+        .h(px(44.))
+        .rounded(px(7.))
         .bg(palette.row_bg)
         .child(
             div().w_full().h_full().child(
@@ -182,13 +183,14 @@ pub(super) fn render_tree_row(
                     .w_full()
                     .h_full()
                     .items_center()
-                    .gap_3()
-                    .px(px(12.))
-                    .pl(px(12.) + row_indent)
+                    .gap_2()
+                    .px(px(10.))
+                    .pl(px(10.) + row_indent)
                     .hover(|style| style.bg(palette.row_hover_bg))
                     .child(render_tree_row_chevron(chevron, &palette))
                     .child(render_tree_row_icon(row, &palette))
-                    .child(render_tree_row_body(row, badges, language, &palette)),
+                    .child(render_tree_row_body(row, badges, language, &palette))
+                    .when_some(action, |this, action| this.child(action)),
             ),
         )
 }
@@ -227,10 +229,14 @@ fn render_tree_row_body(
     language: Language,
     palette: &ResolvedTreeRowPalette,
 ) -> gpui::Div {
+    let show_secondary = row.is_folder
+        || row.preview_chars.zip(row.preview_tokens).is_some()
+        || matches!(row.match_kind, Some(FilterMatchKind::Path));
+
     v_flex()
         .min_w(px(0.))
         .flex_1()
-        .gap_1()
+        .gap(px(2.))
         .child(
             h_flex()
                 .items_center()
@@ -246,13 +252,15 @@ fn render_tree_row_body(
                     this.child(render_tree_badges_row(badges, palette))
                 }),
         )
-        .child(
-            h_flex()
-                .items_center()
-                .justify_between()
-                .gap(px(6.))
-                .child(render_secondary_label(row, language, palette)),
-        )
+        .when(show_secondary, |this| {
+            this.child(
+                h_flex()
+                    .items_center()
+                    .justify_between()
+                    .gap(px(6.))
+                    .child(render_secondary_label(row, language, palette)),
+            )
+        })
 }
 
 fn render_tree_badges_row(badges: Vec<String>, palette: &ResolvedTreeRowPalette) -> AnyElement {

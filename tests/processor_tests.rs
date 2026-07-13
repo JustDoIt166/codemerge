@@ -72,6 +72,7 @@ fn collect_candidates_honors_gitignore_and_ext_blacklist() {
         walker::WalkerFilterRules {
             folder_blacklist: &[],
             ext_blacklist: &[String::from(".tmp")],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -104,6 +105,7 @@ fn collect_candidates_can_disable_gitignore_rules() {
         walker::WalkerFilterRules {
             folder_blacklist: &[],
             ext_blacklist: &[],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -133,6 +135,7 @@ fn collect_candidates_can_ignore_git_directory() {
         walker::WalkerFilterRules {
             folder_blacklist: &[],
             ext_blacklist: &[],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -160,6 +163,7 @@ fn collect_candidates_keeps_explicit_selected_file_even_if_blacklisted() {
         walker::WalkerFilterRules {
             folder_blacklist: &[String::from("blocked.log")],
             ext_blacklist: &[String::from(".log")],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -195,6 +199,7 @@ fn collect_candidates_selected_zip_honors_blacklist_inside_archive() {
         walker::WalkerFilterRules {
             folder_blacklist: &[String::from("src")],
             ext_blacklist: &[String::from(".png")],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
@@ -230,6 +235,7 @@ fn collect_candidates_folder_scan_still_honors_blacklist_inside_archive() {
         walker::WalkerFilterRules {
             folder_blacklist: &[String::from("src")],
             ext_blacklist: &[String::from(".png")],
+            excluded_files: &[],
             folder_whitelist: &[],
             ext_whitelist: &[],
             whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
