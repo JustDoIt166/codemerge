@@ -807,7 +807,7 @@ pub(super) fn pill_label(label: &str, cx: &App) -> AnyElement {
         .into_any_element()
 }
 
-pub(super) fn selected_file_row(entry: &FileEntry, cx: &App) -> AnyElement {
+pub(super) fn selected_file_row(entry: &FileEntry, action: AnyElement, cx: &App) -> AnyElement {
     v_flex()
         .gap_1()
         .px_3()
@@ -831,10 +831,16 @@ pub(super) fn selected_file_row(entry: &FileEntry, cx: &App) -> AnyElement {
                         .child(div().font_semibold().truncate().child(entry.name.clone())),
                 )
                 .child(
-                    div()
-                        .text_xs()
-                        .text_color(cx.theme().muted_foreground)
-                        .child(format_size(entry.size)),
+                    h_flex()
+                        .gap_2()
+                        .items_center()
+                        .child(
+                            div()
+                                .text_xs()
+                                .text_color(cx.theme().muted_foreground)
+                                .child(format_size(entry.size)),
+                        )
+                        .child(action),
                 ),
         )
         .child(

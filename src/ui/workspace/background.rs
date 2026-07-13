@@ -1,4 +1,5 @@
 use std::ops::Range;
+use std::rc::Rc;
 use std::sync::mpsc::TryRecvError;
 use std::time::Duration;
 
@@ -652,17 +653,17 @@ impl Workspace {
             self.clear_preview_state(cx);
         }
 
-        let preview_rows = table_model.rows.clone();
+        let preview_row_count = table_model.rows.len();
         self.result.update(cx, |result, result_cx| {
-            if result.state().preview_rows != preview_rows {
-                result.set_preview_rows(preview_rows);
+            if result.state().preview_row_count != preview_row_count {
+                result.set_preview_row_count(preview_row_count);
                 result_cx.notify();
             }
         });
         self.suppress_preview_table_events = true;
         self.preview_table.update(cx, |table, cx| {
             let prev_rows = table.delegate().rows.clone();
-            table.delegate_mut().rows = table_model.rows;
+            table.delegate_mut().rows = table_model.rows.clone();
             if let Some(row_ix) = target_row_ix {
                 if table.selected_row() != Some(row_ix) {
                     table.set_selected_row(row_ix, cx);
@@ -670,7 +671,7 @@ impl Workspace {
             } else if table.selected_row().is_some() {
                 table.clear_selection(cx);
             }
-            if prev_rows != table.delegate().rows {
+            if !Rc::ptr_eq(&prev_rows, &table.delegate().rows) {
                 cx.notify();
             }
         });

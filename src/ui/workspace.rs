@@ -60,7 +60,7 @@ pub(crate) enum BlacklistItemKind {
 pub(super) struct PreviewTableDelegate {
     language: Language,
     columns: Vec<Column>,
-    rows: Vec<PreviewRowViewModel>,
+    rows: Rc<[PreviewRowViewModel]>,
     sort: model::PreviewTableSort,
 }
 
@@ -77,7 +77,7 @@ impl PreviewTableDelegate {
                     .width(100.)
                     .text_right(),
             ],
-            rows: Vec::new(),
+            rows: Rc::from([]),
             sort: model::PreviewTableSort::default(),
         }
     }
@@ -91,7 +91,9 @@ impl PreviewTableDelegate {
 
     fn toggle_chars_sort(&mut self) {
         self.sort = self.sort.toggle_chars();
-        model::sort_preview_rows(&mut self.rows, self.sort);
+        let mut rows = self.rows.to_vec();
+        model::sort_preview_rows(&mut rows, self.sort);
+        self.rows = rows.into();
     }
 }
 
@@ -825,6 +827,7 @@ impl Workspace {
             result.active_tab,
             result.result_revision,
             result.preview_rows_revision,
+            result.save_state,
             ui.content_file_list_collapsed,
             filter,
         ))

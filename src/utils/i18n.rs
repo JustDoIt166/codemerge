@@ -85,6 +85,10 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "selected_files_hint") => {
             "Selected files will appear here after choosing a folder or files"
         }
+        (Language::Zh, "remove_selected_file") => "移除此文件",
+        (Language::En, "remove_selected_file") => "Remove this file",
+        (Language::Zh, "clear_folder") => "清除文件夹",
+        (Language::En, "clear_folder") => "Clear Folder",
         (Language::Zh, "gitignore") => ".gitignore",
         (Language::En, "gitignore") => ".gitignore",
         (Language::Zh, "gitignore_auto_hint") => "将优先使用当前目录下自动发现的 .gitignore",
@@ -507,6 +511,14 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         // Toast 消息
         (Language::Zh, "saved") => "已保存",
         (Language::En, "saved") => "Saved",
+        (Language::Zh, "saving") => "保存中…",
+        (Language::En, "saving") => "Saving…",
+        (Language::Zh, "retry_save") => "重试保存",
+        (Language::En, "retry_save") => "Retry Save",
+        (Language::Zh, "selected_file_removed") => "已移除所选文件",
+        (Language::En, "selected_file_removed") => "Selected file removed",
+        (Language::Zh, "folder_cleared") => "已清除输入文件夹",
+        (Language::En, "folder_cleared") => "Input folder cleared",
         (Language::Zh, "language_updated") => "语言已切换",
         (Language::En, "language_updated") => "Language updated",
         (Language::Zh, "confirm_clear_notice") => "请再次点击以确认清空操作",

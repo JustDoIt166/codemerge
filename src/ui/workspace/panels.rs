@@ -171,8 +171,30 @@ impl Workspace {
         rows: Rc<Vec<crate::domain::FileEntry>>,
         panel_height: gpui::Pixels,
         start_height: u16,
-        cx: &App,
+        cx: &mut Context<Self>,
     ) -> AnyElement {
+        let file_rows = rows
+            .iter()
+            .enumerate()
+            .map(|(ix, entry)| {
+                let path = entry.path.clone();
+                selected_file_row(
+                    entry,
+                    Button::new(("remove-selected-file", ix))
+                        .ghost()
+                        .compact()
+                        .with_size(Size::Small)
+                        .icon(IconName::Delete)
+                        .tooltip(tr(self.language(cx), "remove_selected_file"))
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            this.remove_selected_file(path.clone(), window, cx);
+                        }))
+                        .into_any_element(),
+                    cx,
+                )
+            })
+            .collect::<Vec<_>>();
+
         v_flex()
             .gap_1()
             .child(
@@ -183,12 +205,7 @@ impl Workspace {
                     .border_color(cx.theme().border)
                     .rounded(px(12.))
                     .bg(cx.theme().secondary.opacity(0.22))
-                    .child(
-                        v_flex()
-                            .w_full()
-                            .children(rows.iter().map(|entry| selected_file_row(entry, cx)))
-                            .p_1(),
-                    ),
+                    .child(v_flex().w_full().children(file_rows).p_1()),
             )
             .child(self.render_selected_files_resize_handle(start_height, cx))
             .into_any_element()
@@ -670,7 +687,6 @@ impl Workspace {
         let selection = self.selection_snapshot(cx);
         let ui_state = self.ui_state(cx);
         let language = settings.language;
-        let has_inputs = self.has_inputs(cx);
         let selected_files = Rc::new(selection.selected_files.clone());
         let selected_files_panel_height = px(f32::from(ui_state.selected_files_panel_height));
         let folder_label = self
@@ -679,6 +695,7 @@ impl Workspace {
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| tr(language, "input_folder_empty").to_string());
+        let has_selected_folder = selection.selected_folder.is_some();
         let gitignore_label = self
             .selection_snapshot(cx)
             .gitignore_file
@@ -696,13 +713,28 @@ impl Workspace {
                     cx,
                 ))
                 .child(self.render_input_toolbar(language, cx))
-                .child(render_info_block(
-                    tr(language, "folder"),
-                    folder_label,
-                    has_inputs,
-                    IconName::FolderOpen,
-                    cx,
-                ))
+                .child(
+                    h_flex()
+                        .w_full()
+                        .gap_2()
+                        .items_center()
+                        .child(div().flex_1().child(render_info_block(
+                            tr(language, "folder"),
+                            folder_label,
+                            has_selected_folder,
+                            IconName::FolderOpen,
+                            cx,
+                        )))
+                        .child(
+                            Button::new("clear-selected-folder")
+                                .outline()
+                                .compact()
+                                .icon(IconName::Delete)
+                                .label(tr(language, "clear_folder"))
+                                .disabled(!has_selected_folder)
+                                .on_click(cx.listener(Self::clear_selected_folder)),
+                        ),
+                )
                 .child(self.render_selected_files_section(
                     language,
                     selected_files,
@@ -1007,6 +1039,21 @@ impl Workspace {
                 .on_click(cx.listener(Self::copy_preview))
                 .into_any_element(),
         };
+        let save_state = self.result.read(cx).state().save_state;
+        let (download_label, download_icon) = match save_state {
+            crate::ui::result_model::ResultSaveState::Idle => {
+                (tr(language, "download"), IconName::ArrowDown)
+            }
+            crate::ui::result_model::ResultSaveState::Saving => {
+                (tr(language, "saving"), IconName::LoaderCircle)
+            }
+            crate::ui::result_model::ResultSaveState::Saved => {
+                (tr(language, "saved"), IconName::Check)
+            }
+            crate::ui::result_model::ResultSaveState::Failed => {
+                (tr(language, "retry_save"), IconName::TriangleAlert)
+            }
+        };
 
         h_flex()
             .justify_between()
@@ -1031,9 +1078,12 @@ impl Workspace {
                 h_flex().gap_2().child(copy_button).child(
                     Button::new("download-result")
                         .outline()
-                        .icon(IconName::ArrowDown)
-                        .label(tr(language, "download"))
-                        .disabled(!view_model.has_content_result)
+                        .icon(download_icon)
+                        .label(download_label)
+                        .disabled(
+                            !view_model.has_content_result
+                                || save_state == crate::ui::result_model::ResultSaveState::Saving,
+                        )
                         .on_click(cx.listener(Self::download_result)),
                 ),
             )
@@ -1266,7 +1316,7 @@ impl Workspace {
 
     fn build_content_panel_view_model(&self, cx: &App) -> super::model::ContentPanelViewModel {
         let result = self.result.read(cx);
-        let preview_rows_len = result.state().preview_rows.len();
+        let preview_rows_len = result.state().preview_row_count;
         let filter_active = !self.preview_filter_input.read(cx).value().trim().is_empty();
 
         super::model::build_content_panel_view_model(

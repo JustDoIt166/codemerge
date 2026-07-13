@@ -1,4 +1,5 @@
 use gpui::SharedString;
+use std::rc::Rc;
 
 use crate::domain::{Language, PreviewRowViewModel, ProcessResult, ResultTab};
 use crate::ui::state::{DeferredPreviewState, NarrowContentTab};
@@ -121,7 +122,7 @@ pub(in crate::ui::workspace) struct PreviewPaneViewModel {
 
 #[derive(Clone)]
 pub(in crate::ui::workspace) struct PreviewTableModel {
-    pub rows: Vec<PreviewRowViewModel>,
+    pub rows: Rc<[PreviewRowViewModel]>,
     pub selected_row_ix: Option<usize>,
     pub next_selected_file_id: Option<u32>,
 }
@@ -280,7 +281,7 @@ pub(in crate::ui::workspace) fn build_preview_table_model(
         .or_else(|| rows.first().map(|row| row.id));
 
     PreviewTableModel {
-        rows,
+        rows: rows.into(),
         selected_row_ix,
         next_selected_file_id,
     }

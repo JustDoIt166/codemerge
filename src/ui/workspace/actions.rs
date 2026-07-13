@@ -169,6 +169,54 @@ impl Workspace {
         self.refresh_preflight(cx);
     }
 
+    pub(super) fn remove_selected_file(
+        &mut self,
+        path: std::path::PathBuf,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let removed = self.selection.update(cx, |selection, selection_cx| {
+            let removed = selection.remove_selected_file(&path);
+            if removed {
+                selection_cx.notify();
+            }
+            removed
+        });
+        if removed {
+            self.refresh_preflight(cx);
+            self.push_notice(
+                NotificationType::Info,
+                tr(self.language(cx), "selected_file_removed"),
+                window,
+                cx,
+            );
+        }
+    }
+
+    pub(super) fn clear_selected_folder(
+        &mut self,
+        _: &ClickEvent,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let cleared = self.selection.update(cx, |selection, selection_cx| {
+            let cleared = selection.clear_selected_folder();
+            if cleared {
+                selection_cx.notify();
+            }
+            cleared
+        });
+        if cleared {
+            self.refresh_preflight(cx);
+            self.push_notice(
+                NotificationType::Info,
+                tr(self.language(cx), "folder_cleared"),
+                window,
+                cx,
+            );
+        }
+    }
+
     pub(super) fn apply_selected_gitignore(
         &mut self,
         path: Option<std::path::PathBuf>,
@@ -1420,11 +1468,31 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let save_revision = self.result.update(cx, |result, result_cx| {
+            let revision = result.begin_save();
+            if revision.is_some() {
+                result_cx.notify();
+            }
+            revision
+        });
+        let Some(save_revision) = save_revision else {
+            return;
+        };
         let result = self.result.read(cx).state().result.clone();
         let Some(result) = result.as_ref() else {
+            self.result.update(cx, |result, result_cx| {
+                if result.cancel_save(save_revision) {
+                    result_cx.notify();
+                }
+            });
             return;
         };
         let Some(path) = &result.merged_content_path else {
+            self.result.update(cx, |result, result_cx| {
+                if result.cancel_save(save_revision) {
+                    result_cx.notify();
+                }
+            });
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "mode_tree_only_desc"),
@@ -1445,10 +1513,22 @@ impl Workspace {
                 .map(|handle| handle.path().to_path_buf());
 
             let Some(save_path) = save_path else {
+                let _ = this.update(cx, |this, cx| {
+                    this.result.update(cx, |result, result_cx| {
+                        if result.cancel_save(save_revision) {
+                            result_cx.notify();
+                        }
+                    });
+                });
                 return;
             };
 
-            let notice = match std::fs::copy(&source_path, save_path) {
+            let copy_result = cx
+                .background_executor()
+                .spawn(async move { std::fs::copy(source_path, save_path) })
+                .await;
+            let succeeded = copy_result.is_ok();
+            let notice = match copy_result {
                 Ok(_) => (NotificationType::Success, tr(language, "saved").to_string()),
                 Err(err) => (
                     NotificationType::Error,
@@ -1456,7 +1536,12 @@ impl Workspace {
                 ),
             };
 
-            let _ = this.update(cx, |_, cx| {
+            let _ = this.update(cx, |this, cx| {
+                this.result.update(cx, |result, result_cx| {
+                    if result.finish_save(save_revision, succeeded) {
+                        result_cx.notify();
+                    }
+                });
                 if let Some(window) = cx.active_window() {
                     let _ = window.update(cx, |_, window, cx| {
                         window.push_notification((notice.0, SharedString::from(notice.1)), cx);

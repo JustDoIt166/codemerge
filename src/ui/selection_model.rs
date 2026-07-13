@@ -81,6 +81,27 @@ impl SelectionModel {
         }
     }
 
+    pub fn remove_selected_file(&mut self, path: &std::path::Path) -> bool {
+        let Some(index) = self
+            .state
+            .selected_files
+            .iter()
+            .position(|entry| entry.path == path)
+        else {
+            return false;
+        };
+        self.state.selected_files.remove(index);
+        true
+    }
+
+    pub fn clear_selected_folder(&mut self) -> bool {
+        let changed =
+            self.state.selected_folder.is_some() || !self.state.gitignore_rules.is_empty();
+        self.state.selected_folder = None;
+        self.state.gitignore_rules.clear();
+        changed
+    }
+
     pub fn set_gitignore_file(&mut self, path: Option<PathBuf>) {
         self.state.gitignore_file = path;
     }
@@ -232,6 +253,63 @@ mod tests {
         assert_eq!(
             model.state().temp_whitelist_mode,
             TemporaryWhitelistMode::WhitelistThenBlacklist
+        );
+    }
+
+    #[test]
+    fn remove_selected_file_only_removes_matching_path() {
+        let mut model = SelectionModel::new();
+        model.set_dedupe_exact_path(false);
+        model.add_selected_files(vec![
+            FileEntry {
+                path: PathBuf::from("src/main.rs"),
+                name: "main.rs".into(),
+                size: 1,
+            },
+            FileEntry {
+                path: PathBuf::from("src/lib.rs"),
+                name: "lib.rs".into(),
+                size: 2,
+            },
+            FileEntry {
+                path: PathBuf::from("src/main.rs"),
+                name: "main.rs".into(),
+                size: 1,
+            },
+        ]);
+
+        assert!(model.remove_selected_file(std::path::Path::new("src/main.rs")));
+        assert!(!model.remove_selected_file(std::path::Path::new("missing.rs")));
+        assert_eq!(model.state().selected_files.len(), 2);
+        assert_eq!(
+            model.state().selected_files[0].path,
+            PathBuf::from("src/lib.rs")
+        );
+        assert_eq!(
+            model.state().selected_files[1].path,
+            PathBuf::from("src/main.rs")
+        );
+    }
+
+    #[test]
+    fn clear_selected_folder_keeps_files_and_temporary_rules() {
+        let mut model = SelectionModel::new();
+        model.set_selected_folder(PathBuf::from("root"), vec!["target".into()]);
+        model.add_selected_files(vec![FileEntry {
+            path: PathBuf::from("standalone.rs"),
+            name: "standalone.rs".into(),
+            size: 1,
+        }]);
+        model.add_temporary_blacklist_tokens(&["dist".into()], false);
+
+        assert!(model.clear_selected_folder());
+        assert!(!model.clear_selected_folder());
+        assert!(model.state().selected_folder.is_none());
+        assert!(model.state().gitignore_rules.is_empty());
+        assert_eq!(model.state().selected_files.len(), 1);
+        assert_eq!(
+            model.state().temp_folder_blacklist,
+            vec!["dist".to_string()]
         );
     }
 
