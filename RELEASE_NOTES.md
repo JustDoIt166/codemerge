@@ -4,6 +4,10 @@
 
 ## 更新内容
 
+- Workspace 重构为单一 `WorkspaceStore` 事务模型，draft、execution、preview 和 navigation 跨域变更由 root reducer 原子提交，陈旧 `JobId` 与陈旧预览版本成为无副作用的 no-op。
+- 后台工作统一由 Tokio `TaskSupervisor` 管理，移除生产路径的同步 receiver、固定间隔轮询和混用线程模型；进度按帧合并，取消、失败与终态立即回传。
+- Pane 改为按 `ChangeSet` 依赖掩码精确刷新，删除完整结果哈希和 before/after tuple 失效逻辑；活动记录改用有界 `VecDeque`，头部淘汰为 O(1)。
+- `AppError` 增加稳定错误码、operation/context 与完整 source chain，processor 与临时文件路径不再返回 `Result<_, String>`；生产代码启用 unwrap/expect Clippy 禁止门禁。
 - 结果文件导出改为后台 I/O，按钮会显示保存中、成功或失败状态，慢磁盘与网络盘保存不再阻塞 UI 线程。
 - 文件夹预检结果会显示在可搜索、可展开的目录树中，并支持精确逐项排除；输入区保留手动添加文件的移除能力，也可单独清除当前文件夹且不影响单独选择的文件或本次合并临时规则。
 - 预览表缓存与 table delegate 改为共享筛选行集合，移除 `ResultModel` 中的完整预览行副本，降低大规模筛选与同步时的内存复制。

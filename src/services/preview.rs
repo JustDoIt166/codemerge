@@ -2,8 +2,6 @@ use std::io::{BufRead, BufReader, Seek, SeekFrom, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
 
 use crate::error::{AppError, AppResult};
 
@@ -85,65 +83,43 @@ impl PreviewDocument {
     }
 }
 
-pub fn start(request: PreviewRequest) -> Receiver<PreviewEvent> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || match request {
+pub fn execute(request: PreviewRequest) -> AppResult<PreviewEvent> {
+    match request {
         PreviewRequest::Open {
             revision,
             file_id,
             path,
             initial_range,
         } => {
-            let result = (|| {
+            let (document, loaded_range, lines) = (|| {
                 let document = index_document(&path)?;
                 let loaded_range = clamp_range(&document, initial_range);
                 let lines = load_range(&document, loaded_range.clone())?;
                 Ok::<_, AppError>((document, loaded_range, lines))
-            })();
-
-            match result {
-                Ok((document, loaded_range, lines)) => {
-                    let _ = tx.send(PreviewEvent::Opened {
-                        revision,
-                        file_id,
-                        document,
-                        loaded_range,
-                        lines,
-                    });
-                }
-                Err(error) => {
-                    let _ = tx.send(PreviewEvent::Failed {
-                        revision,
-                        file_id,
-                        error,
-                    });
-                }
-            }
+            })()?;
+            Ok(PreviewEvent::Opened {
+                revision,
+                file_id,
+                document,
+                loaded_range,
+                lines,
+            })
         }
         PreviewRequest::LoadRange {
             revision,
             file_id,
             document,
             range,
-        } => match load_range(&document, clamp_range(&document, range.clone())) {
-            Ok(lines) => {
-                let _ = tx.send(PreviewEvent::Loaded {
-                    revision,
-                    file_id,
-                    loaded_range: clamp_range(&document, range),
-                    lines,
-                });
-            }
-            Err(error) => {
-                let _ = tx.send(PreviewEvent::Failed {
-                    revision,
-                    file_id,
-                    error,
-                });
-            }
-        },
-    });
-    rx
+        } => {
+            let lines = load_range(&document, clamp_range(&document, range.clone()))?;
+            Ok(PreviewEvent::Loaded {
+                revision,
+                file_id,
+                loaded_range: clamp_range(&document, range),
+                lines,
+            })
+        }
+    }
 }
 
 pub fn index_document(path: &Path) -> AppResult<PreviewDocument> {
@@ -367,8 +343,8 @@ fn write_excerpt_preview(source: &Path, target: &Path, max_bytes: u64) -> AppRes
 mod tests {
     use super::{
         MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest, SPARSE_INDEX_STRIDE_LINES,
-        SPARSE_INDEX_THRESHOLD_BYTES, TRUNCATED_PREVIEW_SUFFIX, create_excerpt_preview,
-        index_document, load_range, load_text, start,
+        SPARSE_INDEX_THRESHOLD_BYTES, TRUNCATED_PREVIEW_SUFFIX, create_excerpt_preview, execute,
+        index_document, load_range, load_text,
     };
 
     fn with_preview_file(name: &str, content: &str, test: impl FnOnce(&std::path::Path)) {
@@ -461,14 +437,15 @@ mod tests {
     #[test]
     fn open_request_indexes_and_primes_initial_window() {
         with_preview_file("open.txt", "zero\none\ntwo\nthree", |path| {
-            let rx = start(PreviewRequest::Open {
+            let event = execute(PreviewRequest::Open {
                 revision: 7,
                 file_id: 42,
                 path: path.to_path_buf(),
                 initial_range: 1..3,
-            });
+            })
+            .expect("preview event");
 
-            match rx.recv().expect("preview event") {
+            match event {
                 PreviewEvent::Opened {
                     revision,
                     file_id,

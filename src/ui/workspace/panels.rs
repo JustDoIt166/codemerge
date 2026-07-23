@@ -174,6 +174,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let row_count = rows.len();
+        let workspace = cx.entity();
 
         v_flex()
             .gap_1()
@@ -230,13 +231,16 @@ impl Workspace {
                         .p_1(),
                     ),
             )
-            .child(self.render_selected_files_resize_handle(start_height, cx))
+            .child(self.render_selected_files_resize_handle(start_height, workspace, cx))
             .into_any_element()
     }
 
-    fn render_selected_files_resize_handle(&self, start_height: u16, cx: &App) -> AnyElement {
-        let resize_ui_for_drag = self.ui.clone();
-
+    fn render_selected_files_resize_handle(
+        &self,
+        start_height: u16,
+        workspace: gpui::Entity<Self>,
+        cx: &App,
+    ) -> AnyElement {
         h_flex()
             .id("selected-files-resize-handle")
             .w_full()
@@ -268,10 +272,15 @@ impl Workspace {
                     let next_height = (f32::from(drag.start_height) + quantized_delta)
                         .round()
                         .max(0.0) as u16;
-                    resize_ui_for_drag.update(cx, |ui, ui_cx| {
-                        if ui.set_selected_files_panel_height(next_height) {
-                            ui_cx.notify();
-                        }
+                    workspace.update(cx, |workspace, workspace_cx| {
+                        workspace.dispatch(
+                            crate::application::store::WorkspaceAction::Navigation(
+                                crate::application::store::NavigationAction::SetSelectedFilesPanelHeight(
+                                    next_height,
+                                ),
+                            ),
+                            workspace_cx,
+                        );
                     });
                 },
             )
@@ -1469,15 +1478,14 @@ impl Workspace {
         preview_table: gpui::Entity<gpui_component::table::TableState<super::PreviewTableDelegate>>,
         cx: &App,
     ) -> AnyElement {
-        if empty_state.is_none() {
+        let Some(empty_state) = empty_state else {
             return Table::new(&preview_table)
                 .with_size(Size::Small)
                 .bordered(false)
                 .stripe(true)
                 .into_any_element();
-        }
+        };
 
-        let empty_state = empty_state.expect("checked empty state");
         empty_box(
             empty_state.title.clone(),
             empty_state.hint.clone(),
@@ -1901,7 +1909,7 @@ impl PreviewPaneView {
         let view_model = super::model::build_preview_pane_view_model(
             result.state().result.as_ref(),
             preview.selected_preview_file_id(),
-            preview.state().preview_rx.is_some(),
+            preview.state().pending_request_type.is_some(),
             preview.state().preview_error.as_deref(),
             preview.deferred_preview(),
             preview

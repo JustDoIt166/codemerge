@@ -1,4 +1,4 @@
-use gpui::{App, ClickEvent, Context, Entity, SharedString, Window};
+use gpui::{App, ClickEvent, Context, Entity, SharedString, Timer, Window};
 use gpui_component::{
     WindowExt as _,
     input::{InputEvent, InputState},
@@ -19,10 +19,12 @@ use windows::Win32::{
 use super::model;
 use super::view::{TreeExpansionMode, copy_to_clipboard};
 use super::{BlacklistItemKind, ConfigAlertAction, PreviewTableDelegate, Workspace};
-use crate::domain::{FileEntry, OutputFormat, ResultTab, TemporaryWhitelistMode};
+use crate::application::task::{JobKind, TaskPayload};
+use crate::domain::{FileEntry, OutputFormat, TemporaryWhitelistMode};
 use crate::services::external_link;
 use crate::services::process::ProcessRequest;
 use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
+use crate::ui::view_model::ResultTab;
 use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
 use crate::utils::path::filename;
@@ -95,10 +97,12 @@ impl Workspace {
                         }
                         match result {
                             Ok(Some(config)) => {
-                                workspace.settings.update(cx, |settings, settings_cx| {
-                                    settings.apply_config(config);
-                                    settings_cx.notify();
-                                });
+                                let _ = workspace.dispatch(
+                                    crate::application::store::WorkspaceAction::Draft(
+                                        crate::application::store::DraftAction::ApplyConfig(config),
+                                    ),
+                                    cx,
+                                );
                                 let language = workspace.language(cx);
                                 workspace.clear_config_alert(cx);
                                 workspace.refresh_preflight(cx);
@@ -141,17 +145,22 @@ impl Workspace {
         gitignore_rules: Vec<String>,
         cx: &mut Context<Self>,
     ) {
-        self.selection.update(cx, |selection, selection_cx| {
-            selection.set_selected_folder(path, gitignore_rules);
-            selection_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SelectFolder {
+                    path,
+                    gitignore_rules,
+                },
+            ),
+            cx,
+        );
         self.tree_panel.data = None;
         self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.total_summary = model::TreeCountSummary::default();
         self.tree_panel.last_filter.clear();
-        self.state.workspace.reset_tree();
+        self.reset_tree_state(cx);
         self.sync_tree(cx);
         self.refresh_preflight(cx);
     }
@@ -162,18 +171,23 @@ impl Workspace {
         };
         let gitignore_rules =
             crate::processor::walker::load_gitignore_rules_for_root(&selected_folder);
-        self.selection.update(cx, |selection, selection_cx| {
-            if selection.set_selected_folder_gitignore_rules(gitignore_rules) {
-                selection_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::UpdateSelectedFolderGitignore(
+                    gitignore_rules,
+                ),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn apply_selected_files(&mut self, files: Vec<FileEntry>, cx: &mut Context<Self>) {
-        self.selection.update(cx, |selection, selection_cx| {
-            selection.add_selected_files(files);
-            selection_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::AddSelectedFiles(files),
+            ),
+            cx,
+        );
         self.refresh_preflight(cx);
     }
 
@@ -183,13 +197,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let removed = self.selection.update(cx, |selection, selection_cx| {
-            let removed = selection.remove_selected_file(&path);
-            if removed {
-                selection_cx.notify();
-            }
-            removed
-        });
+        let removed = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::RemoveSelectedFile(path),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if removed {
             self.refresh_preflight(cx);
             self.push_notice(
@@ -207,13 +224,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let cleared = self.selection.update(cx, |selection, selection_cx| {
-            let cleared = selection.clear_selected_folder();
-            if cleared {
-                selection_cx.notify();
-            }
-            cleared
-        });
+        let cleared = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::ClearSelectedFolder,
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if cleared {
             self.tree_panel.data =
                 model::build_tree_panel_data(self.result.read(cx).state().result.as_ref());
@@ -222,11 +242,11 @@ impl Workspace {
             self.tree_panel.render_state = model::TreeRenderState::default();
             self.tree_panel.total_summary = model::TreeCountSummary::default();
             self.tree_panel.last_filter.clear();
-            self.state.workspace.reset_tree();
+            let mut tree_state = crate::ui::state::TreePanelState::default();
             if let Some(data) = self.tree_panel.data.as_ref() {
-                self.state.workspace.tree_panel.expanded_ids =
-                    data.index.default_expanded_ids.clone();
+                tree_state.expanded_ids = data.index.default_expanded_ids.clone();
             }
+            self.set_tree_state(tree_state, cx);
             self.sync_tree(cx);
             self.refresh_preflight(cx);
             self.push_notice(
@@ -244,13 +264,16 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let excluded = self.selection.update(cx, |selection, selection_cx| {
-            let excluded = selection.exclude_folder_file(relative_path);
-            if excluded {
-                selection_cx.notify();
-            }
-            excluded
-        });
+        let excluded = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::ExcludeFolderFile(relative_path),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if excluded {
             self.tree_panel.projection = model::TreeProjectionState::default();
             self.sync_tree(cx);
@@ -269,10 +292,12 @@ impl Workspace {
         path: Option<std::path::PathBuf>,
         cx: &mut Context<Self>,
     ) {
-        self.selection.update(cx, |selection, selection_cx| {
-            selection.set_gitignore_file(path);
-            selection_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetGitignoreFile(path),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn handle_preview_filter_change(&mut self, cx: &mut Context<Self>) {
@@ -340,11 +365,15 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let language = self.settings.update(cx, |settings, settings_cx| {
-            let language = settings.toggle_language();
-            settings_cx.notify();
-            language
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::ToggleLanguage,
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Language(language) = transition.output else {
+            return;
+        };
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.sync_localized_inputs(window, cx);
@@ -521,13 +550,16 @@ impl Workspace {
                 .map(|content| crate::processor::walker::parse_gitignore_rules(&content));
             let _ = this.update(cx, |this, cx| match loaded {
                 Ok(rules) => {
-                    let added = this.selection.update(cx, |selection, selection_cx| {
-                        let added = selection.append_temporary_gitignore_rules(rules);
-                        if added > 0 {
-                            selection_cx.notify();
-                        }
-                        added
-                    });
+                    let transition = this.dispatch(
+                        crate::application::store::WorkspaceAction::Draft(
+                            crate::application::store::DraftAction::AppendTemporaryGitignore(rules),
+                        ),
+                        cx,
+                    );
+                    let crate::application::store::ActionOutput::Count(added) = transition.output
+                    else {
+                        return;
+                    };
                     if added > 0 {
                         this.refresh_preflight(cx);
                         Self::notify_active_window(
@@ -559,13 +591,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ui.update(cx, |ui, ui_cx| {
-            let changed = ui.set_pending_confirmation(PendingConfirmation::ClearInputs);
-            if changed {
-                ui_cx.notify();
-            }
-            changed
-        }) {
+        if matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Navigation(
+                    crate::application::store::NavigationAction::SetPendingConfirmation(
+                        PendingConfirmation::ClearInputs,
+                    ),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        ) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_clear_notice"),
@@ -576,31 +613,15 @@ impl Workspace {
         }
         self.clear_pending_confirmation(cx);
         self.cancel_and_detach_background_work(cx);
-        self.preview.update(cx, |preview, preview_cx| {
-            preview.set_preview_rx(None);
-            preview_cx.notify();
-        });
-        self.cleanup_current_result_artifacts();
         self.preview_filter_task = None;
         self.preview_table_cache = super::PreviewTableCache::default();
         let status_ready = tr(self.language(cx), "status_ready").to_string();
-        self.state.clear_inputs();
-        self.selection.update(cx, |selection, selection_cx| {
-            selection.clear();
-            selection_cx.notify();
-        });
-        self.preview.update(cx, |preview, preview_cx| {
-            preview.clear();
-            preview_cx.notify();
-        });
-        self.result.update(cx, |result, result_cx| {
-            result.clear();
-            result_cx.notify();
-        });
-        self.process.update(cx, |process, process_cx| {
-            process.clear_runtime(status_ready);
-            process_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::ClearInputs {
+                ready_label: status_ready,
+            },
+            cx,
+        );
         self.suppress_tree_interaction_sync.set(true);
         self.tree_panel.state.update(cx, |state, tree_cx| {
             state.set_selected_index(None, tree_cx);
@@ -628,13 +649,13 @@ impl Workspace {
     }
 
     pub(super) fn cancel_and_detach_background_work(&mut self, cx: &mut Context<Self>) {
-        self.process.update(cx, |process, process_cx| {
-            if let Some(handle) = process.state_mut().process_handle.take() {
-                handle.cancel.cancel();
-            }
-            process.state_mut().preflight_rx = None;
-            process_cx.notify();
-        });
+        self.coordinator.read(cx).cancel_all();
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::FinishRun,
+            ),
+            cx,
+        );
     }
 
     pub(super) fn start_process(
@@ -658,11 +679,10 @@ impl Workspace {
         self.cleanup_current_result_artifacts();
         self.preview_filter_task = None;
         self.preview_table_cache = super::PreviewTableCache::default();
-        self.result.update(cx, |result, result_cx| {
-            result.clear();
-            result_cx.notify();
-        });
-        self.state.workspace.reset_tree();
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::PrepareProcess,
+            cx,
+        );
         self.tree_panel.data = None;
         self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
@@ -670,15 +690,13 @@ impl Workspace {
         self.tree_panel.total_summary = model::TreeCountSummary::default();
         self.tree_panel.last_filter.clear();
         self.tree_panel.last_interaction = None;
-        self.clear_preview_state(cx);
-        self.clear_pending_confirmation(cx);
         self.sync_tree(cx);
         self.sync_preview_table(cx);
         self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_filters = self.effective_filters(cx);
-        let handle = crate::services::process::start(ProcessRequest {
+        let request = ProcessRequest {
             selected_folder: selection.selected_folder.clone(),
             selected_files: selection
                 .selected_files
@@ -693,12 +711,77 @@ impl Workspace {
             whitelist_mode: effective_filters.whitelist_mode,
             options: settings.options.clone(),
             language: settings.language,
-        });
-        self.process.update(cx, |process, process_cx| {
-            process.start_run(handle, tr(settings.language, "scanning_files").to_string());
-            process_cx.notify();
-        });
-        self.ensure_background_polling(cx);
+        };
+        let mut stream = match self.coordinator.read(cx).start_process(request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.push_notice(NotificationType::Error, error.to_string(), window, cx);
+                return;
+            }
+        };
+        let run_id = stream.job_id;
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::StartRun {
+                    run_id,
+                    scanning_label: tr(settings.language, "scanning_files").to_string(),
+                },
+            ),
+            cx,
+        );
+        cx.spawn(async move |this, cx| {
+            while let Some(envelope) = stream.events.recv().await {
+                match envelope.payload {
+                    TaskPayload::Event(event) => {
+                        let terminal = matches!(
+                            &event.kind,
+                            crate::services::process::ProcessEventKind::Completed(_)
+                                | crate::services::process::ProcessEventKind::Failed(_)
+                                | crate::services::process::ProcessEventKind::Cancelled
+                        );
+                        let mut events = vec![event];
+                        let mut finished = false;
+                        if !terminal {
+                            Timer::after(std::time::Duration::from_millis(16)).await;
+                        }
+                        while let Ok(next) = stream.events.try_recv() {
+                            match next.payload {
+                                TaskPayload::Event(event) => events.push(event),
+                                TaskPayload::Failed(error) => {
+                                    events.push(crate::services::process::ProcessEvent::failed(
+                                        next.job_id,
+                                        error,
+                                    ));
+                                    finished = true;
+                                    break;
+                                }
+                                TaskPayload::Finished => {
+                                    finished = true;
+                                    break;
+                                }
+                            }
+                        }
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.handle_process_events(events, cx);
+                        });
+                        if finished {
+                            break;
+                        }
+                    }
+                    TaskPayload::Failed(error) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            let event = crate::services::process::ProcessEvent::failed(
+                                envelope.job_id,
+                                error,
+                            );
+                            workspace.handle_process_event(event, cx);
+                        });
+                    }
+                    TaskPayload::Finished => break,
+                }
+            }
+        })
+        .detach();
         self.push_notice(
             NotificationType::Info,
             tr(settings.language, "process_started"),
@@ -713,11 +796,21 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.process.update(cx, |process, process_cx| {
-            let cancelled = process.cancel_running();
-            process_cx.notify();
-            cancelled
-        }) {
+        if matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Execution(
+                    crate::application::store::ExecutionAction::CancelRequested,
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        ) {
+            let _ = self
+                .coordinator
+                .read(cx)
+                .tasks()
+                .request_cancel(JobKind::Process);
             self.push_notice(
                 NotificationType::Info,
                 tr(self.language(cx), "cancel_requested"),
@@ -823,13 +916,15 @@ impl Workspace {
             return 0;
         }
 
-        let added = self.settings.update(cx, |settings, settings_cx| {
-            let added = settings.add_blacklist_tokens(&tokens, as_ext);
-            if added > 0 {
-                settings_cx.notify();
-            }
-            added
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::AddBlacklist { tokens, as_ext },
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Count(added) = transition.output else {
+            return 0;
+        };
         if added == 0 {
             self.push_notice(
                 NotificationType::Warning,
@@ -870,13 +965,15 @@ impl Workspace {
             return 0;
         }
 
-        let added = self.selection.update(cx, |selection, selection_cx| {
-            let added = selection.add_temporary_blacklist_tokens(&tokens, as_ext);
-            if added > 0 {
-                selection_cx.notify();
-            }
-            added
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::AddTemporaryBlacklist { tokens, as_ext },
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Count(added) = transition.output else {
+            return 0;
+        };
         if added == 0 {
             self.push_notice(
                 NotificationType::Warning,
@@ -915,13 +1012,15 @@ impl Workspace {
             return 0;
         }
 
-        let added = self.selection.update(cx, |selection, selection_cx| {
-            let added = selection.add_temporary_whitelist_tokens(&tokens, as_ext);
-            if added > 0 {
-                selection_cx.notify();
-            }
-            added
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::AddTemporaryWhitelist { tokens, as_ext },
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Count(added) = transition.output else {
+            return 0;
+        };
         if added == 0 {
             self.push_notice(
                 NotificationType::Warning,
@@ -1014,11 +1113,12 @@ impl Workspace {
             let _ = this.update(cx, |this, cx| match content {
                 Ok(content) => {
                     let language = this.language(cx);
-                    this.settings.update(cx, |settings, settings_cx| {
-                        let added = settings.import_blacklist_content(&content);
-                        settings_cx.notify();
-                        added
-                    });
+                    let _ = this.dispatch(
+                        crate::application::store::WorkspaceAction::Draft(
+                            crate::application::store::DraftAction::ImportBlacklist(content),
+                        ),
+                        cx,
+                    );
                     this.invalidate_rules_panel_cache();
                     this.persist_settings_async(cx);
                     this.refresh_preflight(cx);
@@ -1042,13 +1142,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ui.update(cx, |ui, ui_cx| {
-            let changed = ui.set_pending_confirmation(PendingConfirmation::ResetBlacklist);
-            if changed {
-                ui_cx.notify();
-            }
-            changed
-        }) {
+        if matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Navigation(
+                    crate::application::store::NavigationAction::SetPendingConfirmation(
+                        PendingConfirmation::ResetBlacklist,
+                    ),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        ) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_reset_notice"),
@@ -1058,10 +1163,12 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.reset_blacklist();
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::ResetBlacklist,
+            ),
+            cx,
+        );
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
@@ -1079,13 +1186,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if self.ui.update(cx, |ui, ui_cx| {
-            let changed = ui.set_pending_confirmation(PendingConfirmation::ClearBlacklist);
-            if changed {
-                ui_cx.notify();
-            }
-            changed
-        }) {
+        if matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Navigation(
+                    crate::application::store::NavigationAction::SetPendingConfirmation(
+                        PendingConfirmation::ClearBlacklist,
+                    ),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        ) {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "confirm_clear_notice"),
@@ -1095,10 +1207,12 @@ impl Workspace {
             return;
         }
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.clear_blacklist();
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::ClearBlacklist,
+            ),
+            cx,
+        );
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
@@ -1117,13 +1231,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        let cleared = self.selection.update(cx, |selection, selection_cx| {
-            let cleared = selection.clear_temporary_blacklist();
-            if cleared {
-                selection_cx.notify();
-            }
-            cleared
-        });
+        let cleared = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::ClearTemporaryBlacklist,
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if !cleared {
             self.push_notice(
                 NotificationType::Warning,
@@ -1149,13 +1266,16 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        let cleared = self.selection.update(cx, |selection, selection_cx| {
-            let cleared = selection.clear_temporary_whitelist();
-            if cleared {
-                selection_cx.notify();
-            }
-            cleared
-        });
+        let cleared = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::ClearTemporaryWhitelist,
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if !cleared {
             self.push_notice(
                 NotificationType::Warning,
@@ -1185,13 +1305,16 @@ impl Workspace {
             1 => TemporaryWhitelistMode::WhitelistOnly,
             _ => TemporaryWhitelistMode::WhitelistThenBlacklist,
         };
-        let changed = self.selection.update(cx, |selection, selection_cx| {
-            let changed = selection.set_temporary_whitelist_mode(mode);
-            if changed {
-                selection_cx.notify();
-            }
-            changed
-        });
+        let changed = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::SetWhitelistMode(mode),
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if !changed {
             return;
         }
@@ -1211,10 +1334,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.set_compress(*checked);
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetCompress(*checked),
+            ),
+            cx,
+        );
         self.persist_settings_async(cx);
     }
 
@@ -1225,12 +1350,13 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.set_use_gitignore(*checked);
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetUseGitignore(*checked),
+            ),
+            cx,
+        );
         self.persist_settings_async(cx);
-        self.refresh_preflight(cx);
     }
 
     pub(super) fn toggle_ignore_git(
@@ -1240,10 +1366,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.set_ignore_git(*checked);
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetIgnoreGit(*checked),
+            ),
+            cx,
+        );
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
@@ -1251,10 +1379,12 @@ impl Workspace {
 
     pub(super) fn toggle_dedupe(&mut self, checked: &bool, _: &mut Window, cx: &mut Context<Self>) {
         self.clear_pending_confirmation(cx);
-        self.selection.update(cx, |selection, selection_cx| {
-            selection.set_dedupe_exact_path(*checked);
-            selection_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetDedupe(*checked),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn set_output_format(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
@@ -1265,19 +1395,23 @@ impl Workspace {
             _ => OutputFormat::Default,
         };
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.set_output_format(format);
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::SetOutputFormat(format),
+            ),
+            cx,
+        );
         self.persist_settings_async(cx);
     }
 
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
         if *ix == 1 && !self.result_has_content(cx) {
-            self.result.update(cx, |result, result_cx| {
-                result.set_active_tab(ResultTab::Tree);
-                result_cx.notify();
-            });
+            let _ = self.dispatch(
+                crate::application::store::WorkspaceAction::Execution(
+                    crate::application::store::ExecutionAction::SetResultTab(ResultTab::Tree),
+                ),
+                cx,
+            );
             return;
         }
         let active_tab = if *ix == 0 {
@@ -1285,13 +1419,14 @@ impl Workspace {
         } else {
             ResultTab::Content
         };
-        self.result.update(cx, |result, result_cx| {
-            result.set_active_tab(active_tab);
-            result_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::SetResultTab(active_tab),
+            ),
+            cx,
+        );
         if active_tab == ResultTab::Content {
             self.load_merged_content_preview(cx);
-            self.ensure_background_polling(cx);
         }
     }
 
@@ -1306,11 +1441,12 @@ impl Workspace {
         } else {
             SidePanelTab::Rules
         };
-        self.ui.update(cx, |ui, ui_cx| {
-            if ui.set_side_panel_tab(tab) {
-                ui_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetSidePanelTab(tab),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn set_narrow_content_tab(
@@ -1324,11 +1460,12 @@ impl Workspace {
         } else {
             NarrowContentTab::Results
         };
-        self.ui.update(cx, |ui, ui_cx| {
-            if ui.set_narrow_content_tab(tab) {
-                ui_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetNarrowContentTab(tab),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn toggle_content_file_list_collapsed(
@@ -1337,12 +1474,13 @@ impl Workspace {
         _: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        self.ui.update(cx, |ui, ui_cx| {
-            let collapsed = !ui.state().content_file_list_collapsed;
-            if ui.set_content_file_list_collapsed(collapsed) {
-                ui_cx.notify();
-            }
-        });
+        let collapsed = !self.ui_state(cx).content_file_list_collapsed;
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetContentFileListCollapsed(collapsed),
+            ),
+            cx,
+        );
     }
 
     pub(super) fn expand_tree(
@@ -1437,10 +1575,12 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        self.settings.update(cx, |settings, settings_cx| {
-            settings.remove_blacklist_item(kind, &value);
-            settings_cx.notify();
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(
+                crate::application::store::DraftAction::RemoveBlacklist { kind, value },
+            ),
+            cx,
+        );
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
@@ -1460,17 +1600,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        let removed = self.selection.update(cx, |selection, selection_cx| {
-            let before = selection.snapshot();
-            selection.remove_temporary_blacklist_item(kind, &value);
-            let after = selection.snapshot();
-            let removed = before.temp_folder_blacklist != after.temp_folder_blacklist
-                || before.temp_ext_blacklist != after.temp_ext_blacklist;
-            if removed {
-                selection_cx.notify();
-            }
-            removed
-        });
+        let removed = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::RemoveTemporaryBlacklist {
+                        kind,
+                        value,
+                    },
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if removed {
             self.refresh_preflight(cx);
             self.push_notice(
@@ -1490,17 +1632,19 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         self.clear_pending_confirmation(cx);
-        let removed = self.selection.update(cx, |selection, selection_cx| {
-            let before = selection.snapshot();
-            selection.remove_temporary_whitelist_item(kind, &value);
-            let after = selection.snapshot();
-            let removed = before.temp_folder_whitelist != after.temp_folder_whitelist
-                || before.temp_ext_whitelist != after.temp_ext_whitelist;
-            if removed {
-                selection_cx.notify();
-            }
-            removed
-        });
+        let removed = matches!(
+            self.dispatch(
+                crate::application::store::WorkspaceAction::Draft(
+                    crate::application::store::DraftAction::RemoveTemporaryWhitelist {
+                        kind,
+                        value,
+                    },
+                ),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        );
         if removed {
             self.refresh_preflight(cx);
             self.push_notice(
@@ -1518,31 +1662,37 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let save_revision = self.result.update(cx, |result, result_cx| {
-            let revision = result.begin_save();
-            if revision.is_some() {
-                result_cx.notify();
-            }
-            revision
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::BeginSave,
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::SaveRevision(save_revision) =
+            transition.output
+        else {
+            return;
+        };
         let Some(save_revision) = save_revision else {
             return;
         };
         let result = self.result.read(cx).state().result.clone();
         let Some(result) = result.as_ref() else {
-            self.result.update(cx, |result, result_cx| {
-                if result.cancel_save(save_revision) {
-                    result_cx.notify();
-                }
-            });
+            let _ = self.dispatch(
+                crate::application::store::WorkspaceAction::Execution(
+                    crate::application::store::ExecutionAction::CancelSave(save_revision),
+                ),
+                cx,
+            );
             return;
         };
         let Some(path) = &result.merged_content_path else {
-            self.result.update(cx, |result, result_cx| {
-                if result.cancel_save(save_revision) {
-                    result_cx.notify();
-                }
-            });
+            let _ = self.dispatch(
+                crate::application::store::WorkspaceAction::Execution(
+                    crate::application::store::ExecutionAction::CancelSave(save_revision),
+                ),
+                cx,
+            );
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "mode_tree_only_desc"),
@@ -1564,11 +1714,12 @@ impl Workspace {
 
             let Some(save_path) = save_path else {
                 let _ = this.update(cx, |this, cx| {
-                    this.result.update(cx, |result, result_cx| {
-                        if result.cancel_save(save_revision) {
-                            result_cx.notify();
-                        }
-                    });
+                    let _ = this.dispatch(
+                        crate::application::store::WorkspaceAction::Execution(
+                            crate::application::store::ExecutionAction::CancelSave(save_revision),
+                        ),
+                        cx,
+                    );
                 });
                 return;
             };
@@ -1587,11 +1738,15 @@ impl Workspace {
             };
 
             let _ = this.update(cx, |this, cx| {
-                this.result.update(cx, |result, result_cx| {
-                    if result.finish_save(save_revision, succeeded) {
-                        result_cx.notify();
-                    }
-                });
+                let _ = this.dispatch(
+                    crate::application::store::WorkspaceAction::Execution(
+                        crate::application::store::ExecutionAction::FinishSave {
+                            revision: save_revision,
+                            succeeded,
+                        },
+                    ),
+                    cx,
+                );
                 if let Some(window) = cx.active_window() {
                     let _ = window.update(cx, |_, window, cx| {
                         window.push_notification((notice.0, SharedString::from(notice.1)), cx);

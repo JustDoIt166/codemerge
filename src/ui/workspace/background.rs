@@ -1,22 +1,21 @@
 use std::ops::Range;
 use std::rc::Rc;
-use std::sync::mpsc::TryRecvError;
-use std::time::Duration;
 
 use gpui::Context;
 use gpui_component::notification::NotificationType;
 
 use super::view::TreeExpansionMode;
 use super::{Workspace, model};
-use crate::domain::{ProcessResult, ResultTab};
+use crate::application::task::TaskPayload;
+use crate::domain::ProcessResult;
 use crate::services::preflight::{PreflightEvent, PreflightRequest};
 use crate::services::preview::{
     EXCERPT_PREVIEW_BYTES, PreviewEvent, PreviewRequest, create_excerpt_preview,
-    start as start_preview,
 };
 use crate::ui::models::ProcessEventEffect;
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewEventEffect;
+use crate::ui::view_model::ResultTab;
 
 impl Workspace {
     pub(super) fn sync_tree_selection_for_preview_file(
@@ -30,21 +29,17 @@ impl Workspace {
             return false;
         };
 
-        let selected_changed =
-            self.state.workspace.tree_panel.selected_node_id.as_deref() != Some(node_id.as_str());
-        self.state.workspace.tree_panel.selected_node_id = Some(node_id.clone());
+        let mut tree_state = self.tree_state(cx);
+        let selected_changed = tree_state.selected_node_id.as_deref() != Some(node_id.as_str());
+        tree_state.selected_node_id = Some(node_id.clone());
 
         let mut expansion_changed = false;
         for ancestor in model::ancestor_node_ids(&node_id) {
-            expansion_changed |= self
-                .state
-                .workspace
-                .tree_panel
-                .expanded_ids
-                .insert(ancestor);
+            expansion_changed |= tree_state.expanded_ids.insert(ancestor);
         }
 
         if selected_changed || expansion_changed {
+            self.set_tree_state(tree_state, cx);
             self.sync_tree(cx);
         }
 
@@ -71,27 +66,69 @@ impl Workspace {
     ) {
         let preview_state = self.preview.read(cx).state();
         if preview_state.selected_preview_file_id == Some(file_id)
-            && (preview_state.preview_document.is_some() || preview_state.preview_rx.is_some())
+            && (preview_state.preview_document.is_some()
+                || preview_state.pending_request_type.is_some())
         {
             return;
         }
 
-        let request = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview.open_preview(file_id, preview_path);
-            preview_cx.notify();
-            request
-        });
-        self.start_preview_request(request, cx);
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::Open {
+                    file_id,
+                    path: preview_path,
+                },
+            ),
+            cx,
+        );
     }
 
-    fn start_preview_request(&mut self, request: PreviewRequest, cx: &mut Context<Self>) {
-        self.preview.update(cx, |preview, _| {
-            preview.set_preview_rx(Some(start_preview(request)));
+    pub(super) fn start_preview_request(
+        &mut self,
+        request: PreviewRequest,
+        cx: &mut Context<Self>,
+    ) {
+        let mut stream = match self.coordinator.read(cx).start_preview(request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Preview(
+                        crate::application::store::PreviewAction::SetError(error.to_string()),
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let preview_pane = self.preview_pane_view.clone();
+        cx.defer(move |cx| {
+            preview_pane.update(cx, |view, _| view.scroll_to_top());
         });
-        self.preview_pane_view.update(cx, |view, _| {
-            view.scroll_to_top();
-        });
-        self.ensure_background_polling(cx);
+        cx.spawn(async move |this, cx| {
+            while let Some(envelope) = stream.events.recv().await {
+                match envelope.payload {
+                    TaskPayload::Event(event) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_preview_events(vec![event], cx);
+                        });
+                    }
+                    TaskPayload::Failed(error) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            let _ = workspace.dispatch(
+                                crate::application::store::WorkspaceAction::Preview(
+                                    crate::application::store::PreviewAction::SetError(
+                                        error.to_string(),
+                                    ),
+                                ),
+                                cx,
+                            );
+                        });
+                    }
+                    TaskPayload::Finished => break,
+                }
+            }
+        })
+        .detach();
     }
 
     pub(super) fn load_merged_content_preview(&mut self, cx: &mut Context<Self>) {
@@ -109,7 +146,7 @@ impl Workspace {
         let preview_state = self.preview.read(cx).state();
         if preview_state.selected_preview_file_id == Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
             && (preview_state.preview_document.is_some()
-                || preview_state.preview_rx.is_some()
+                || preview_state.pending_request_type.is_some()
                 || preview_state
                     .deferred_preview
                     .as_ref()
@@ -120,29 +157,34 @@ impl Workspace {
 
         match std::fs::metadata(&merged_content_path) {
             Ok(metadata) if metadata.len() > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES => {
-                self.preview.update(cx, |preview, preview_cx| {
-                    preview.defer_preview(
-                        super::MERGED_CONTENT_PREVIEW_FILE_ID,
-                        merged_content_path.clone(),
-                        metadata.len(),
-                        EXCERPT_PREVIEW_BYTES,
-                    );
-                    preview_cx.notify();
-                });
-                self.preview_pane_view.update(cx, |view, _| {
-                    view.scroll_to_top();
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Preview(
+                        crate::application::store::PreviewAction::Defer {
+                            file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                            source_path: merged_content_path.clone(),
+                            source_byte_len: metadata.len(),
+                            excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
+                        },
+                    ),
+                    cx,
+                );
+                let preview_pane = self.preview_pane_view.clone();
+                cx.defer(move |cx| {
+                    preview_pane.update(cx, |view, _| view.scroll_to_top());
                 });
                 return;
             }
             Err(error) => {
                 let language = self.language(cx);
-                self.preview.update(cx, |preview, preview_cx| {
-                    preview.set_preview_error_message(format!(
-                        "{}: {error}",
-                        crate::utils::i18n::tr(language, "merged_content_unavailable")
-                    ));
-                    preview_cx.notify();
-                });
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Preview(
+                        crate::application::store::PreviewAction::SetError(format!(
+                            "{}: {error}",
+                            crate::utils::i18n::tr(language, "merged_content_unavailable")
+                        )),
+                    ),
+                    cx,
+                );
                 return;
             }
             Ok(_) => {}
@@ -172,24 +214,26 @@ impl Workspace {
 
         match create_excerpt_preview(&source_path, EXCERPT_PREVIEW_BYTES) {
             Ok(excerpt_path) => {
-                let request = self.preview.update(cx, |preview, preview_cx| {
-                    let request = preview.open_deferred_excerpt_preview(
-                        super::MERGED_CONTENT_PREVIEW_FILE_ID,
-                        source_path.clone(),
-                        source_byte_len,
-                        EXCERPT_PREVIEW_BYTES,
-                        excerpt_path,
-                    );
-                    preview_cx.notify();
-                    request
-                });
-                self.start_preview_request(request, cx);
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Preview(
+                        crate::application::store::PreviewAction::OpenDeferredExcerpt {
+                            file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                            source_path: source_path.clone(),
+                            source_byte_len,
+                            excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
+                            excerpt_path,
+                        },
+                    ),
+                    cx,
+                );
             }
             Err(error) => {
-                self.preview.update(cx, |preview, preview_cx| {
-                    preview.set_preview_error_message(error.to_string());
-                    preview_cx.notify();
-                });
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Preview(
+                        crate::application::store::PreviewAction::SetError(error.to_string()),
+                    ),
+                    cx,
+                );
             }
         }
     }
@@ -208,145 +252,15 @@ impl Workspace {
             return;
         };
 
-        let request = self.preview.update(cx, |preview, preview_cx| {
-            let request = preview
-                .open_deferred_full_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, source_path);
-            preview_cx.notify();
-            request
-        });
-        self.start_preview_request(request, cx);
-    }
-
-    pub(super) fn poll_background(&mut self, cx: &mut Context<Self>) -> Option<Duration> {
-        let mut received_events = false;
-
-        if let Some(rx) = self
-            .process
-            .update(cx, |process, _| process.state_mut().preflight_rx.take())
-        {
-            let mut keep = true;
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => {
-                        self.apply_preflight_event(event, cx);
-                        received_events = true;
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        keep = false;
-                        break;
-                    }
-                }
-            }
-            if keep {
-                self.process
-                    .update(cx, |process, _| process.state_mut().preflight_rx = Some(rx));
-            }
-        }
-
-        let (events, disconnected) = self.process.update(cx, |process, _| {
-            let mut events = Vec::new();
-            let mut disconnected = false;
-            if let Some(handle) = process.state_mut().process_handle.as_mut() {
-                loop {
-                    match handle.receiver.try_recv() {
-                        Ok(event) => events.push(event),
-                        Err(TryRecvError::Empty) => break,
-                        Err(TryRecvError::Disconnected) => {
-                            disconnected = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            (events, disconnected)
-        });
-        let mut finish_processing = false;
-        let mut completed_successfully = false;
-        let mut terminal_received = false;
-        for event in events {
-            received_events = true;
-            let (event_completed, event_finished) = self.apply_process_event(event, cx);
-            completed_successfully |= event_completed;
-            terminal_received |= event_finished;
-            finish_processing = event_finished || finish_processing;
-        }
-        if disconnected && !terminal_received {
-            let language = self.language(cx);
-            let error =
-                crate::utils::i18n::tr(language, "process_channel_disconnected").to_string();
-            self.process.update(cx, |process, process_cx| {
-                process.state_mut().fail_disconnected_run(error.clone());
-                process_cx.notify();
-            });
-            Self::notify_active_window(cx, NotificationType::Error, error);
-        }
-        if finish_processing {
-            self.process
-                .update(cx, |process, _| process.state_mut().finish_run());
-        }
-        if completed_successfully && self.clear_temporary_merge_filters(cx) {
-            self.refresh_preflight_internal(true, cx);
-        }
-
-        if let Some(rx) = self
-            .preview
-            .update(cx, |preview, _| preview.take_preview_rx())
-        {
-            let mut keep = true;
-            let mut events = Vec::new();
-            loop {
-                match rx.try_recv() {
-                    Ok(event) => {
-                        received_events = true;
-                        events.push(event);
-                    }
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => {
-                        keep = false;
-                        break;
-                    }
-                }
-            }
-            if !events.is_empty() {
-                self.apply_preview_events(events, cx);
-            }
-            if !keep {
-                self.preview.update(cx, |preview, _| {
-                    preview.clear_request();
-                });
-            }
-            if keep {
-                self.preview
-                    .update(cx, |preview, _| preview.set_preview_rx(Some(rx)));
-            }
-        }
-
-        let active = self.needs_background_polling(cx);
-        if active {
-            self.poll_idle_streak = if received_events {
-                0
-            } else {
-                self.poll_idle_streak.saturating_add(1)
-            };
-        }
-        let next_delay = if active {
-            Some(match self.poll_idle_streak {
-                0..=1 => Duration::from_millis(16),
-                2..=5 => Duration::from_millis(33),
-                _ => Duration::from_millis(66),
-            })
-        } else {
-            None
-        };
-
-        if next_delay.is_none() {
-            self.poll_task_running = false;
-            self.poll_task = None;
-            self.poll_idle_streak = 0;
-        }
-
-        next_delay
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::OpenDeferredFull {
+                    file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                    path: source_path,
+                },
+            ),
+            cx,
+        );
     }
 
     fn apply_preflight_event(&mut self, event: PreflightEvent, cx: &mut Context<Self>) {
@@ -361,33 +275,12 @@ impl Workspace {
             }
             _ => None,
         };
-        let language = self.language(cx);
-        self.process.update(cx, |process, process_cx| {
-            let before = (
-                process.state().ui_status,
-                process.state().preflight.total_files,
-                process.state().preflight.skipped_files,
-                process.state().preflight.to_process_files,
-                process.state().preflight.scanned_entries,
-                process.state().preflight.is_scanning,
-                process.state().processing_current_file.clone(),
-                process.state().last_error.clone(),
-            );
-            process.apply_preflight_event(event, language);
-            let after = (
-                process.state().ui_status,
-                process.state().preflight.total_files,
-                process.state().preflight.skipped_files,
-                process.state().preflight.to_process_files,
-                process.state().preflight.scanned_entries,
-                process.state().preflight.is_scanning,
-                process.state().processing_current_file.clone(),
-                process.state().last_error.clone(),
-            );
-            if before != after {
-                process_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::Preflight(event),
+            ),
+            cx,
+        );
         if let Some(files) = completed_files {
             let data = model::build_preflight_tree_panel_data(
                 files.as_ref(),
@@ -401,11 +294,11 @@ impl Workspace {
             self.tree_panel.total_summary = model::TreeCountSummary::default();
             self.tree_panel.last_filter.clear();
             if initialize_expansion {
-                self.state.workspace.reset_tree();
+                let mut tree_state = crate::ui::state::TreePanelState::default();
                 if let Some(data) = self.tree_panel.data.as_ref() {
-                    self.state.workspace.tree_panel.expanded_ids =
-                        data.index.default_expanded_ids.clone();
+                    tree_state.expanded_ids = data.index.default_expanded_ids.clone();
                 }
+                self.set_tree_state(tree_state, cx);
             }
             self.tree_pane_view.update(cx, |view, _| {
                 view.view_mode = super::TreeViewMode::Tree;
@@ -414,47 +307,40 @@ impl Workspace {
         }
     }
 
-    fn apply_process_event(
+    pub(super) fn apply_process_event(
         &mut self,
         event: crate::services::process::ProcessEvent,
         cx: &mut Context<Self>,
     ) -> (bool, bool) {
+        self.apply_process_events(vec![event], cx)
+    }
+
+    pub(super) fn apply_process_events(
+        &mut self,
+        events: Vec<crate::services::process::ProcessEvent>,
+        cx: &mut Context<Self>,
+    ) -> (bool, bool) {
+        if events.is_empty() {
+            return (false, false);
+        }
+        perf::record_progress_batch(events.len());
         let language = self.language(cx);
-        match self.process.update(cx, |process, process_cx| {
-            let before = (
-                process.state().ui_status,
-                process.state().processing_records.len(),
-                process.state().processing_scanned,
-                process.state().processing_candidates,
-                process.state().processing_skipped,
-                process.state().processing_current_file.clone(),
-                process.state().last_error.clone(),
-            );
-            let effect = process.apply_process_event(event, language);
-            let after = (
-                process.state().ui_status,
-                process.state().processing_records.len(),
-                process.state().processing_scanned,
-                process.state().processing_candidates,
-                process.state().processing_skipped,
-                process.state().processing_current_file.clone(),
-                process.state().last_error.clone(),
-            );
-            if before != after {
-                process_cx.notify();
-            }
-            effect
-        }) {
-            ProcessEventEffect::Continue => (false, false),
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::ProcessBatch(events),
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Process(effect) = transition.output else {
+            return (false, false);
+        };
+        match effect {
+            ProcessEventEffect::Ignored | ProcessEventEffect::Continue => (false, false),
             ProcessEventEffect::Completed(result) => {
-                self.set_result(*result, cx);
-                let language = self.language(cx);
-                let (completed, succeeded) = self.process.update(cx, |process, _| {
-                    (
-                        process.state().processing_completed,
-                        process.state().processing_succeeded,
-                    )
-                });
+                self.install_result_views(result.as_ref(), cx);
+                let process = self.process.read(cx).state();
+                let completed = process.processing_completed;
+                let succeeded = process.processing_succeeded;
                 let failed = completed.saturating_sub(succeeded);
                 if failed == 0 {
                     Self::notify_active_window(
@@ -498,24 +384,32 @@ impl Workspace {
         }
     }
 
+    pub(super) fn handle_process_event(
+        &mut self,
+        event: crate::services::process::ProcessEvent,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.apply_process_event(event, cx);
+    }
+
+    pub(super) fn handle_process_events(
+        &mut self,
+        events: Vec<crate::services::process::ProcessEvent>,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.apply_process_events(events, cx);
+    }
+
     fn apply_preview_events(&mut self, events: Vec<PreviewEvent>, cx: &mut Context<Self>) {
-        let effect = self.preview.update(cx, |preview, preview_cx| {
-            let before = (
-                preview.state().selected_preview_file_id,
-                preview.state().preview_error.clone(),
-                preview.render_revision(),
-            );
-            let effect = preview.apply_events(events);
-            let after = (
-                preview.state().selected_preview_file_id,
-                preview.state().preview_error.clone(),
-                preview.render_revision(),
-            );
-            if before != after {
-                preview_cx.notify();
-            }
-            effect
-        });
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::ApplyMany(events),
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::Preview(effect) = transition.output else {
+            return;
+        };
         if matches!(effect, PreviewEventEffect::ScrollTop) {
             self.preview_pane_view.update(cx, |view, _| {
                 view.scroll_to_top();
@@ -524,7 +418,19 @@ impl Workspace {
         self.request_queued_preview_range(cx);
     }
 
+    #[cfg(test)]
     pub(super) fn set_result(&mut self, result: ProcessResult, cx: &mut Context<Self>) {
+        let view_result = result.clone();
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::SetResult(result),
+            ),
+            cx,
+        );
+        self.install_result_views(&view_result, cx);
+    }
+
+    fn install_result_views(&mut self, result: &ProcessResult, cx: &mut Context<Self>) {
         self.cleanup_current_result_artifacts();
         self.preview_table_cache = super::PreviewTableCache::default();
         self.result_artifacts = super::ResultArtifacts {
@@ -532,26 +438,18 @@ impl Workspace {
             merged_content_path: result.merged_content_path.clone(),
             preview_blob_dir: result.preview_blob_dir.clone(),
         };
-        self.result.update(cx, |result_model, result_cx| {
-            result_model.set_result(result);
-            result_cx.notify();
-        });
-        self.preview.update(cx, |preview, preview_cx| {
-            preview.clear();
-            preview_cx.notify();
-        });
-        let result = self.result.read(cx);
-        self.tree_panel.data = model::build_tree_panel_data(result.state().result.as_ref());
+        self.tree_panel.data = model::build_tree_panel_data(Some(result));
         self.tree_panel.input_exclusion_enabled = false;
         self.tree_panel.projection = model::TreeProjectionState::default();
         self.tree_panel.last_interaction = None;
         self.tree_panel.render_state = model::TreeRenderState::default();
         self.tree_panel.total_summary = model::TreeCountSummary::default();
         self.tree_panel.last_filter.clear();
-        self.state.workspace.reset_tree();
+        let mut tree_state = crate::ui::state::TreePanelState::default();
         if let Some(data) = self.tree_panel.data.as_ref() {
-            self.state.workspace.tree_panel.expanded_ids = data.index.default_expanded_ids.clone();
+            tree_state.expanded_ids = data.index.default_expanded_ids.clone();
         }
+        self.set_tree_state(tree_state, cx);
         self.sync_tree(cx);
         self.sync_preview_table(cx);
     }
@@ -562,17 +460,19 @@ impl Workspace {
 
     pub(super) fn sync_tree_with_mode(&mut self, mode: TreeExpansionMode, cx: &mut Context<Self>) {
         perf::record_tree_sync();
+        let mut tree_state = self.tree_state(cx);
         if let Some(data) = self.tree_panel.data.as_ref() {
             match mode {
                 TreeExpansionMode::Default => {}
                 TreeExpansionMode::ExpandAll => {
-                    self.state.workspace.tree_panel.expanded_ids = data.index.folder_ids.clone();
+                    tree_state.expanded_ids = data.index.folder_ids.clone();
                 }
                 TreeExpansionMode::CollapseAll => {
-                    self.state.workspace.tree_panel.expanded_ids.clear();
+                    tree_state.expanded_ids.clear();
                 }
             }
         }
+        self.set_tree_state(tree_state.clone(), cx);
 
         let filter = self
             .tree_panel
@@ -599,8 +499,8 @@ impl Workspace {
         let render_state = model::build_tree_render_state(
             &self.tree_panel.projection,
             !filter.is_empty(),
-            &self.state.workspace.tree_panel.expanded_ids,
-            self.state.workspace.tree_panel.selected_node_id.as_deref(),
+            &tree_state.expanded_ids,
+            tree_state.selected_node_id.as_deref(),
         );
         let replace_items =
             self.tree_panel.render_state.structure_signature != render_state.structure_signature;
@@ -698,12 +598,12 @@ impl Workspace {
         }
 
         let preview_row_count = table_model.rows.len();
-        self.result.update(cx, |result, result_cx| {
-            if result.state().preview_row_count != preview_row_count {
-                result.set_preview_row_count(preview_row_count);
-                result_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::SetPreviewRowCount(preview_row_count),
+            ),
+            cx,
+        );
         self.suppress_preview_table_events = true;
         self.preview_table.update(cx, |table, cx| {
             let prev_rows = table.delegate().rows.clone();
@@ -726,7 +626,7 @@ impl Workspace {
         self.refresh_preflight_internal(false, cx);
     }
 
-    fn refresh_preflight_internal(
+    pub(super) fn refresh_preflight_internal(
         &mut self,
         preserve_completed_status: bool,
         cx: &mut Context<Self>,
@@ -735,67 +635,75 @@ impl Workspace {
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_filters = self.effective_filters(cx);
-        let revision = self.process.update(cx, |process, process_cx| {
-            let is_processing = process.is_processing();
-            let state = process.state_mut();
-            state.preflight_revision += 1;
-            state.preflight_preserves_status = preserve_completed_status
-                && state.ui_status == crate::ui::state::ProcessUiStatus::Completed;
-            if !is_processing {
-                if !state.preflight_preserves_status {
-                    state.ui_status = crate::ui::state::ProcessUiStatus::Preflight;
-                }
-                state.last_error = None;
-            }
-            process_cx.notify();
-            state.preflight_revision
-        });
-        let rx = crate::services::preflight::start_with_options(
-            PreflightRequest {
-                revision,
-                selected_folder: selection.selected_folder.clone(),
-                selected_files: selection
-                    .selected_files
-                    .iter()
-                    .map(|f| f.path.clone())
-                    .collect(),
-                folder_blacklist: effective_filters.folder_blacklist,
-                ext_blacklist: effective_filters.ext_blacklist,
-                excluded_files: effective_filters.excluded_files,
-                folder_whitelist: effective_filters.folder_whitelist,
-                ext_whitelist: effective_filters.ext_whitelist,
-                whitelist_mode: effective_filters.whitelist_mode,
-            },
-            crate::processor::walker::WalkerOptions {
-                use_gitignore: settings.options.use_gitignore,
-                ignore_git: settings.options.ignore_git,
-            },
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Execution(
+                crate::application::store::ExecutionAction::BeginPreflight {
+                    preserve_completed_status,
+                },
+            ),
+            cx,
         );
-        self.process.update(cx, |process, process_cx| {
-            process.state_mut().preflight_rx = Some(rx);
-            process_cx.notify();
-        });
-        self.ensure_background_polling(cx);
-    }
-
-    pub(super) fn clear_temporary_merge_filters(&mut self, cx: &mut Context<Self>) -> bool {
-        self.selection.update(cx, |selection, selection_cx| {
-            let cleared = selection.clear_temporary_merge_filters();
-            if cleared {
-                selection_cx.notify();
+        let crate::application::store::ActionOutput::PreflightRevision(revision) =
+            transition.output
+        else {
+            return;
+        };
+        let request = PreflightRequest {
+            revision,
+            selected_folder: selection.selected_folder.clone(),
+            selected_files: selection
+                .selected_files
+                .iter()
+                .map(|f| f.path.clone())
+                .collect(),
+            folder_blacklist: effective_filters.folder_blacklist,
+            ext_blacklist: effective_filters.ext_blacklist,
+            excluded_files: effective_filters.excluded_files,
+            folder_whitelist: effective_filters.folder_whitelist,
+            ext_whitelist: effective_filters.ext_whitelist,
+            whitelist_mode: effective_filters.whitelist_mode,
+        };
+        let options = crate::processor::walker::WalkerOptions {
+            use_gitignore: settings.options.use_gitignore,
+            ignore_git: settings.options.ignore_git,
+        };
+        let mut stream = match self.coordinator.read(cx).start_preflight(request, options) {
+            Ok(stream) => stream,
+            Err(error) => {
+                self.apply_preflight_event(PreflightEvent::Failed { revision, error }, cx);
+                return;
             }
-            cleared
+        };
+        cx.spawn(async move |this, cx| {
+            while let Some(envelope) = stream.events.recv().await {
+                match envelope.payload {
+                    TaskPayload::Event(event) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_preflight_event(event, cx);
+                        });
+                    }
+                    TaskPayload::Failed(error) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_preflight_event(
+                                PreflightEvent::Failed { revision, error },
+                                cx,
+                            );
+                        });
+                    }
+                    TaskPayload::Finished => break,
+                }
+            }
         })
+        .detach();
     }
 
     pub(super) fn clear_preview_state(&mut self, cx: &mut Context<Self>) {
-        self.preview.update(cx, |preview, preview_cx| {
-            let before = preview.render_revision();
-            preview.clear();
-            if before != preview.render_revision() {
-                preview_cx.notify();
-            }
-        });
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::Clear,
+            ),
+            cx,
+        );
     }
 
     pub(super) fn sync_tree_interaction(&mut self, cx: &mut Context<Self>) -> bool {
@@ -803,11 +711,13 @@ impl Workspace {
             return false;
         }
         let next = self.current_tree_interaction_snapshot(cx);
+        let mut tree_state = self.tree_state(cx);
         let effect = model::apply_tree_interaction(
-            &mut self.state.workspace.tree_panel,
+            &mut tree_state,
             self.tree_panel.last_interaction.as_ref(),
             next.clone(),
         );
+        self.set_tree_state(tree_state, cx);
         self.tree_panel.last_interaction = next;
         self.apply_tree_panel_effect(effect, cx)
     }
@@ -843,10 +753,14 @@ impl Workspace {
                 true
             }
             model::TreePanelEffect::SwitchToContentAndOpen(file_id) => {
-                self.result.update(cx, |result, result_cx| {
-                    result.set_active_tab(ResultTab::Content);
-                    result_cx.notify();
-                });
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Execution(
+                        crate::application::store::ExecutionAction::SetResultTab(
+                            ResultTab::Content,
+                        ),
+                    ),
+                    cx,
+                );
                 self.load_preview(file_id, cx);
                 true
             }
@@ -866,16 +780,17 @@ impl Workspace {
             return false;
         }
 
-        let Some(request) = self.preview.update(cx, |preview, _| {
-            preview.load_preview_range_request(range, direction)
-        }) else {
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::RequestRange { range, direction },
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::PreviewRequest(Some(_)) = transition.output
+        else {
             return false;
         };
         perf::record_preview_range_request();
-        self.preview.update(cx, |preview, _| {
-            preview.set_preview_rx(Some(start_preview(request)));
-        });
-        self.ensure_background_polling(cx);
         true
     }
 
@@ -899,18 +814,19 @@ impl Workspace {
     }
 
     fn request_queued_preview_range(&mut self, cx: &mut Context<Self>) {
-        let queued = self.preview.update(cx, |preview, _| {
-            if preview.state().preview_requested_range.is_some() {
-                return None;
-            }
-            preview.take_queued_preview_range()
-        });
-        if let Some(range) = queued {
-            let _ = self.request_preview_range(
-                range,
-                crate::ui::preview_model::PreviewScrollDirection::Down,
-                cx,
-            );
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::Preview(
+                crate::application::store::PreviewAction::RequestQueuedRange {
+                    direction: crate::ui::preview_model::PreviewScrollDirection::Down,
+                },
+            ),
+            cx,
+        );
+        if matches!(
+            transition.output,
+            crate::application::store::ActionOutput::PreviewRequest(Some(_))
+        ) {
+            perf::record_preview_range_request();
         }
     }
 }

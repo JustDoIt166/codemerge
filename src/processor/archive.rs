@@ -4,6 +4,8 @@ use std::path::Path;
 
 use zip::ZipArchive;
 
+use crate::processor::error::{ProcessorError, ProcessorResult};
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ZipFileEntry {
     pub archive_name: String,
@@ -15,15 +17,16 @@ pub fn is_zip_path(path: &Path) -> bool {
         .is_some_and(|ext| ext.to_string_lossy().eq_ignore_ascii_case("zip"))
 }
 
-pub fn list_zip_file_entries(path: &Path) -> Result<Vec<ZipFileEntry>, String> {
-    let file = File::open(path).map_err(|e| format!("open zip failed: {e}"))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("open zip failed: {e}"))?;
+pub fn list_zip_file_entries(path: &Path) -> ProcessorResult<Vec<ZipFileEntry>> {
+    let file = File::open(path).map_err(|error| ProcessorError::io("open zip", error))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| ProcessorError::archive("open zip", error))?;
     let mut entries = Vec::new();
 
     for index in 0..archive.len() {
         let entry = archive
             .by_index(index)
-            .map_err(|e| format!("read zip entry #{index} failed: {e}"))?;
+            .map_err(|error| ProcessorError::archive("read zip entry", error))?;
         if entry.is_dir() {
             continue;
         }
@@ -40,16 +43,17 @@ pub fn list_zip_file_entries(path: &Path) -> Result<Vec<ZipFileEntry>, String> {
     Ok(entries)
 }
 
-pub fn read_zip_entry_text(path: &Path, entry_name: &str) -> Result<String, String> {
-    let file = File::open(path).map_err(|e| format!("open zip failed: {e}"))?;
-    let mut archive = ZipArchive::new(file).map_err(|e| format!("open zip failed: {e}"))?;
+pub fn read_zip_entry_text(path: &Path, entry_name: &str) -> ProcessorResult<String> {
+    let file = File::open(path).map_err(|error| ProcessorError::io("open zip", error))?;
+    let mut archive =
+        ZipArchive::new(file).map_err(|error| ProcessorError::archive("open zip", error))?;
     let mut entry = archive
         .by_name(entry_name)
-        .map_err(|e| format!("open zip entry failed: {e}"))?;
+        .map_err(|error| ProcessorError::archive("open zip entry", error))?;
     let mut bytes = Vec::new();
     entry
         .read_to_end(&mut bytes)
-        .map_err(|e| format!("read zip entry failed: {e}"))?;
+        .map_err(|error| ProcessorError::io("read zip entry", error))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 

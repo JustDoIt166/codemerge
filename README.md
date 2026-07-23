@@ -27,6 +27,9 @@ CodeMerge 是一个基于 `Rust + gpui + gpui-component` 的桌面文件合并�
 - macOS 可通过设置环境变量 `CODEMERGE_SYSTEM_TITLEBAR=1` 强制退回系统标题栏，绕过不稳定的自定义标题栏环境
 
 ## 架构概览
+- `src/application/*`
+  - `WorkspaceStore` 是工作区会话状态的唯一事务入口；状态按 draft / execution / preview / navigation 分片，统一通过 Action、Reducer、Effect 和 `ChangeSet` 演进
+  - `WorkspaceCoordinator` 只解释 effect，`TaskSupervisor` 统一管理 Tokio 任务、`JobId`、取消和终态回传；阻塞文件与 CPU 工作通过 `spawn_blocking` 执行
 - `src/domain.rs`
   - 稳定领域类型与默认配置
 - `src/processor/*`
@@ -34,7 +37,8 @@ CodeMerge 是一个基于 `Rust + gpui + gpui-component` 的桌面文件合并�
 - `src/services/*`
   - 预检、处理、预览、树构建、树索引、配置加载保存
 - `src/ui/*`
-  - 应用状态、Workspace 编排、面板视图、交互事件、后台轮询
+  - Workspace 仅保留焦点、单 Store、Coordinator、View 集合和订阅；GPUI 控件、delegate、滚动句柄及渲染缓存归各 View 所有
+  - Pane 使用固定 `ChangeSet` 依赖掩码订阅 Store；无关分片变化不刷新，空闲时没有后台轮询
   - 左侧输入区承载一次性合并规则；Rules 面板只负责持久化规则维护
   - 结果区采用“结果面板容器 + 树面板视图 + 预览面板视图”拆分，避免滚动和树交互放大到整块结果区重绘
   - 目录树采用“过滤投影缓存 + 可见行重建”结构，展开/折叠不再重复做全量过滤投影
@@ -72,6 +76,8 @@ cargo test --locked
   RUST_LOG=gpui=trace cargo run --release 2> trace.log
   ```
 - 仓库内置了 `src/ui/perf.rs` 的轻量计数器，供测试和本地调试统计：
+  - Store dispatch、进度批次数与批内事件数
+  - 活动记录队列峰值
   - 子视图条件刷新次数
   - `sync_tree()` 次数与 `tree.set_items()` 次数
   - `sync_preview_table()` 次数
@@ -108,4 +114,3 @@ cargo test --locked
 
 ## 已知限制
 - `.gitignore` 的否定规则 `!` 目前不支持
-- `Workspace` 仍负责跨面板动作编排和资源生命周期，后续还可以继续把更多动作型逻辑下沉到独立 controller/service

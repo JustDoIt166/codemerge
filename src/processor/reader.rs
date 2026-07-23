@@ -3,18 +3,23 @@ use std::path::Path;
 use once_cell::sync::Lazy;
 use regex::Regex;
 
+use crate::processor::error::{ProcessorError, ProcessorResult};
+
+// These are compile-time literals; a construction failure is an invariant violation.
+#[allow(clippy::expect_used)]
 static TOKEN_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\w+|[^\s\w]").expect("valid token regex"));
+#[allow(clippy::expect_used)]
 static WS_RE: Lazy<Regex> = Lazy::new(|| Regex::new(r"\s+").expect("valid ws regex"));
 
-pub async fn read_text(path: &Path) -> Result<String, String> {
+pub async fn read_text(path: &Path) -> ProcessorResult<String> {
     let bytes = tokio::fs::read(path)
         .await
-        .map_err(|e| format!("read failed: {e}"))?;
+        .map_err(|error| ProcessorError::io("read file", error))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
-pub fn read_text_blocking(path: &Path) -> Result<String, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("read failed: {e}"))?;
+pub fn read_text_blocking(path: &Path) -> ProcessorResult<String> {
+    let bytes = std::fs::read(path).map_err(|error| ProcessorError::io("read file", error))?;
     Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 

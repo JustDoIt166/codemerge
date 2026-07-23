@@ -1,10 +1,11 @@
 mod assets;
-mod models;
+pub(crate) mod models;
 pub mod perf;
-mod preview_model;
-mod result_model;
-mod selection_model;
+pub(crate) mod preview_model;
+pub(crate) mod result_model;
+pub(crate) mod selection_model;
 pub mod state;
+pub(crate) mod view_model;
 mod workspace;
 
 use anyhow::Result;

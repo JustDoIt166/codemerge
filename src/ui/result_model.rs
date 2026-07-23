@@ -1,4 +1,5 @@
-use crate::domain::{ProcessResult, ResultTab};
+use crate::domain::ProcessResult;
+use crate::ui::view_model::ResultTab;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ResultSaveState {
@@ -111,8 +112,9 @@ impl ResultModel {
 #[cfg(test)]
 mod tests {
     use super::ResultModel;
-    use crate::domain::{PreviewFileEntry, ProcessResult, ResultTab};
+    use crate::domain::{PreviewFileEntry, ProcessResult};
     use crate::processor::stats::ProcessingStats;
+    use crate::ui::view_model::ResultTab;
     use std::path::PathBuf;
 
     #[test]

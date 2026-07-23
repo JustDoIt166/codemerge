@@ -2,6 +2,12 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct PerfSnapshot {
+    pub store_dispatches: usize,
+    pub progress_batches: usize,
+    pub progress_events: usize,
+    pub processing_queue_peak: usize,
+    pub active_tasks: usize,
+    pub active_task_peak: usize,
     pub workspace_view_notifies: usize,
     pub preview_range_requests: usize,
     pub preview_visible_syncs: usize,
@@ -12,6 +18,10 @@ pub struct PerfSnapshot {
     pub tree_set_items: usize,
 }
 
+static STORE_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
+static PROGRESS_BATCHES: AtomicUsize = AtomicUsize::new(0);
+static PROGRESS_EVENTS: AtomicUsize = AtomicUsize::new(0);
+static PROCESSING_QUEUE_PEAK: AtomicUsize = AtomicUsize::new(0);
 static WORKSPACE_VIEW_NOTIFIES: AtomicUsize = AtomicUsize::new(0);
 static PREVIEW_RANGE_REQUESTS: AtomicUsize = AtomicUsize::new(0);
 static PREVIEW_VISIBLE_SYNCS: AtomicUsize = AtomicUsize::new(0);
@@ -24,6 +34,22 @@ static TREE_SET_ITEMS: AtomicUsize = AtomicUsize::new(0);
 #[inline]
 pub fn record_workspace_view_notify() {
     WORKSPACE_VIEW_NOTIFIES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_store_dispatch() {
+    STORE_DISPATCHES.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_progress_batch(events: usize) {
+    PROGRESS_BATCHES.fetch_add(1, Ordering::Relaxed);
+    PROGRESS_EVENTS.fetch_add(events, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_processing_queue_len(len: usize) {
+    PROCESSING_QUEUE_PEAK.fetch_max(len, Ordering::Relaxed);
 }
 
 #[inline]
@@ -62,7 +88,14 @@ pub fn record_tree_set_items() {
 }
 
 pub fn snapshot() -> PerfSnapshot {
+    let task_metrics = crate::application::task::task_metrics();
     PerfSnapshot {
+        store_dispatches: STORE_DISPATCHES.load(Ordering::Relaxed),
+        progress_batches: PROGRESS_BATCHES.load(Ordering::Relaxed),
+        progress_events: PROGRESS_EVENTS.load(Ordering::Relaxed),
+        processing_queue_peak: PROCESSING_QUEUE_PEAK.load(Ordering::Relaxed),
+        active_tasks: task_metrics.active,
+        active_task_peak: task_metrics.peak,
         workspace_view_notifies: WORKSPACE_VIEW_NOTIFIES.load(Ordering::Relaxed),
         preview_range_requests: PREVIEW_RANGE_REQUESTS.load(Ordering::Relaxed),
         preview_visible_syncs: PREVIEW_VISIBLE_SYNCS.load(Ordering::Relaxed),
@@ -76,6 +109,11 @@ pub fn snapshot() -> PerfSnapshot {
 }
 
 pub fn reset() {
+    STORE_DISPATCHES.store(0, Ordering::Relaxed);
+    PROGRESS_BATCHES.store(0, Ordering::Relaxed);
+    PROGRESS_EVENTS.store(0, Ordering::Relaxed);
+    PROCESSING_QUEUE_PEAK.store(0, Ordering::Relaxed);
+    crate::application::task::reset_task_metrics();
     WORKSPACE_VIEW_NOTIFIES.store(0, Ordering::Relaxed);
     PREVIEW_RANGE_REQUESTS.store(0, Ordering::Relaxed);
     PREVIEW_VISIBLE_SYNCS.store(0, Ordering::Relaxed);

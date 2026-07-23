@@ -9,6 +9,12 @@ fn perf_counter_correctness() {
     perf::reset();
     let snap = perf::snapshot();
     assert_eq!(snap.workspace_view_notifies, 0);
+    assert_eq!(snap.store_dispatches, 0);
+    assert_eq!(snap.progress_batches, 0);
+    assert_eq!(snap.progress_events, 0);
+    assert_eq!(snap.processing_queue_peak, 0);
+    assert_eq!(snap.active_tasks, 0);
+    assert_eq!(snap.active_task_peak, 0);
     assert_eq!(snap.preview_range_requests, 0);
     assert_eq!(snap.preview_visible_syncs, 0);
     assert_eq!(snap.preview_render_cache_rebuilds, 0);
@@ -21,6 +27,10 @@ fn perf_counter_correctness() {
     perf::reset();
     perf::record_workspace_view_notify();
     perf::record_workspace_view_notify();
+    perf::record_store_dispatch();
+    perf::record_progress_batch(7);
+    perf::record_processing_queue_len(10);
+    perf::record_processing_queue_len(4);
     perf::record_preview_range_request();
     perf::record_preview_visible_sync();
     perf::record_preview_visible_sync();
@@ -34,6 +44,10 @@ fn perf_counter_correctness() {
 
     let snap = perf::snapshot();
     assert_eq!(snap.workspace_view_notifies, 2);
+    assert_eq!(snap.store_dispatches, 1);
+    assert_eq!(snap.progress_batches, 1);
+    assert_eq!(snap.progress_events, 7);
+    assert_eq!(snap.processing_queue_peak, 10);
     assert_eq!(snap.preview_range_requests, 1);
     assert_eq!(snap.preview_visible_syncs, 3);
     assert_eq!(snap.preview_render_cache_rebuilds, 1);

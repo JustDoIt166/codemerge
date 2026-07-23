@@ -1,7 +1,5 @@
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
+use std::sync::Arc;
 
 use futures::stream::{self, StreamExt};
 use tokio::io::AsyncWriteExt;
@@ -20,15 +18,13 @@ use crate::processor::walker::{
     CandidateFile, WalkerFilterRules, WalkerOptions, WalkerOutput,
     collect_candidates_with_progress_and_cancel,
 };
-use crate::services::runtime::RUNTIME;
 use crate::services::tree::build_tree_nodes;
 use crate::utils::i18n::tr;
 use crate::utils::path::suggested_merge_result_name;
 use crate::utils::temp_file;
 
 pub type ProcessRunId = u64;
-
-static NEXT_RUN_ID: AtomicU64 = AtomicU64::new(1);
+pub type ProcessEventSink = Arc<dyn Fn(ProcessEvent) + Send + Sync>;
 
 #[derive(Debug)]
 pub struct ProcessEvent {
@@ -95,13 +91,6 @@ impl ProcessEvent {
     }
 }
 
-#[derive(Debug)]
-pub struct ProcessHandle {
-    pub run_id: ProcessRunId,
-    pub receiver: Receiver<ProcessEvent>,
-    pub cancel: CancellationToken,
-}
-
 #[derive(Debug, Clone)]
 pub struct ProcessRequest {
     pub selected_folder: Option<PathBuf>,
@@ -116,51 +105,14 @@ pub struct ProcessRequest {
     pub language: Language,
 }
 
-pub fn start(request: ProcessRequest) -> ProcessHandle {
-    let run_id = NEXT_RUN_ID.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = mpsc::channel();
-    let cancel = CancellationToken::new();
-    let thread_cancel = cancel.clone();
-    thread::spawn(move || {
-        let event_tx = tx.clone();
-        let cancel_for_run = thread_cancel.clone();
-        let result = match &*RUNTIME {
-            Ok(runtime) => runtime.block_on(async move {
-                run_process(request, run_id, cancel_for_run, event_tx).await
-            }),
-            Err(err) => Err(AppError::new(err.clone())),
-        };
-
-        match result {
-            Ok(_) if thread_cancel.is_cancelled() => {
-                let _ = tx.send(ProcessEvent::cancelled(run_id));
-            }
-            Ok(result) => {
-                let _ = tx.send(ProcessEvent::completed(run_id, result));
-            }
-            Err(_) if thread_cancel.is_cancelled() => {
-                let _ = tx.send(ProcessEvent::cancelled(run_id));
-            }
-            Err(err) => {
-                let _ = tx.send(ProcessEvent::failed(run_id, err));
-            }
-        }
-    });
-    ProcessHandle {
-        run_id,
-        receiver: rx,
-        cancel,
-    }
-}
-
-async fn run_process(
+pub async fn execute(
     request: ProcessRequest,
     run_id: ProcessRunId,
     cancel: CancellationToken,
-    tx: mpsc::Sender<ProcessEvent>,
+    emit: ProcessEventSink,
 ) -> Result<ProcessResult, AppError> {
     let lang = request.language;
-    let progress_tx = tx.clone();
+    let progress_emit = Arc::clone(&emit);
     let scan_cancel = cancel.clone();
     let cancel_for_walker = cancel.clone();
     let walker = collect_candidates_with_progress_and_cancel(
@@ -180,8 +132,7 @@ async fn run_process(
         },
         move |scanned, candidates, skipped| {
             if !scan_cancel.is_cancelled() {
-                let _ =
-                    progress_tx.send(ProcessEvent::scanning(run_id, scanned, candidates, skipped));
+                progress_emit(ProcessEvent::scanning(run_id, scanned, candidates, skipped));
             }
         },
         move || cancel_for_walker.is_cancelled(),
@@ -199,7 +150,7 @@ async fn run_process(
         )));
     }
 
-    run_process_with_walker(request, run_id, walker, cancel, tx).await
+    run_process_with_walker(request, run_id, walker, cancel, emit).await
 }
 
 async fn run_process_with_walker(
@@ -207,7 +158,7 @@ async fn run_process_with_walker(
     run_id: ProcessRunId,
     walker: WalkerOutput,
     cancel: CancellationToken,
-    tx: mpsc::Sender<ProcessEvent>,
+    emit: ProcessEventSink,
 ) -> Result<ProcessResult, AppError> {
     let lang = request.language;
     let tree_nodes = build_tree_nodes(&walker.candidates);
@@ -275,7 +226,7 @@ async fn run_process_with_walker(
         match outcome {
             FileProcessOutcome::Skipped { file, reason } => {
                 stats.skipped_files += 1;
-                let _ = tx.send(ProcessEvent::record(
+                emit(ProcessEvent::record(
                     run_id,
                     ProcessRecord {
                         file_name: file,
@@ -288,7 +239,7 @@ async fn run_process_with_walker(
             }
             FileProcessOutcome::Failed { file, error } => {
                 stats.skipped_files += 1;
-                let _ = tx.send(ProcessEvent::record(
+                emit(ProcessEvent::record(
                     run_id,
                     ProcessRecord {
                         file_name: file,
@@ -331,7 +282,7 @@ async fn run_process_with_walker(
                     byte_len: merged.content.len() as u64,
                     archive,
                 });
-                let _ = tx.send(ProcessEvent::record(
+                emit(ProcessEvent::record(
                     run_id,
                     ProcessRecord {
                         file_name: detail.path.clone(),
@@ -482,7 +433,6 @@ fn file_concurrency_limit(total_files: usize) -> usize {
 mod tests {
     use std::fs;
     use std::io::Write;
-    use std::time::Duration;
 
     use tempfile::tempdir;
     use tokio_util::sync::CancellationToken;
@@ -490,8 +440,8 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::{
-        ProcessEventKind, ProcessRequest, archive_entry_source, cleanup_failed_run,
-        file_concurrency_limit, run_process_with_walker, start,
+        ProcessEventSink, ProcessRequest, archive_entry_source, cleanup_failed_run, execute,
+        file_concurrency_limit, run_process_with_walker,
     };
     use crate::domain::{
         Language, OutputFormat, ProcessingMode, ProcessingOptions, TemporaryWhitelistMode,
@@ -499,6 +449,21 @@ mod tests {
     use crate::utils::temp_file::{
         make_temp_preview_dir_in, make_temp_process_dir, make_temp_result_path_in,
     };
+    use std::sync::Arc;
+
+    fn run_request(request: ProcessRequest) -> crate::domain::ProcessResult {
+        let runtime = crate::services::runtime::RUNTIME
+            .as_ref()
+            .expect("runtime available");
+        runtime
+            .block_on(execute(
+                request,
+                1,
+                CancellationToken::new(),
+                Arc::new(|_| {}),
+            ))
+            .expect("process execution")
+    }
 
     #[test]
     fn full_run_fails_when_no_candidate_content_can_be_read() {
@@ -533,6 +498,9 @@ mod tests {
             tree: "selected_files/\n  ├── missing.rs".into(),
         };
         let (tx, _rx) = std::sync::mpsc::channel();
+        let emit: ProcessEventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
         let runtime = match &*crate::services::runtime::RUNTIME {
             Ok(runtime) => runtime,
             Err(error) => panic!("runtime unavailable: {error}"),
@@ -544,7 +512,7 @@ mod tests {
                 1,
                 walker,
                 CancellationToken::new(),
-                tx,
+                emit,
             ))
             .expect_err("all unreadable candidates must fail");
 
@@ -607,7 +575,7 @@ mod tests {
             ],
         );
 
-        let handle = start(ProcessRequest {
+        let result = run_request(ProcessRequest {
             selected_folder: None,
             selected_files: vec![zip_path],
             folder_blacklist: vec!["src".to_string()],
@@ -625,20 +593,6 @@ mod tests {
             },
             language: Language::Zh,
         });
-
-        let result = loop {
-            match handle
-                .receiver
-                .recv_timeout(Duration::from_secs(10))
-                .expect("process event")
-                .kind
-            {
-                ProcessEventKind::Completed(result) => break result,
-                ProcessEventKind::Failed(error) => panic!("unexpected failure: {error}"),
-                ProcessEventKind::Cancelled => panic!("unexpected cancellation"),
-                ProcessEventKind::Scanning { .. } | ProcessEventKind::Record(_) => {}
-            }
-        };
 
         assert_eq!(result.file_details.len(), 1);
         assert_eq!(result.preview_files.len(), 1);
@@ -668,7 +622,7 @@ mod tests {
         fs::write(root.join("src/lib.rs"), "pub fn scoped() {}\n").expect("write lib");
         fs::write(root.join("docs/guide.md"), "# guide\n").expect("write guide");
 
-        let handle = start(ProcessRequest {
+        let result = run_request(ProcessRequest {
             selected_folder: Some(root.to_path_buf()),
             selected_files: Vec::new(),
             folder_blacklist: Vec::new(),
@@ -686,20 +640,6 @@ mod tests {
             },
             language: Language::Zh,
         });
-
-        let result = loop {
-            match handle
-                .receiver
-                .recv_timeout(Duration::from_secs(10))
-                .expect("process event")
-                .kind
-            {
-                ProcessEventKind::Completed(result) => break result,
-                ProcessEventKind::Failed(error) => panic!("unexpected failure: {error}"),
-                ProcessEventKind::Cancelled => panic!("unexpected cancellation"),
-                ProcessEventKind::Scanning { .. } | ProcessEventKind::Record(_) => {}
-            }
-        };
 
         assert_eq!(result.file_details.len(), 1);
         assert_eq!(result.file_details[0].path, "src/lib.rs");

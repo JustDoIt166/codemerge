@@ -20,13 +20,14 @@ use super::{
 };
 use crate::domain::{
     ArchiveEntrySource, FileEntry, Language, PreflightStats, PreviewFileEntry, ProcessRecord,
-    ProcessResult, ProcessStatus, ResultTab, TreeNode,
+    ProcessResult, ProcessStatus, TreeNode,
 };
 use crate::processor::stats::ProcessingStats;
 use crate::services::preflight::PreflightEvent;
 use crate::ui::state::{
     DeferredPreviewState, NarrowContentTab, ProcessState, ProcessUiStatus, TreePanelState,
 };
+use crate::ui::view_model::ResultTab;
 use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
 

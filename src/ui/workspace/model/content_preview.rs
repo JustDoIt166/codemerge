@@ -1,8 +1,9 @@
 use gpui::SharedString;
 use std::rc::Rc;
 
-use crate::domain::{Language, PreviewRowViewModel, ProcessResult, ResultTab};
+use crate::domain::{Language, ProcessResult};
 use crate::ui::state::{DeferredPreviewState, NarrowContentTab};
+use crate::ui::view_model::{PreviewRowViewModel, ResultTab};
 use crate::utils::i18n::tr;
 
 #[derive(Clone, Debug, PartialEq, Eq)]

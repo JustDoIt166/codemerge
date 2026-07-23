@@ -4,11 +4,18 @@ use std::time::{Duration, SystemTime};
 
 use chrono::Local;
 
+use crate::error::{AppError, AppResult, ErrorCode};
+
 static TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(1);
 
-fn codemerge_temp_root() -> Result<PathBuf, String> {
+fn io_error(operation: &'static str, error: std::io::Error) -> AppError {
+    let message = format!("{operation}: {error}");
+    AppError::from_source(ErrorCode::Io, operation, message, error)
+}
+
+fn codemerge_temp_root() -> AppResult<PathBuf> {
     let dir = std::env::temp_dir().join("codemerge");
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir failed: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|error| io_error("create temp root", error))?;
     Ok(dir)
 }
 
@@ -22,25 +29,25 @@ fn unique_suffix() -> String {
     )
 }
 
-fn create_temp_child_dir(prefix: &str) -> Result<PathBuf, String> {
+fn create_temp_child_dir(prefix: &str) -> AppResult<PathBuf> {
     let dir = codemerge_temp_root()?.join(format!("{prefix}_{}", unique_suffix()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create temp dir failed: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|error| io_error("create temp directory", error))?;
     Ok(dir)
 }
 
-pub fn make_temp_result_path() -> Result<PathBuf, String> {
+pub fn make_temp_result_path() -> AppResult<PathBuf> {
     let dir = codemerge_temp_root()?;
     Ok(dir.join(format!("merged_{}.txt", unique_suffix())))
 }
 
-pub fn make_temp_preview_dir() -> Result<PathBuf, String> {
+pub fn make_temp_preview_dir() -> AppResult<PathBuf> {
     let root = codemerge_temp_root()?;
     let dir = root.join(format!("preview_{}", unique_suffix()));
-    std::fs::create_dir_all(&dir).map_err(|e| format!("create preview dir failed: {e}"))?;
+    std::fs::create_dir_all(&dir).map_err(|error| io_error("create preview directory", error))?;
     Ok(dir)
 }
 
-pub fn make_temp_process_dir() -> Result<PathBuf, String> {
+pub fn make_temp_process_dir() -> AppResult<PathBuf> {
     create_temp_child_dir("process")
 }
 
@@ -48,35 +55,33 @@ pub fn make_temp_result_path_in(process_dir: &std::path::Path) -> PathBuf {
     process_dir.join("merged.txt")
 }
 
-pub fn make_temp_preview_dir_in(process_dir: &std::path::Path) -> Result<PathBuf, String> {
-    std::fs::create_dir_all(process_dir).map_err(|e| format!("create preview dir failed: {e}"))?;
+pub fn make_temp_preview_dir_in(process_dir: &std::path::Path) -> AppResult<PathBuf> {
+    std::fs::create_dir_all(process_dir)
+        .map_err(|error| io_error("create process preview directory", error))?;
     Ok(process_dir.to_path_buf())
 }
 
-pub fn cleanup_temp_dir(path: &std::path::Path) -> Result<(), String> {
+pub fn cleanup_temp_dir(path: &std::path::Path) -> AppResult<()> {
     if path.exists() {
-        std::fs::remove_dir_all(path).map_err(|e| format!("remove temp dir failed: {e}"))?;
+        std::fs::remove_dir_all(path).map_err(|error| io_error("remove temp directory", error))?;
     }
     Ok(())
 }
 
-pub fn cleanup_preview_dir(path: &std::path::Path) -> Result<(), String> {
+pub fn cleanup_preview_dir(path: &std::path::Path) -> AppResult<()> {
     cleanup_temp_dir(path)
 }
 
-pub fn cleanup_stale_temp_entries(max_age: Duration) -> Result<usize, String> {
+pub fn cleanup_stale_temp_entries(max_age: Duration) -> AppResult<usize> {
     let root = codemerge_temp_root()?;
     cleanup_stale_temp_entries_in(&root, max_age)
 }
 
-fn cleanup_stale_temp_entries_in(
-    root: &std::path::Path,
-    max_age: Duration,
-) -> Result<usize, String> {
+fn cleanup_stale_temp_entries_in(root: &std::path::Path, max_age: Duration) -> AppResult<usize> {
     let now = SystemTime::now();
     let mut removed = 0;
 
-    for entry in std::fs::read_dir(root).map_err(|e| format!("read temp dir failed: {e}"))? {
+    for entry in std::fs::read_dir(root).map_err(|error| io_error("read temp directory", error))? {
         let entry = match entry {
             Ok(entry) => entry,
             Err(_) => continue,

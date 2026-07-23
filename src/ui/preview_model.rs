@@ -1,6 +1,5 @@
 use std::ops::Range;
 use std::path::PathBuf;
-use std::sync::mpsc::Receiver;
 
 use gpui::SharedString;
 
@@ -143,10 +142,6 @@ impl PreviewModel {
         self.state.take_queued_preview_range()
     }
 
-    pub fn take_preview_rx(&mut self) -> Option<Receiver<PreviewEvent>> {
-        self.state.preview_rx.take()
-    }
-
     pub fn open_preview(&mut self, file_id: u32, path: PathBuf) -> PreviewRequest {
         self.prepare_open_preview(file_id, path, None, PreviewLoadRequestKind::File)
     }
@@ -186,7 +181,6 @@ impl PreviewModel {
         self.state.preview_revision += 1;
         self.state.selected_preview_file_id = Some(file_id);
         self.state.preview_error = None;
-        self.state.preview_rx = None;
         self.state.preview_requested_range = None;
         self.state.queued_preview_range = None;
         self.state.pending_request_type = None;
@@ -207,7 +201,6 @@ impl PreviewModel {
 
     pub fn set_preview_error_message(&mut self, error: impl Into<String>) {
         self.state.preview_error = Some(error.into());
-        self.state.preview_rx = None;
         self.state.preview_requested_range = None;
         if self.state.preview_document.is_none() {
             self.state.clear_loaded_chunks();
@@ -225,7 +218,6 @@ impl PreviewModel {
         self.state.preview_revision += 1;
         self.state.selected_preview_file_id = Some(file_id);
         self.state.preview_error = None;
-        self.state.preview_rx = None;
         self.state.preview_requested_range =
             Some(0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2);
         self.state.queued_preview_range = None;
@@ -241,13 +233,6 @@ impl PreviewModel {
             path,
             initial_range: 0..crate::ui::state::PreviewPanelState::VISIBLE_BUCKET_LINES * 2,
         }
-    }
-
-    pub fn set_preview_rx(&mut self, rx: Option<Receiver<PreviewEvent>>) {
-        if rx.is_none() {
-            self.state.pending_request_type = None;
-        }
-        self.state.preview_rx = rx;
     }
 
     pub fn selected_preview_file_id(&self) -> Option<u32> {
@@ -351,6 +336,7 @@ impl PreviewModel {
     }
 }
 
+#[derive(Debug)]
 pub enum PreviewEventEffect {
     Ignored,
     Updated,

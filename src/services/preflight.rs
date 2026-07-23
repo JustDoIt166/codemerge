@@ -1,8 +1,6 @@
 use std::collections::HashSet;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
-use std::thread;
 
 use crate::domain::TemporaryWhitelistMode;
 use crate::domain::{FileEntry, PreflightStats};
@@ -10,7 +8,8 @@ use crate::error::AppError;
 use crate::processor::walker::{
     WalkerFilterRules, WalkerOptions, collect_candidates_with_progress,
 };
-use crate::services::settings;
+
+pub type PreflightEventSink = Arc<dyn Fn(PreflightEvent) + Send + Sync>;
 
 #[derive(Debug, Clone)]
 pub enum PreflightEvent {
@@ -47,108 +46,109 @@ pub struct PreflightRequest {
     pub whitelist_mode: TemporaryWhitelistMode,
 }
 
-pub fn start(request: PreflightRequest) -> Receiver<PreflightEvent> {
-    let config = settings::load();
-    start_with_options(
-        request,
-        WalkerOptions {
-            use_gitignore: config.options.use_gitignore,
-            ignore_git: config.options.ignore_git,
-        },
-    )
-}
-
-pub fn start_with_options(
+pub fn execute(
     request: PreflightRequest,
     options: WalkerOptions,
-) -> Receiver<PreflightEvent> {
-    let (tx, rx) = mpsc::channel();
-    thread::spawn(move || {
-        let revision = request.revision;
-        let has_selected_folder = request.selected_folder.is_some();
-        let explicitly_selected = request
-            .selected_files
-            .iter()
-            .cloned()
-            .collect::<HashSet<_>>();
-        let _ = tx.send(PreflightEvent::Started { revision });
-        let progress_tx = tx.clone();
-        let result = std::panic::catch_unwind(|| {
-            collect_candidates_with_progress(
-                request.selected_folder.as_ref(),
-                &request.selected_files,
-                WalkerFilterRules {
-                    folder_blacklist: &request.folder_blacklist,
-                    ext_blacklist: &request.ext_blacklist,
-                    excluded_files: &request.excluded_files,
-                    folder_whitelist: &request.folder_whitelist,
-                    ext_whitelist: &request.ext_whitelist,
-                    whitelist_mode: request.whitelist_mode,
-                },
-                options,
-                move |scanned, candidates, skipped| {
-                    let _ = progress_tx.send(PreflightEvent::Progress {
-                        revision,
-                        scanned,
-                        candidates,
-                        skipped,
-                    });
-                },
-            )
-        });
+    emit: PreflightEventSink,
+) -> crate::error::AppResult<()> {
+    let revision = request.revision;
+    let has_selected_folder = request.selected_folder.is_some();
+    let explicitly_selected = request
+        .selected_files
+        .iter()
+        .cloned()
+        .collect::<HashSet<_>>();
+    emit(PreflightEvent::Started { revision });
+    let progress_emit = Arc::clone(&emit);
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        collect_candidates_with_progress(
+            request.selected_folder.as_ref(),
+            &request.selected_files,
+            WalkerFilterRules {
+                folder_blacklist: &request.folder_blacklist,
+                ext_blacklist: &request.ext_blacklist,
+                excluded_files: &request.excluded_files,
+                folder_whitelist: &request.folder_whitelist,
+                ext_whitelist: &request.ext_whitelist,
+                whitelist_mode: request.whitelist_mode,
+            },
+            options,
+            move |scanned, candidates, skipped| {
+                progress_emit(PreflightEvent::Progress {
+                    revision,
+                    scanned,
+                    candidates,
+                    skipped,
+                });
+            },
+        )
+    }));
 
-        match result {
-            Ok(out) => {
-                let stats = PreflightStats {
-                    total_files: out.candidates.len() + out.skipped,
-                    skipped_files: out.skipped,
-                    to_process_files: out.candidates.len(),
-                    scanned_entries: out.candidates.len() + out.skipped,
-                    is_scanning: false,
-                };
-                let files = out
-                    .candidates
-                    .into_iter()
-                    .filter(|candidate| {
-                        has_selected_folder && !explicitly_selected.contains(&candidate.absolute)
-                    })
-                    .map(|candidate| FileEntry {
-                        size: 0,
-                        path: candidate.absolute,
-                        name: candidate.relative,
-                    })
-                    .collect::<Vec<_>>()
-                    .into();
-                let _ = tx.send(PreflightEvent::Completed {
-                    revision,
-                    stats,
-                    files,
-                });
-            }
-            Err(_) => {
-                let _ = tx.send(PreflightEvent::Failed {
-                    revision,
-                    error: AppError::new("preflight failed"),
-                });
-            }
+    match result {
+        Ok(out) => {
+            let stats = PreflightStats {
+                total_files: out.candidates.len() + out.skipped,
+                skipped_files: out.skipped,
+                to_process_files: out.candidates.len(),
+                scanned_entries: out.candidates.len() + out.skipped,
+                is_scanning: false,
+            };
+            let files = out
+                .candidates
+                .into_iter()
+                .filter(|candidate| {
+                    has_selected_folder && !explicitly_selected.contains(&candidate.absolute)
+                })
+                .map(|candidate| FileEntry {
+                    size: 0,
+                    path: candidate.absolute,
+                    name: candidate.relative,
+                })
+                .collect::<Vec<_>>()
+                .into();
+            emit(PreflightEvent::Completed {
+                revision,
+                stats,
+                files,
+            });
         }
-    });
-    rx
+        Err(_) => {
+            return Err(AppError::with_code(
+                crate::error::ErrorCode::Processing,
+                "preflight",
+                "preflight failed",
+            ));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use std::fs;
     use std::io::Write;
+    use std::sync::{Arc, mpsc};
     use std::time::Duration;
 
     use tempfile::tempdir;
     use zip::CompressionMethod;
     use zip::write::SimpleFileOptions;
 
-    use super::{PreflightEvent, PreflightRequest, start_with_options};
+    use super::{PreflightEvent, PreflightEventSink, PreflightRequest, execute};
     use crate::domain::TemporaryWhitelistMode;
     use crate::processor::walker::WalkerOptions;
+
+    fn start_with_options(
+        request: PreflightRequest,
+        options: WalkerOptions,
+    ) -> mpsc::Receiver<PreflightEvent> {
+        let (tx, rx) = mpsc::channel();
+        let sink: PreflightEventSink = Arc::new(move |event| {
+            let _ = tx.send(event);
+        });
+        execute(request, options, sink).expect("preflight execution");
+        rx
+    }
 
     #[test]
     fn completion_scanned_entries_does_not_go_backwards() {

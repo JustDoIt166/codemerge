@@ -20,8 +20,7 @@ impl SelectionModel {
         }
     }
 
-    #[cfg(test)]
-    pub fn state(&self) -> &SelectionState {
+    pub(crate) fn state(&self) -> &SelectionState {
         &self.state
     }
 

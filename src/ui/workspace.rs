@@ -7,8 +7,8 @@ mod tree_palette;
 mod view;
 
 use std::cell::Cell;
+use std::ops::{Deref, DerefMut, Range};
 use std::rc::Rc;
-use std::{hash::Hash, hash::Hasher, ops::Range};
 
 use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId, FocusHandle, Focusable,
@@ -25,19 +25,44 @@ use gpui_component::{
     tree::TreeState,
 };
 
-use crate::domain::{Language, PreviewRowViewModel};
+use crate::application::coordinator::WorkspaceCoordinator;
+use crate::application::store::{
+    ChangeSet, NavigationAction, StoreSlice, Transition, WorkspaceAction, WorkspaceEffect,
+    WorkspaceStore,
+};
+use crate::domain::Language;
 use crate::services::settings::{self, ConfigLoadIssue};
 use crate::ui::models::{ProcessModel, SettingsModel, WorkspaceUiModel};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewModel;
 use crate::ui::result_model::ResultModel;
 use crate::ui::selection_model::SelectionModel;
-use crate::ui::state::{AppState, ProcessUiStatus, WorkspaceUiState};
+use crate::ui::state::{ProcessUiStatus, TreePanelState, WorkspaceUiState};
+use crate::ui::view_model::PreviewRowViewModel;
 use crate::utils::i18n::tr;
 
 const MERGED_CONTENT_PREVIEW_FILE_ID: u32 = u32::MAX;
 const MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES: u64 = 4 * 1024 * 1024;
 const TREE_EXPAND_ALL_FOLDER_LIMIT: usize = 50_000;
+const INPUT_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_SELECTION
+    .union(ChangeSet::DRAFT_RULES)
+    .union(ChangeSet::DRAFT_SETTINGS)
+    .union(ChangeSet::NAVIGATION);
+const STATUS_DEPENDENCIES: ChangeSet = ChangeSet::EXECUTION
+    .union(ChangeSet::EXECUTION_RESULT)
+    .union(ChangeSet::DRAFT_SETTINGS);
+const RULES_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_RULES
+    .union(ChangeSet::DRAFT_SETTINGS)
+    .union(ChangeSet::NAVIGATION);
+const RESULTS_DEPENDENCIES: ChangeSet = ChangeSet::EXECUTION_RESULT
+    .union(ChangeSet::DRAFT_SETTINGS)
+    .union(ChangeSet::NAVIGATION);
+const TREE_DEPENDENCIES: ChangeSet = ChangeSet::EXECUTION_RESULT
+    .union(ChangeSet::DRAFT_SETTINGS)
+    .union(ChangeSet::NAVIGATION_TREE);
+const PREVIEW_DEPENDENCIES: ChangeSet = ChangeSet::PREVIEW
+    .union(ChangeSet::EXECUTION_RESULT)
+    .union(ChangeSet::DRAFT_SETTINGS);
 
 pub(super) fn preview_line_height() -> Pixels {
     px(22.)
@@ -51,11 +76,7 @@ pub(super) fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<
     Rc::new((0..len).map(|_| size(px(100.), height)).collect::<Vec<_>>())
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BlacklistItemKind {
-    Folder,
-    Ext,
-}
+pub(crate) use crate::application::store::BlacklistItemKind;
 
 pub(super) struct PreviewTableDelegate {
     language: Language,
@@ -263,47 +284,41 @@ enum WorkspacePanelKind {
 struct WorkspacePanelView {
     workspace: Entity<Workspace>,
     kind: WorkspacePanelKind,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct StatusPanelView {
     workspace: Entity<Workspace>,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct InputPanelView {
     workspace: Entity<Workspace>,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct RulesPanelView {
     workspace: Entity<Workspace>,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct ResultsPanelView {
     workspace: Entity<Workspace>,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct TreePaneView {
     workspace: Entity<Workspace>,
     view_mode: TreeViewMode,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
 struct PreviewPaneView {
     entity_id: EntityId,
     workspace: Entity<Workspace>,
-    preview: Entity<PreviewModel>,
-    result: Entity<ResultModel>,
-    settings: Entity<SettingsModel>,
+    preview: StoreSlice<PreviewModel>,
+    result: StoreSlice<ResultModel>,
+    settings: StoreSlice<SettingsModel>,
     scroll_handle: UniformListScrollHandle,
     last_requested_load_range: Range<usize>,
     render_cache_range: Range<usize>,
@@ -313,7 +328,6 @@ struct PreviewPaneView {
     last_synced_visible_range: Option<Range<usize>>,
     scheduled_visible_sync: bool,
     last_scroll_anchor: usize,
-    last_invalidation_key: u64,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -350,13 +364,20 @@ enum ConfigAlertAction {
 
 pub struct Workspace {
     focus_handle: FocusHandle,
-    state: AppState,
-    ui: Entity<WorkspaceUiModel>,
-    selection: Entity<SelectionModel>,
-    settings: Entity<SettingsModel>,
-    process: Entity<ProcessModel>,
-    result: Entity<ResultModel>,
-    preview: Entity<PreviewModel>,
+    store: Entity<WorkspaceStore>,
+    coordinator: Entity<WorkspaceCoordinator>,
+    views: WorkspaceViews,
+    #[allow(dead_code)] // Subscriptions are retained for their lifetime side effect.
+    subscriptions: Vec<Subscription>,
+}
+
+pub struct WorkspaceViews {
+    ui: StoreSlice<WorkspaceUiModel>,
+    selection: StoreSlice<SelectionModel>,
+    settings: StoreSlice<SettingsModel>,
+    process: StoreSlice<ProcessModel>,
+    result: StoreSlice<ResultModel>,
+    preview: StoreSlice<PreviewModel>,
     result_artifacts: ResultArtifacts,
     config_alert: Option<ConfigAlert>,
     tree_panel: TreePanelController,
@@ -380,10 +401,20 @@ pub struct Workspace {
     preview_pane_view: Entity<PreviewPaneView>,
     right_panel_view: Entity<WorkspacePanelView>,
     compact_content_view: Entity<WorkspacePanelView>,
-    poll_task: Option<Task<()>>,
-    poll_task_running: bool,
-    poll_idle_streak: u8,
-    _subscriptions: Vec<Subscription>,
+}
+
+impl Deref for Workspace {
+    type Target = WorkspaceViews;
+
+    fn deref(&self) -> &Self::Target {
+        &self.views
+    }
+}
+
+impl DerefMut for Workspace {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.views
+    }
 }
 
 impl Workspace {
@@ -424,37 +455,25 @@ impl Workspace {
                 .sortable(false)
         });
         let suppress_tree_interaction_sync = Rc::new(Cell::new(false));
-        let settings_model = cx.new(|_| SettingsModel::from_config(cfg.clone()));
-        let ui_model = cx.new(|_| WorkspaceUiModel::new());
-        let selection_model = cx.new(|_| SelectionModel::new());
-        let process_model =
-            cx.new(|_| ProcessModel::new(tr(cfg.language, "status_ready").to_string()));
-        let result_model = cx.new(|_| ResultModel::new());
-        let preview_model = cx.new(|_| PreviewModel::new());
+        let store = cx.new(|_| {
+            WorkspaceStore::new(cfg.clone(), tr(cfg.language, "status_ready").to_string())
+        });
+        let coordinator = cx.new(|_| WorkspaceCoordinator::new());
+        let settings_model = WorkspaceStore::settings_slice(store.clone());
+        let ui_model = WorkspaceStore::navigation_slice(store.clone());
+        let selection_model = WorkspaceStore::selection_slice(store.clone());
+        let process_model = WorkspaceStore::process_slice(store.clone());
+        let result_model = WorkspaceStore::result_slice(store.clone());
+        let preview_model = WorkspaceStore::preview_slice(store.clone());
         let workspace_entity = cx.entity();
-        let input_panel_view = cx.new(|cx| {
-            InputPanelView::new(
-                workspace_entity.clone(),
-                settings_model.clone(),
-                ui_model.clone(),
-                selection_model.clone(),
-                cx,
-            )
-        });
-        let status_panel_view = cx.new(|cx| {
-            StatusPanelView::new(
-                workspace_entity.clone(),
-                process_model.clone(),
-                result_model.clone(),
-                settings_model.clone(),
-                cx,
-            )
-        });
+        let input_panel_view =
+            cx.new(|cx| InputPanelView::new(workspace_entity.clone(), store.clone(), cx));
+        let status_panel_view =
+            cx.new(|cx| StatusPanelView::new(workspace_entity.clone(), store.clone(), cx));
         let rules_panel_view = cx.new(|cx| {
             RulesPanelView::new(
                 workspace_entity.clone(),
-                settings_model.clone(),
-                ui_model.clone(),
+                store.clone(),
                 blacklist_filter_input.clone(),
                 cx,
             )
@@ -462,9 +481,7 @@ impl Workspace {
         let results_panel_view = cx.new(|cx| {
             ResultsPanelView::new(
                 workspace_entity.clone(),
-                result_model.clone(),
-                settings_model.clone(),
-                ui_model.clone(),
+                store.clone(),
                 preview_filter_input.clone(),
                 cx,
             )
@@ -472,28 +489,19 @@ impl Workspace {
         let tree_pane_view = cx.new(|cx| {
             TreePaneView::new(
                 workspace_entity.clone(),
-                result_model.clone(),
-                settings_model.clone(),
+                store.clone(),
                 tree_state.clone(),
                 tree_filter_input.clone(),
                 suppress_tree_interaction_sync.clone(),
                 cx,
             )
         });
-        let preview_pane_view = cx.new(|cx| {
-            PreviewPaneView::new(
-                workspace_entity.clone(),
-                preview_model.clone(),
-                result_model.clone(),
-                settings_model.clone(),
-                cx,
-            )
-        });
+        let preview_pane_view =
+            cx.new(|cx| PreviewPaneView::new(workspace_entity.clone(), store.clone(), cx));
         let right_panel_view = cx.new(|cx| {
             WorkspacePanelView::new(
                 workspace_entity.clone(),
-                ui_model.clone(),
-                settings_model.clone(),
+                store.clone(),
                 WorkspacePanelKind::Right,
                 cx,
             )
@@ -501,8 +509,7 @@ impl Workspace {
         let compact_content_view = cx.new(|cx| {
             WorkspacePanelView::new(
                 workspace_entity.clone(),
-                ui_model.clone(),
-                settings_model.clone(),
+                store.clone(),
                 WorkspacePanelKind::CompactContent,
                 cx,
             )
@@ -519,53 +526,53 @@ impl Workspace {
         ];
         let mut this = Self {
             focus_handle: cx.focus_handle(),
-            state: AppState::from_config(cfg.clone(), tr(cfg.language, "status_ready").to_string()),
-            ui: ui_model,
-            selection: selection_model,
-            settings: settings_model,
-            process: process_model,
-            result: result_model,
-            preview: preview_model,
-            result_artifacts: ResultArtifacts::default(),
-            config_alert,
-            tree_panel: TreePanelController {
-                state: tree_state,
-                filter_input: tree_filter_input,
-                data: None,
-                projection: model::TreeProjectionState::default(),
-                render_state: model::TreeRenderState::default(),
-                total_summary: model::TreeCountSummary::default(),
-                last_filter: String::new(),
-                last_interaction: None,
-                input_exclusion_enabled: false,
+            store,
+            coordinator,
+            views: WorkspaceViews {
+                ui: ui_model,
+                selection: selection_model,
+                settings: settings_model,
+                process: process_model,
+                result: result_model,
+                preview: preview_model,
+                result_artifacts: ResultArtifacts::default(),
+                config_alert,
+                tree_panel: TreePanelController {
+                    state: tree_state,
+                    filter_input: tree_filter_input,
+                    data: None,
+                    projection: model::TreeProjectionState::default(),
+                    render_state: model::TreeRenderState::default(),
+                    total_summary: model::TreeCountSummary::default(),
+                    last_filter: String::new(),
+                    last_interaction: None,
+                    input_exclusion_enabled: false,
+                },
+                preview_table,
+                preview_filter_input,
+                preview_filter_revision: 0,
+                preview_filter_task: None,
+                preview_table_cache: PreviewTableCache::default(),
+                suppress_tree_interaction_sync,
+                suppress_preview_table_events: false,
+                blacklist_filter_input,
+                blacklist_add_input,
+                temp_blacklist_add_input,
+                temp_whitelist_add_input,
+                rules_panel: RulesPanelController {
+                    revision: 0,
+                    cache: RulesPanelCache::default(),
+                },
+                input_panel_view,
+                status_panel_view,
+                rules_panel_view,
+                results_panel_view,
+                tree_pane_view,
+                preview_pane_view,
+                right_panel_view,
+                compact_content_view,
             },
-            preview_table,
-            preview_filter_input,
-            preview_filter_revision: 0,
-            preview_filter_task: None,
-            preview_table_cache: PreviewTableCache::default(),
-            suppress_tree_interaction_sync,
-            suppress_preview_table_events: false,
-            blacklist_filter_input,
-            blacklist_add_input,
-            temp_blacklist_add_input,
-            temp_whitelist_add_input,
-            rules_panel: RulesPanelController {
-                revision: 0,
-                cache: RulesPanelCache::default(),
-            },
-            input_panel_view,
-            status_panel_view,
-            rules_panel_view,
-            results_panel_view,
-            tree_pane_view,
-            preview_pane_view,
-            right_panel_view,
-            compact_content_view,
-            poll_task: None,
-            poll_task_running: false,
-            poll_idle_streak: 0,
-            _subscriptions: subscriptions,
+            subscriptions,
         };
         if this.config_alert.is_some() {
             window.push_notification(
@@ -580,30 +587,6 @@ impl Workspace {
         this
     }
 
-    fn ensure_background_polling(&mut self, cx: &mut Context<Self>) {
-        if self.poll_task_running || !self.needs_background_polling(cx) {
-            return;
-        }
-
-        self.poll_task_running = true;
-        self.poll_task = Some(cx.spawn(async move |this, cx| {
-            while let Some(delay) = this
-                .update(cx, |this, cx| this.poll_background(cx))
-                .ok()
-                .flatten()
-            {
-                Timer::after(delay).await;
-            }
-        }));
-    }
-
-    fn needs_background_polling(&self, cx: &App) -> bool {
-        let process = self.process.read(cx);
-        process.state().preflight_rx.is_some()
-            || process.state().process_handle.is_some()
-            || self.preview.read(cx).state().preview_rx.is_some()
-    }
-
     fn has_inputs(&self, cx: &App) -> bool {
         self.selection.read(cx).has_inputs()
     }
@@ -612,14 +595,72 @@ impl Workspace {
         self.process.read(cx).is_processing()
     }
 
-    fn clear_pending_confirmation(&mut self, cx: &mut Context<Self>) -> bool {
-        self.ui.update(cx, |ui, ui_cx| {
-            let changed = ui.clear_pending_confirmation();
-            if changed {
-                ui_cx.notify();
+    fn dispatch(&mut self, action: WorkspaceAction, cx: &mut Context<Self>) -> Transition {
+        let transition = self.store.update(cx, |store, store_cx| {
+            let transition = store.dispatch(action);
+            if !transition.changes.is_empty() {
+                perf::record_store_dispatch();
+                store_cx.emit(crate::application::store::WorkspaceEvent(
+                    transition.changes,
+                ));
             }
-            changed
-        })
+            transition
+        });
+        self.execute_effects(&transition.effects, cx);
+        transition
+    }
+
+    fn tree_state(&self, cx: &App) -> TreePanelState {
+        self.store.read(cx).tree().clone()
+    }
+
+    fn set_tree_state(&mut self, state: TreePanelState, cx: &mut Context<Self>) -> bool {
+        matches!(
+            self.dispatch(
+                WorkspaceAction::Navigation(NavigationAction::SetTreeState(state)),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        )
+    }
+
+    fn reset_tree_state(&mut self, cx: &mut Context<Self>) -> bool {
+        matches!(
+            self.dispatch(WorkspaceAction::Navigation(NavigationAction::ResetTree), cx,)
+                .output,
+            crate::application::store::ActionOutput::Changed(true)
+        )
+    }
+
+    fn execute_effects(&mut self, effects: &[WorkspaceEffect], cx: &mut Context<Self>) {
+        for effect in effects {
+            match effect {
+                WorkspaceEffect::RestartPreflight {
+                    preserve_completed_status,
+                } => self.refresh_preflight_internal(*preserve_completed_status, cx),
+                WorkspaceEffect::CancelAllTasks => {
+                    self.coordinator.read(cx).cancel_all();
+                }
+                WorkspaceEffect::CleanupResultArtifacts => {
+                    self.cleanup_current_result_artifacts();
+                }
+                WorkspaceEffect::StartPreview(request) => {
+                    self.start_preview_request(request.clone(), cx);
+                }
+            }
+        }
+    }
+
+    fn clear_pending_confirmation(&mut self, cx: &mut Context<Self>) -> bool {
+        matches!(
+            self.dispatch(
+                WorkspaceAction::Navigation(NavigationAction::ClearPendingConfirmation),
+                cx,
+            )
+            .output,
+            crate::application::store::ActionOutput::Changed(true)
+        )
     }
 
     pub(super) fn ui_state(&self, cx: &App) -> WorkspaceUiState {
@@ -664,11 +705,9 @@ impl Workspace {
             .value()
             .trim()
             .to_string();
+        let revision = self.rules_panel.revision;
         let cache = &mut self.rules_panel.cache;
-        if cache.revision == self.rules_panel.revision
-            && cache.language == language
-            && cache.filter == filter
-        {
+        if cache.revision == revision && cache.language == language && cache.filter == filter {
             return;
         }
 
@@ -680,7 +719,7 @@ impl Workspace {
         ));
         cache.filter = filter;
         cache.language = language;
-        cache.revision = self.rules_panel.revision;
+        cache.revision = revision;
     }
 
     fn cleanup_result_artifacts(artifacts: &ResultArtifacts) {
@@ -728,11 +767,14 @@ impl Workspace {
         if !self.is_processing(cx)
             && self.process.read(cx).state().ui_status == ProcessUiStatus::Idle
         {
-            self.process.update(cx, |process, process_cx| {
-                process.state_mut().processing_current_file =
-                    tr(language, "status_ready").to_string();
-                process_cx.notify();
-            });
+            let _ = self.dispatch(
+                WorkspaceAction::Execution(
+                    crate::application::store::ExecutionAction::SetIdleLabel(
+                        tr(language, "status_ready").to_string(),
+                    ),
+                ),
+                cx,
+            );
         }
     }
 
@@ -749,129 +791,6 @@ impl Workspace {
                 workspace.sync_preview_table(cx);
             });
         }));
-    }
-
-    fn hash_value<T: Hash>(value: &T) -> u64 {
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        value.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn input_panel_invalidation_key(&self, cx: &App) -> u64 {
-        let settings = self.settings.read(cx).snapshot();
-        let selection = self.selection.read(cx).snapshot();
-        let ui = self.ui.read(cx).state();
-        Self::hash_value(&(
-            (settings.language, settings.options),
-            (settings.folder_blacklist, settings.ext_blacklist),
-            (
-                selection.dedupe_exact_path,
-                selection.selected_folder,
-                selection.selected_files,
-            ),
-            (
-                selection.gitignore_file,
-                selection.gitignore_rules,
-                selection.temp_folder_blacklist,
-                selection.temp_ext_blacklist,
-                selection.temp_folder_whitelist,
-                selection.temp_ext_whitelist,
-                selection.temp_whitelist_mode,
-            ),
-            (ui.selected_files_panel_height, ui.pending_confirmation),
-        ))
-    }
-
-    fn status_panel_invalidation_key(&self, cx: &App) -> u64 {
-        let process = self.process.read(cx).state();
-        let result = self.result.read(cx).state();
-        let mut hasher = std::collections::hash_map::DefaultHasher::new();
-        self.settings.read(cx).language().hash(&mut hasher);
-        process.ui_status.hash(&mut hasher);
-        process.preflight.total_files.hash(&mut hasher);
-        process.preflight.skipped_files.hash(&mut hasher);
-        process.preflight.to_process_files.hash(&mut hasher);
-        process.preflight.scanned_entries.hash(&mut hasher);
-        process.preflight.is_scanning.hash(&mut hasher);
-        process.processing_records.len().hash(&mut hasher);
-        process.processing_scanned.hash(&mut hasher);
-        process.processing_candidates.hash(&mut hasher);
-        process.processing_skipped.hash(&mut hasher);
-        process.processing_current_file.hash(&mut hasher);
-        process.last_error.hash(&mut hasher);
-        // The status panel only needs to react when the process summary changes or when an
-        // entirely new result is installed. Walking every preview file here made ordinary tab
-        // switches scale with result size and could stall the UI on large merges.
-        result.result_revision.hash(&mut hasher);
-        hasher.finish()
-    }
-
-    fn rules_panel_invalidation_key(&self, cx: &App) -> u64 {
-        let settings = self.settings.read(cx).snapshot();
-        let ui = self.ui.read(cx).state();
-        let filter = self.blacklist_filter_input.read(cx).value().to_string();
-        Self::hash_value(&(
-            settings.language,
-            settings.folder_blacklist,
-            settings.ext_blacklist,
-            ui.pending_confirmation,
-            filter,
-            self.rules_panel.revision,
-        ))
-    }
-
-    fn results_panel_invalidation_key(&self, cx: &App) -> u64 {
-        let result = self.result.read(cx).state();
-        let filter = self.preview_filter_input.read(cx).value().to_string();
-        let ui = self.ui.read(cx).state();
-        Self::hash_value(&(
-            self.settings.read(cx).language(),
-            result.active_tab,
-            result.result_revision,
-            result.preview_rows_revision,
-            result.save_state,
-            ui.content_file_list_collapsed,
-            filter,
-        ))
-    }
-
-    fn tree_pane_invalidation_key(&self, cx: &App) -> u64 {
-        let result = self.result.read(cx).state();
-        let tree_state = self.tree_panel.state.read(cx);
-        Self::hash_value(&(
-            self.settings.read(cx).language(),
-            self.tree_panel.render_state.structure_signature,
-            self.tree_panel.render_state.selected_row_ix,
-            self.tree_panel.total_summary,
-            self.tree_panel.filter_input.read(cx).value().to_string(),
-            result.result_revision,
-            tree_state.selected_index(),
-        ))
-    }
-
-    fn preview_pane_invalidation_key(&self, cx: &App) -> u64 {
-        let preview = self.preview.read(cx);
-        let state = preview.state();
-        Self::hash_value(&(
-            self.settings.read(cx).language(),
-            preview.render_revision(),
-            state.selected_preview_file_id,
-            state.preview_error.as_deref(),
-        ))
-    }
-
-    fn workspace_panel_invalidation_key(&self, kind: WorkspacePanelKind, cx: &App) -> u64 {
-        let ui = self.ui.read(cx).state();
-        match kind {
-            WorkspacePanelKind::Right => {
-                Self::hash_value(&(self.settings.read(cx).language(), ui.side_panel_tab, kind))
-            }
-            WorkspacePanelKind::CompactContent => Self::hash_value(&(
-                self.settings.read(cx).language(),
-                ui.narrow_content_tab,
-                kind,
-            )),
-        }
     }
 
     fn config_alert_from_report(
@@ -945,39 +864,23 @@ impl Workspace {
 impl WorkspacePanelView {
     fn new(
         workspace: Entity<Workspace>,
-        ui: Entity<WorkspaceUiModel>,
-        settings: Entity<SettingsModel>,
+        store: Entity<WorkspaceStore>,
         kind: WorkspacePanelKind,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
-            cx.observe(&ui, |this, _, cx| {
-                let key = this
-                    .workspace
-                    .read(cx)
-                    .workspace_panel_invalidation_key(this.kind, cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&settings, |this, _, cx| {
-                let key = this
-                    .workspace
-                    .read(cx)
-                    .workspace_panel_invalidation_key(this.kind, cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-        ];
+        let subscriptions = vec![cx.subscribe(&store, |_, _, event, cx| {
+            if event.0.intersects(
+                ChangeSet::NAVIGATION
+                    .union(ChangeSet::DRAFT_SETTINGS)
+                    .union(ChangeSet::EXECUTION_RESULT),
+            ) {
+                perf::record_workspace_view_notify();
+                cx.notify();
+            }
+        })];
         Self {
             workspace,
             kind,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1002,40 +905,17 @@ impl WorkspacePanelView {
 impl InputPanelView {
     fn new(
         workspace: Entity<Workspace>,
-        settings: Entity<SettingsModel>,
-        ui: Entity<WorkspaceUiModel>,
-        selection: Entity<SelectionModel>,
+        store: Entity<WorkspaceStore>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&ui, |this, _, cx| {
-                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&selection, |this, _, cx| {
-                let key = this.workspace.read(cx).input_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-        ];
+        let subscriptions = vec![cx.subscribe(&store, |_, _, event, cx| {
+            if event.0.intersects(INPUT_DEPENDENCIES) {
+                perf::record_workspace_view_notify();
+                cx.notify();
+            }
+        })];
         Self {
             workspace,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1044,40 +924,17 @@ impl InputPanelView {
 impl StatusPanelView {
     fn new(
         workspace: Entity<Workspace>,
-        process: Entity<ProcessModel>,
-        result: Entity<ResultModel>,
-        settings: Entity<SettingsModel>,
+        store: Entity<WorkspaceStore>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
-            cx.observe(&process, |this, _, cx| {
-                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&result, |this, _, cx| {
-                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).status_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-        ];
+        let subscriptions = vec![cx.subscribe(&store, |_, _, event, cx| {
+            if event.0.intersects(STATUS_DEPENDENCIES) {
+                perf::record_workspace_view_notify();
+                cx.notify();
+            }
+        })];
         Self {
             workspace,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1086,40 +943,24 @@ impl StatusPanelView {
 impl RulesPanelView {
     fn new(
         workspace: Entity<Workspace>,
-        settings: Entity<SettingsModel>,
-        ui: Entity<WorkspaceUiModel>,
+        store: Entity<WorkspaceStore>,
         blacklist_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
+            cx.subscribe(&store, |_, _, event, cx| {
+                if event.0.intersects(RULES_DEPENDENCIES) {
                     perf::record_workspace_view_notify();
                     cx.notify();
                 }
             }),
-            cx.observe(&ui, |this, _, cx| {
-                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&blacklist_filter_input, |this, _, cx| {
-                let key = this.workspace.read(cx).rules_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
+            cx.observe(&blacklist_filter_input, |_, _, cx| {
+                perf::record_workspace_view_notify();
+                cx.notify();
             }),
         ];
         Self {
             workspace,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1128,49 +969,24 @@ impl RulesPanelView {
 impl ResultsPanelView {
     fn new(
         workspace: Entity<Workspace>,
-        result: Entity<ResultModel>,
-        settings: Entity<SettingsModel>,
-        ui: Entity<WorkspaceUiModel>,
+        store: Entity<WorkspaceStore>,
         preview_filter_input: Entity<InputState>,
         cx: &mut Context<Self>,
     ) -> Self {
         let subscriptions = vec![
-            cx.observe(&result, |this, _, cx| {
-                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
+            cx.subscribe(&store, |_, _, event, cx| {
+                if event.0.intersects(RESULTS_DEPENDENCIES) {
                     perf::record_workspace_view_notify();
                     cx.notify();
                 }
             }),
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&ui, |this, _, cx| {
-                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&preview_filter_input, |this, _, cx| {
-                let key = this.workspace.read(cx).results_panel_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
+            cx.observe(&preview_filter_input, |_, _, cx| {
+                perf::record_workspace_view_notify();
+                cx.notify();
             }),
         ];
         Self {
             workspace,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1179,8 +995,7 @@ impl ResultsPanelView {
 impl TreePaneView {
     fn new(
         workspace: Entity<Workspace>,
-        result: Entity<ResultModel>,
-        settings: Entity<SettingsModel>,
+        store: Entity<WorkspaceStore>,
         tree_state: Entity<TreeState>,
         tree_filter_input: Entity<InputState>,
         suppress_tree_interaction_sync: Rc<Cell<bool>>,
@@ -1189,18 +1004,8 @@ impl TreePaneView {
         let tree_workspace = workspace.clone();
         let tree_interaction_guard = suppress_tree_interaction_sync.clone();
         let subscriptions = vec![
-            cx.observe(&result, |this, _, cx| {
-                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
+            cx.subscribe(&store, |_, _, event, cx| {
+                if event.0.intersects(TREE_DEPENDENCIES) {
                     perf::record_workspace_view_notify();
                     cx.notify();
                 }
@@ -1213,19 +1018,14 @@ impl TreePaneView {
                     let _ = workspace.sync_tree_interaction(workspace_cx);
                 });
             }),
-            cx.observe(&tree_filter_input, |this, _, cx| {
-                let key = this.workspace.read(cx).tree_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
+            cx.observe(&tree_filter_input, |_, _, cx| {
+                perf::record_workspace_view_notify();
+                cx.notify();
             }),
         ];
         Self {
             workspace,
             view_mode: TreeViewMode::Tree,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1234,43 +1034,22 @@ impl TreePaneView {
 impl PreviewPaneView {
     fn new(
         workspace: Entity<Workspace>,
-        preview: Entity<PreviewModel>,
-        result: Entity<ResultModel>,
-        settings: Entity<SettingsModel>,
+        store: Entity<WorkspaceStore>,
         cx: &mut Context<Self>,
     ) -> Self {
-        let subscriptions = vec![
-            cx.observe(&preview, |this, _, cx| {
-                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&result, |this, _, cx| {
-                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-            cx.observe(&settings, |this, _, cx| {
-                let key = this.workspace.read(cx).preview_pane_invalidation_key(cx);
-                if this.last_invalidation_key != key {
-                    this.last_invalidation_key = key;
-                    perf::record_workspace_view_notify();
-                    cx.notify();
-                }
-            }),
-        ];
+        let entity_id = cx.entity().entity_id();
+        let subscriptions = vec![cx.subscribe(&store, move |_, _, event, cx| {
+            if event.0.intersects(PREVIEW_DEPENDENCIES) {
+                perf::record_workspace_view_notify();
+                cx.defer(move |cx| cx.notify(entity_id));
+            }
+        })];
         Self {
             entity_id: cx.entity().entity_id(),
             workspace,
-            preview,
-            result,
-            settings,
+            preview: WorkspaceStore::preview_slice(store.clone()),
+            result: WorkspaceStore::result_slice(store.clone()),
+            settings: WorkspaceStore::settings_slice(store),
             scroll_handle: UniformListScrollHandle::new(),
             last_requested_load_range: 0..0,
             render_cache_range: 0..0,
@@ -1280,7 +1059,6 @@ impl PreviewPaneView {
             last_synced_visible_range: None,
             scheduled_visible_sync: false,
             last_scroll_anchor: 0,
-            last_invalidation_key: 0,
             _subscriptions: subscriptions,
         }
     }
@@ -1375,22 +1153,24 @@ impl Drop for Workspace {
 
 #[cfg(test)]
 mod tests {
-    use super::{Workspace, WorkspacePanelKind};
-    use crate::domain::{PreviewFileEntry, ProcessResult, ResultTab, TreeNode};
+    use super::{
+        PREVIEW_DEPENDENCIES, RULES_DEPENDENCIES, STATUS_DEPENDENCIES, TREE_DEPENDENCIES, Workspace,
+    };
+    use crate::application::store::{ChangeSet, StoreSlice};
+    use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
     use crate::services::preview::{
         EXCERPT_PREVIEW_BYTES, MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest,
         index_document, load_range,
     };
-    use crate::services::process::{ProcessEvent, ProcessHandle};
+    use crate::services::process::ProcessEvent;
+    use crate::ui::view_model::ResultTab;
     use crate::ui::{perf, preview_model::PreviewModel, state::ProcessUiStatus};
-    use gpui::{AppContext as _, Entity, TestAppContext, VisualContext as _};
+    use gpui::{AppContext as _, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
-    use std::sync::mpsc;
     use std::time::{Duration, Instant};
-    use tokio_util::sync::CancellationToken;
 
     #[gpui::test]
     fn preview_render_cache_handles_large_visible_windows(cx: &mut TestAppContext) {
@@ -1465,62 +1245,14 @@ mod tests {
         });
     }
 
-    #[gpui::test]
-    fn tree_pane_invalidation_key_tracks_tree_string_changes(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (workspace, cx) = cx.add_window_view(Workspace::new);
-
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let mut first_result = sample_result();
-            first_result.tree_string = "src/\n  main.rs\n".to_string();
-            workspace.set_result(first_result, cx);
-            let first_key = workspace.tree_pane_invalidation_key(cx);
-
-            let mut second_result = sample_result();
-            second_result.tree_string = "app/\n  lib.rs\n".to_string();
-            workspace.set_result(second_result, cx);
-            let second_key = workspace.tree_pane_invalidation_key(cx);
-
-            assert_ne!(first_key, second_key);
-        });
-    }
-
-    #[gpui::test]
-    fn results_panel_invalidation_key_tracks_content_file_list_fold(cx: &mut TestAppContext) {
-        cx.update(gpui_component::init);
-        let (workspace, cx) = cx.add_window_view(Workspace::new);
-
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let first_key = workspace.results_panel_invalidation_key(cx);
-            workspace.ui.update(cx, |ui, ui_cx| {
-                let changed = ui.set_content_file_list_collapsed(true);
-                assert!(changed);
-                ui_cx.notify();
-            });
-            let second_key = workspace.results_panel_invalidation_key(cx);
-
-            assert_ne!(first_key, second_key);
-        });
-    }
-
-    #[gpui::test]
-    fn input_panel_invalidation_key_tracks_selected_files_panel_height_changes(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
-        let (workspace, cx) = cx.add_window_view(Workspace::new);
-
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let first_key = workspace.input_panel_invalidation_key(cx);
-            workspace.ui.update(cx, |ui, ui_cx| {
-                let changed = ui.set_selected_files_panel_height(320);
-                assert!(changed);
-                ui_cx.notify();
-            });
-            let second_key = workspace.input_panel_invalidation_key(cx);
-
-            assert_ne!(first_key, second_key);
-        });
+    #[test]
+    fn pane_dependencies_are_isolated_by_change_set() {
+        assert!(RULES_DEPENDENCIES.intersects(ChangeSet::DRAFT_RULES));
+        assert!(!PREVIEW_DEPENDENCIES.intersects(ChangeSet::DRAFT_RULES));
+        assert!(STATUS_DEPENDENCIES.intersects(ChangeSet::EXECUTION));
+        assert!(!RULES_DEPENDENCIES.intersects(ChangeSet::EXECUTION));
+        assert!(TREE_DEPENDENCIES.intersects(ChangeSet::NAVIGATION_TREE));
+        assert!(!STATUS_DEPENDENCIES.intersects(ChangeSet::NAVIGATION_TREE));
     }
 
     #[gpui::test]
@@ -1574,20 +1306,11 @@ mod tests {
                 );
                 selection_cx.notify();
             });
-            let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::completed(1, sample_result()))
-                .expect("send completed");
-            drop(tx);
+            let preflight_revision = workspace.process.read(cx).state().preflight_revision;
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 1,
-                    receiver: rx,
-                    cancel: CancellationToken::new(),
-                });
             });
-
-            let _ = workspace.poll_background(cx);
+            workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
             let selection = workspace.selection_snapshot(cx);
             assert!(selection.gitignore_file.is_none());
@@ -1599,7 +1322,7 @@ mod tests {
                 selection.temp_whitelist_mode,
                 crate::domain::TemporaryWhitelistMode::WhitelistThenBlacklist
             );
-            assert!(workspace.process.read(cx).state().preflight_rx.is_some());
+            assert!(workspace.process.read(cx).state().preflight_revision > preflight_revision);
         });
     }
 
@@ -1621,22 +1344,10 @@ mod tests {
                 );
                 selection_cx.notify();
             });
-            let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::completed(1, sample_result()))
-                .expect("send completed");
-            drop(tx);
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 1,
-                    receiver: rx,
-                    cancel: CancellationToken::new(),
-                });
             });
-
-            let _ = workspace.poll_background(cx);
-            std::thread::sleep(Duration::from_millis(50));
-            let _ = workspace.poll_background(cx);
+            workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
             let process = workspace.process.read(cx).state();
             assert_eq!(process.ui_status, ProcessUiStatus::Completed);
@@ -1660,19 +1371,10 @@ mod tests {
                 );
                 selection_cx.notify();
             });
-            let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::cancelled(1)).expect("send cancelled");
-            drop(tx);
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 1,
-                    receiver: rx,
-                    cancel: CancellationToken::new(),
-                });
             });
-
-            let _ = workspace.poll_background(cx);
+            workspace.handle_process_event(ProcessEvent::cancelled(1), cx);
 
             let selection = workspace.selection_snapshot(cx);
             assert_eq!(
@@ -1699,26 +1401,15 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::completed(1, sample_result()))
-                .expect("send completed");
-            drop(tx);
-            let cancel = CancellationToken::new();
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 1,
-                    receiver: rx,
-                    cancel: cancel.clone(),
-                });
             });
 
             workspace.cancel_and_detach_background_work(cx);
-            let _ = workspace.poll_background(cx);
+            let _ = workspace.apply_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
-            assert!(cancel.is_cancelled());
             assert!(workspace.result.read(cx).state().result.is_none());
-            assert!(workspace.process.read(cx).state().process_handle.is_none());
+            assert!(workspace.process.read(cx).state().current_run_id.is_none());
         });
     }
 
@@ -1761,20 +1452,13 @@ mod tests {
                 );
                 selection_cx.notify();
             });
-            let (tx, rx) = mpsc::channel();
-            tx.send(ProcessEvent::failed(1, crate::error::AppError::new("boom")))
-                .expect("send failed");
-            drop(tx);
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 1,
-                    receiver: rx,
-                    cancel: CancellationToken::new(),
-                });
             });
-
-            let _ = workspace.poll_background(cx);
+            workspace.handle_process_event(
+                ProcessEvent::failed(1, crate::error::AppError::new("boom")),
+                cx,
+            );
 
             let selection = workspace.selection_snapshot(cx);
             assert_eq!(
@@ -1796,101 +1480,36 @@ mod tests {
     }
 
     #[gpui::test]
-    fn disconnected_process_channel_becomes_diagnostic_error(cx: &mut TestAppContext) {
+    fn failed_task_event_becomes_diagnostic_error(cx: &mut TestAppContext) {
         cx.update(gpui_component::init);
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let (tx, rx) = mpsc::channel();
-            drop(tx);
             workspace.process.update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(7);
                 process.state_mut().ui_status = ProcessUiStatus::Running;
                 process.state_mut().processing_started_at = Some(std::time::Instant::now());
-                process.state_mut().process_handle = Some(ProcessHandle {
-                    run_id: 7,
-                    receiver: rx,
-                    cancel: CancellationToken::new(),
-                });
             });
-
-            let _ = workspace.poll_background(cx);
+            workspace.handle_process_event(
+                ProcessEvent::failed(
+                    7,
+                    crate::error::AppError::with_code(
+                        crate::error::ErrorCode::Processing,
+                        "process-channel",
+                        "后台任务意外中断，未收到完成状态",
+                    ),
+                ),
+                cx,
+            );
 
             let process = workspace.process.read(cx).state();
             assert_eq!(process.ui_status, ProcessUiStatus::Error);
-            assert!(process.process_handle.is_none());
             assert_eq!(
                 process.last_error.as_deref(),
                 Some("后台任务意外中断，未收到完成状态")
             );
             assert!(process.processing_elapsed.is_some());
         });
-    }
-
-    #[gpui::test]
-    fn workspace_panel_invalidation_key_ignores_selected_files_panel_height_changes(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
-        let (workspace, cx) = cx.add_window_view(Workspace::new);
-
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let first_key =
-                workspace.workspace_panel_invalidation_key(WorkspacePanelKind::Right, cx);
-            workspace.ui.update(cx, |ui, ui_cx| {
-                let changed = ui.set_selected_files_panel_height(320);
-                assert!(changed);
-                ui_cx.notify();
-            });
-            let second_key =
-                workspace.workspace_panel_invalidation_key(WorkspacePanelKind::Right, cx);
-
-            assert_eq!(first_key, second_key);
-        });
-    }
-
-    #[gpui::test]
-    fn status_panel_invalidation_key_stays_constant_time_with_large_results(
-        cx: &mut TestAppContext,
-    ) {
-        cx.update(gpui_component::init);
-        let (workspace, cx) = cx.add_window_view(Workspace::new);
-        let path = write_preview_fixture("status_panel_large_meta", 32);
-
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            let mut result = sample_result();
-            result.merged_content_path = Some(path.clone());
-            result.preview_files = (0..120_000)
-                .map(|ix| PreviewFileEntry {
-                    id: (ix + 1) as u32,
-                    display_path: format!("src/file_{ix}.rs"),
-                    chars: ix + 1,
-                    tokens: (ix % 17) + 1,
-                    preview_blob_path: path.clone(),
-                    byte_len: 32,
-                    archive: None,
-                })
-                .collect();
-            workspace.set_result(result, cx);
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
-        });
-
-        let start = Instant::now();
-        workspace.update(cx, |workspace: &mut Workspace, cx| {
-            for _ in 0..32 {
-                let _ = workspace.status_panel_invalidation_key(cx);
-            }
-        });
-
-        assert!(
-            start.elapsed() < Duration::from_millis(150),
-            "status panel invalidation should not scale with preview file count"
-        );
-        let _ = fs::remove_file(path);
     }
 
     #[gpui::test]
@@ -2132,11 +1751,6 @@ mod tests {
                 result.set_active_tab(ResultTab::Content);
                 result_cx.notify();
             });
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         cx.update(|window, app| {
@@ -2192,26 +1806,26 @@ mod tests {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             workspace.load_merged_content_preview(cx);
         });
-
-        let rx = workspace
-            .update(cx, |workspace: &mut Workspace, cx| {
-                workspace
-                    .preview
-                    .update(cx, |preview, _| preview.take_preview_rx())
-            })
-            .expect("preview receiver");
-        match rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("preview open event")
-        {
-            PreviewEvent::Opened {
-                file_id, document, ..
-            } => {
-                assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
-                assert_eq!(document.path(), path.as_path());
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if workspace.update(cx, |workspace, cx| {
+                workspace.preview.read(cx).preview_document().is_some()
+            }) {
+                break;
             }
-            other => panic!("unexpected event: {other:?}"),
+            std::thread::sleep(Duration::from_millis(5));
         }
+        workspace.update(cx, |workspace, cx| {
+            let preview = workspace.preview.read(cx);
+            assert_eq!(
+                preview.selected_preview_file_id(),
+                Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
+            );
+            assert_eq!(
+                preview.preview_document().expect("preview document").path(),
+                path.as_path()
+            );
+        });
 
         let _ = fs::remove_file(path);
     }
@@ -2235,7 +1849,6 @@ mod tests {
                 Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
             );
             assert!(preview.preview_document().is_none());
-            assert!(preview.state().preview_rx.is_none());
             let deferred = preview.deferred_preview().expect("deferred merged preview");
             assert_eq!(deferred.source_path, path);
             assert_eq!(deferred.excerpt_byte_len, EXCERPT_PREVIEW_BYTES);
@@ -2267,26 +1880,25 @@ mod tests {
                     .and_then(|state| state.excerpt_path.clone())
             })
             .expect("excerpt preview path");
-        let rx = workspace
-            .update(cx, |workspace: &mut Workspace, cx| {
-                workspace
-                    .preview
-                    .update(cx, |preview, _| preview.take_preview_rx())
-            })
-            .expect("preview receiver");
-        match rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("preview open event")
-        {
-            PreviewEvent::Opened {
-                file_id, document, ..
-            } => {
-                assert_eq!(file_id, super::MERGED_CONTENT_PREVIEW_FILE_ID);
-                assert_eq!(document.path(), excerpt_path.as_path());
-                assert_ne!(document.path(), path.as_path());
+        for _ in 0..100 {
+            cx.run_until_parked();
+            if workspace.update(cx, |workspace, cx| {
+                workspace.preview.read(cx).preview_document().is_some()
+            }) {
+                break;
             }
-            other => panic!("unexpected event: {other:?}"),
+            std::thread::sleep(Duration::from_millis(5));
         }
+        workspace.update(cx, |workspace, cx| {
+            let preview = workspace.preview.read(cx);
+            assert_eq!(
+                preview.selected_preview_file_id(),
+                Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
+            );
+            let document = preview.preview_document().expect("preview document");
+            assert_eq!(document.path(), excerpt_path.as_path());
+            assert_ne!(document.path(), path.as_path());
+        });
 
         assert!(
             fs::metadata(&excerpt_path).expect("excerpt metadata").len() <= EXCERPT_PREVIEW_BYTES
@@ -2315,21 +1927,11 @@ mod tests {
                 })
                 .collect();
             workspace.set_result(result, cx);
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         let start = Instant::now();
         cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
             workspace.set_tab(&1, window, cx);
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         assert!(start.elapsed() < Duration::from_millis(400));
@@ -2364,20 +1966,10 @@ mod tests {
                 0..128,
                 super::MERGED_CONTENT_PREVIEW_FILE_ID,
             );
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
             workspace.set_tab(&1, window, cx);
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         let start = Instant::now();
@@ -2420,11 +2012,8 @@ mod tests {
                     loaded_range: 0..1,
                     lines,
                 });
-                preview.set_preview_rx(None);
                 preview_cx.notify();
             });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         let rendered_line = workspace
@@ -2466,11 +2055,6 @@ mod tests {
                 result.set_active_tab(ResultTab::Content);
                 result_cx.notify();
             });
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
         });
 
         let start = Instant::now();
@@ -2582,30 +2166,11 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_paths(&main_path, &lib_path), cx);
-            workspace.preview.update(cx, |preview, _| {
-                preview.set_preview_rx(None);
-            });
-            workspace.poll_task = None;
-            workspace.poll_task_running = false;
 
             assert!(workspace.sync_tree_selection_for_preview_file(1, cx));
-            assert_eq!(
-                workspace
-                    .state
-                    .workspace
-                    .tree_panel
-                    .selected_node_id
-                    .as_deref(),
-                Some("src/main.rs")
-            );
-            assert!(
-                workspace
-                    .state
-                    .workspace
-                    .tree_panel
-                    .expanded_ids
-                    .contains("src")
-            );
+            let tree_state = workspace.tree_state(cx);
+            assert_eq!(tree_state.selected_node_id.as_deref(), Some("src/main.rs"));
+            assert!(tree_state.expanded_ids.contains("src"));
         });
 
         let _ = fs::remove_file(main_path);
@@ -2705,7 +2270,7 @@ mod tests {
     }
 
     fn seed_preview_model(
-        preview: &Entity<PreviewModel>,
+        preview: &StoreSlice<PreviewModel>,
         path: &std::path::Path,
         cx: &mut impl gpui::AppContext,
         loaded_range: std::ops::Range<usize>,

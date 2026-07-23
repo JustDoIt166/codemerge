@@ -1,4 +1,4 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 use std::ops::Range;
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -6,9 +6,7 @@ use std::time::{Duration, Instant};
 use gpui::SharedString;
 
 use crate::domain::{AppConfigV1, FileEntry, PreflightStats, ProcessRecord};
-use crate::services::preflight::PreflightEvent;
-use crate::services::preview::{PreviewDocument, PreviewEvent};
-use crate::services::process::ProcessHandle;
+use crate::services::preview::PreviewDocument;
 
 #[derive(Default)]
 pub struct AppState {
@@ -27,21 +25,21 @@ pub enum ProcessUiStatus {
     Error,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum SidePanelTab {
     #[default]
     Results,
     Rules,
 }
 
-#[derive(Clone, Copy, Default, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum NarrowContentTab {
     #[default]
     Status,
     Results,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PendingConfirmation {
     ClearInputs,
     ResetBlacklist,
@@ -92,7 +90,7 @@ impl AppState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct SelectionState {
     pub dedupe_exact_path: bool,
     pub selected_folder: Option<PathBuf>,
@@ -127,16 +125,14 @@ impl Default for SettingsState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct ProcessState {
     pub preflight: PreflightStats,
     pub preflight_revision: u64,
     pub preflight_preserves_status: bool,
-    pub preflight_rx: Option<std::sync::mpsc::Receiver<PreflightEvent>>,
-    pub process_handle: Option<ProcessHandle>,
     pub current_run_id: Option<crate::services::process::ProcessRunId>,
     pub ui_status: ProcessUiStatus,
-    pub processing_records: Vec<ProcessRecord>,
+    pub processing_records: VecDeque<ProcessRecord>,
     pub processing_scanned: usize,
     pub processing_candidates: usize,
     pub processing_skipped: usize,
@@ -151,7 +147,6 @@ pub struct ProcessState {
 
 impl ProcessState {
     pub fn discard_preflight_for_run(&mut self) {
-        self.preflight_rx = None;
         self.preflight_revision = self.preflight_revision.wrapping_add(1);
         self.preflight_preserves_status = false;
         self.preflight = PreflightStats::default();
@@ -174,7 +169,7 @@ impl ProcessState {
 
     pub fn finish_run(&mut self) {
         self.processing_elapsed = self.processing_started_at.map(|start| start.elapsed());
-        self.process_handle = None;
+        self.current_run_id = None;
         self.processing_started_at = None;
     }
 
@@ -187,7 +182,7 @@ impl ProcessState {
     }
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TreePanelState {
     pub selected_node_id: Option<String>,
     pub expanded_ids: BTreeSet<String>,
@@ -220,11 +215,10 @@ pub enum PreviewLoadRequestKind {
     DeferredFull,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub struct PreviewPanelState {
     pub selected_preview_file_id: Option<u32>,
     pub preview_revision: u64,
-    pub preview_rx: Option<std::sync::mpsc::Receiver<PreviewEvent>>,
     pub preview_requested_range: Option<Range<usize>>,
     pub queued_preview_range: Option<Range<usize>>,
     pub preview_document: Option<PreviewDocument>,

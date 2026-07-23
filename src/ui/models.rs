@@ -1,6 +1,6 @@
 use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult, TemporaryWhitelistMode};
 use crate::services::preflight::PreflightEvent;
-use crate::services::process::{ProcessEvent, ProcessEventKind, ProcessHandle};
+use crate::services::process::{ProcessEvent, ProcessEventKind, ProcessRunId};
 use crate::ui::state::{
     NarrowContentTab, PendingConfirmation, ProcessState, ProcessUiStatus, SelectionState,
     SettingsState, SidePanelTab, WorkspaceUiState, clamp_selected_files_panel_height,
@@ -256,7 +256,7 @@ impl ProcessModel {
     }
 
     pub fn is_processing(&self) -> bool {
-        self.state.process_handle.is_some()
+        self.state.current_run_id.is_some()
     }
 
     pub fn clear_runtime(&mut self, status_ready: String) {
@@ -266,18 +266,30 @@ impl ProcessModel {
         };
     }
 
-    pub fn start_run(&mut self, handle: ProcessHandle, scanning_label: String) {
+    pub fn start_run(&mut self, run_id: ProcessRunId, scanning_label: String) {
         self.state.discard_preflight_for_run();
         self.state.reset_for_run(scanning_label);
-        self.state.current_run_id = Some(handle.run_id);
-        self.state.process_handle = Some(handle);
+        self.state.current_run_id = Some(run_id);
+    }
+
+    pub fn begin_preflight(&mut self, preserve_completed_status: bool) -> u64 {
+        let is_processing = self.is_processing();
+        self.state.preflight_revision = self.state.preflight_revision.wrapping_add(1);
+        self.state.preflight_preserves_status =
+            preserve_completed_status && self.state.ui_status == ProcessUiStatus::Completed;
+        if !is_processing {
+            if !self.state.preflight_preserves_status {
+                self.state.ui_status = ProcessUiStatus::Preflight;
+            }
+            self.state.last_error = None;
+        }
+        self.state.preflight_revision
     }
 
     pub fn cancel_running(&mut self) -> bool {
-        let Some(handle) = &self.state.process_handle else {
+        if !self.is_processing() {
             return false;
-        };
-        handle.cancel.cancel();
+        }
         self.state.ui_status = ProcessUiStatus::Cancelling;
         true
     }
@@ -286,7 +298,16 @@ impl ProcessModel {
         &mut self,
         event: PreflightEvent,
         language: crate::domain::Language,
-    ) {
+    ) -> bool {
+        let revision = match &event {
+            PreflightEvent::Started { revision }
+            | PreflightEvent::Progress { revision, .. }
+            | PreflightEvent::Completed { revision, .. }
+            | PreflightEvent::Failed { revision, .. } => *revision,
+        };
+        if revision != self.state.preflight_revision {
+            return false;
+        }
         let ready_label = tr(language, "status_ready");
         let is_processing = self.is_processing();
         let should_preserve_status = self.state.preflight_preserves_status;
@@ -337,6 +358,7 @@ impl ProcessModel {
                 }
             }
         }
+        true
     }
 
     pub fn apply_process_event(
@@ -345,7 +367,7 @@ impl ProcessModel {
         language: crate::domain::Language,
     ) -> ProcessEventEffect {
         if self.state.current_run_id != Some(event.run_id) {
-            return ProcessEventEffect::Continue;
+            return ProcessEventEffect::Ignored;
         }
 
         let accepts_progress = self.state.ui_status == ProcessUiStatus::Running;
@@ -356,7 +378,7 @@ impl ProcessModel {
                 skipped,
             } => {
                 if !accepts_progress {
-                    return ProcessEventEffect::Continue;
+                    return ProcessEventEffect::Ignored;
                 }
                 self.state.preflight.scanned_entries = scanned;
                 self.state.preflight.to_process_files = candidates;
@@ -373,7 +395,7 @@ impl ProcessModel {
             }
             ProcessEventKind::Record(record) => {
                 if !accepts_progress {
-                    return ProcessEventEffect::Continue;
+                    return ProcessEventEffect::Ignored;
                 }
                 self.push_record(record);
                 ProcessEventEffect::Continue
@@ -415,15 +437,17 @@ impl ProcessModel {
                 self.state.processing_skipped += 1;
             }
         }
-        self.state.processing_records.push(record);
-        if self.state.processing_records.len() > MAX_PROCESSING_RECORDS {
-            let overflow = self.state.processing_records.len() - MAX_PROCESSING_RECORDS;
-            self.state.processing_records.drain(0..overflow);
+        self.state.processing_records.push_back(record);
+        while self.state.processing_records.len() > MAX_PROCESSING_RECORDS {
+            let _ = self.state.processing_records.pop_front();
         }
+        crate::ui::perf::record_processing_queue_len(self.state.processing_records.len());
     }
 }
 
+#[derive(Debug)]
 pub enum ProcessEventEffect {
+    Ignored,
     Continue,
     Completed(Box<ProcessResult>),
     Cancelled,
@@ -442,12 +466,9 @@ mod tests {
     use crate::processor::stats::ProcessingStats;
     use crate::services::preflight::PreflightEvent;
     use crate::services::process::ProcessEvent;
-    use crate::services::process::ProcessHandle;
     use crate::ui::state::{
         NarrowContentTab, PendingConfirmation, ProcessUiStatus, SelectionState, SidePanelTab,
     };
-    use std::sync::mpsc;
-    use tokio_util::sync::CancellationToken;
 
     #[test]
     fn effective_filters_respect_use_gitignore_and_temporary_rules() {
@@ -595,23 +616,12 @@ mod tests {
     #[test]
     fn process_model_start_run_discards_stale_preflight_events() {
         let mut process = ProcessModel::new("ready".into());
-        let (_preflight_tx, preflight_rx) = mpsc::channel();
         process.state_mut().preflight_revision = 7;
-        process.state_mut().preflight_rx = Some(preflight_rx);
         process.state_mut().preflight.total_files = 9;
         process.state_mut().preflight.to_process_files = 8;
 
-        let (_tx, rx) = mpsc::channel();
-        process.start_run(
-            ProcessHandle {
-                run_id: 8,
-                receiver: rx,
-                cancel: CancellationToken::new(),
-            },
-            "Scanning files".into(),
-        );
+        process.start_run(8, "Scanning files".into());
 
-        assert!(process.state().preflight_rx.is_none());
         assert_eq!(process.state().preflight_revision, 8);
         assert_eq!(process.state().preflight.total_files, 0);
 
@@ -738,15 +748,7 @@ mod tests {
     #[test]
     fn cancelling_run_ignores_late_progress_until_cancelled_terminal_event() {
         let mut process = ProcessModel::new("ready".into());
-        let (_tx, rx) = mpsc::channel();
-        process.start_run(
-            ProcessHandle {
-                run_id: 11,
-                receiver: rx,
-                cancel: CancellationToken::new(),
-            },
-            "Scanning files".into(),
-        );
+        process.start_run(11, "Scanning files".into());
 
         assert!(process.cancel_running());
         assert_eq!(process.state().ui_status, ProcessUiStatus::Cancelling);
@@ -786,7 +788,7 @@ mod tests {
         let effect =
             process.apply_process_event(ProcessEvent::scanning(21, 99, 88, 11), Language::En);
 
-        assert!(matches!(effect, ProcessEventEffect::Continue));
+        assert!(matches!(effect, ProcessEventEffect::Ignored));
         assert_eq!(process.state().processing_scanned, 0);
         assert_eq!(process.state().ui_status, ProcessUiStatus::Running);
     }

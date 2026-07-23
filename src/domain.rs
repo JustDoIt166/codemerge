@@ -137,36 +137,6 @@ pub struct ArchiveEntrySource {
 }
 
 #[derive(Debug, Clone)]
-pub struct TreeNodeViewModel {
-    pub id: String,
-    pub label: String,
-    pub relative_path: String,
-    pub is_folder: bool,
-    pub depth: usize,
-}
-
-#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
-pub struct PreviewRowViewModel {
-    pub id: u32,
-    pub display_path: String,
-    pub chars: usize,
-    pub tokens: usize,
-    pub archive: Option<ArchiveEntrySource>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct PreviewViewport {
-    pub visible_range: std::ops::Range<usize>,
-    pub loaded_range: std::ops::Range<usize>,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ProgressRowViewModel {
-    pub file_name: String,
-    pub status_label: String,
-}
-
-#[derive(Debug, Clone)]
 pub struct TreeNode {
     pub id: String,
     pub label: String,
@@ -195,13 +165,6 @@ pub struct PreflightStats {
     pub to_process_files: usize,
     pub scanned_entries: usize,
     pub is_scanning: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Hash)]
-pub enum ResultTab {
-    #[default]
-    Tree,
-    Content,
 }
 
 #[derive(Debug, Clone)]
