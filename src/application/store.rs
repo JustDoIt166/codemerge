@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
+use gpui::EventEmitter;
 #[cfg(test)]
-use gpui::AppContext;
-use gpui::{App, Entity, EventEmitter};
+use gpui::{App, AppContext, Entity};
 
 use crate::domain::{
     AppConfigV1, FileEntry, Language, OutputFormat, ProcessResult, TemporaryWhitelistMode,
@@ -66,96 +66,6 @@ pub struct WorkspaceRevisions {
     pub preview: u64,
     pub navigation: u64,
     pub tree: u64,
-}
-
-#[derive(Clone)]
-pub struct DraftState {
-    selection: SelectionState,
-    settings: SettingsState,
-}
-
-impl DraftState {
-    pub fn selection(&self) -> &SelectionState {
-        &self.selection
-    }
-
-    pub fn settings(&self) -> &SettingsState {
-        &self.settings
-    }
-}
-
-#[derive(Clone)]
-pub struct ExecutionState {
-    process: ProcessState,
-    result: ResultState,
-}
-
-impl ExecutionState {
-    pub fn process(&self) -> &ProcessState {
-        &self.process
-    }
-
-    pub fn result(&self) -> &ResultState {
-        &self.result
-    }
-}
-
-#[derive(Clone)]
-pub struct PreviewState {
-    state: PreviewPanelState,
-}
-
-impl PreviewState {
-    pub fn state(&self) -> &PreviewPanelState {
-        &self.state
-    }
-}
-
-#[derive(Clone)]
-pub struct NavigationState {
-    ui: WorkspaceUiState,
-    tree: crate::ui::state::TreePanelState,
-}
-
-impl NavigationState {
-    pub fn ui(&self) -> WorkspaceUiState {
-        self.ui
-    }
-
-    pub fn tree(&self) -> &crate::ui::state::TreePanelState {
-        &self.tree
-    }
-}
-
-#[derive(Clone)]
-pub struct WorkspaceState {
-    draft: DraftState,
-    execution: ExecutionState,
-    preview: PreviewState,
-    navigation: NavigationState,
-    revisions: WorkspaceRevisions,
-}
-
-impl WorkspaceState {
-    pub fn draft(&self) -> &DraftState {
-        &self.draft
-    }
-
-    pub fn execution(&self) -> &ExecutionState {
-        &self.execution
-    }
-
-    pub fn preview(&self) -> &PreviewState {
-        &self.preview
-    }
-
-    pub fn navigation(&self) -> &NavigationState {
-        &self.navigation
-    }
-
-    pub fn revisions(&self) -> WorkspaceRevisions {
-        self.revisions
-    }
 }
 
 impl WorkspaceRevisions {
@@ -393,11 +303,13 @@ impl SliceContext {
     }
 }
 
+#[cfg(test)]
 pub(crate) struct StoreSlice<T> {
     store: Entity<WorkspaceStore>,
     _marker: std::marker::PhantomData<fn() -> T>,
 }
 
+#[cfg(test)]
 impl<T> Clone for StoreSlice<T> {
     fn clone(&self) -> Self {
         Self {
@@ -407,6 +319,7 @@ impl<T> Clone for StoreSlice<T> {
     }
 }
 
+#[cfg(test)]
 impl<T> StoreSlice<T> {
     fn new(store: Entity<WorkspaceStore>) -> Self {
         Self {
@@ -429,9 +342,11 @@ pub struct WorkspaceStore {
 
 impl EventEmitter<WorkspaceEvent> for WorkspaceStore {}
 
+#[cfg(test)]
 macro_rules! impl_store_slice {
     ($type:ty, $field:ident, $changes:expr) => {
         impl StoreSlice<$type> {
+            #[allow(dead_code)]
             pub fn read<'a>(&self, cx: &'a App) -> &'a $type {
                 &self.store.read(cx).$field
             }
@@ -458,20 +373,18 @@ macro_rules! impl_store_slice {
     };
 }
 
+#[cfg(test)]
 impl_store_slice!(
     SelectionModel,
     selection,
     ChangeSet::DRAFT_SELECTION.union(ChangeSet::DRAFT_RULES)
 );
-impl_store_slice!(
-    SettingsModel,
-    settings,
-    ChangeSet::DRAFT_SETTINGS.union(ChangeSet::DRAFT_RULES)
-);
+#[cfg(test)]
 impl_store_slice!(ProcessModel, process, ChangeSet::EXECUTION);
+#[cfg(test)]
 impl_store_slice!(ResultModel, result, ChangeSet::EXECUTION_RESULT);
+#[cfg(test)]
 impl_store_slice!(PreviewModel, preview, ChangeSet::PREVIEW);
-impl_store_slice!(WorkspaceUiModel, navigation, ChangeSet::NAVIGATION);
 
 impl WorkspaceStore {
     pub fn new(config: AppConfigV1, ready_label: String) -> Self {
@@ -487,48 +400,23 @@ impl WorkspaceStore {
         }
     }
 
-    pub fn state(&self) -> WorkspaceState {
-        WorkspaceState {
-            draft: DraftState {
-                selection: self.selection.snapshot(),
-                settings: self.settings.snapshot(),
-            },
-            execution: ExecutionState {
-                process: self.process.state().clone(),
-                result: self.result.state().clone(),
-            },
-            preview: PreviewState {
-                state: self.preview.state().clone(),
-            },
-            navigation: NavigationState {
-                ui: self.navigation.state(),
-                tree: self.navigation_tree.clone(),
-            },
-            revisions: self.revisions,
-        }
-    }
-
+    #[cfg(test)]
     pub(crate) fn selection_slice(store: Entity<Self>) -> StoreSlice<SelectionModel> {
         StoreSlice::new(store)
     }
 
-    pub(crate) fn settings_slice(store: Entity<Self>) -> StoreSlice<SettingsModel> {
-        StoreSlice::new(store)
-    }
-
+    #[cfg(test)]
     pub(crate) fn process_slice(store: Entity<Self>) -> StoreSlice<ProcessModel> {
         StoreSlice::new(store)
     }
 
+    #[cfg(test)]
     pub(crate) fn result_slice(store: Entity<Self>) -> StoreSlice<ResultModel> {
         StoreSlice::new(store)
     }
 
+    #[cfg(test)]
     pub(crate) fn preview_slice(store: Entity<Self>) -> StoreSlice<PreviewModel> {
-        StoreSlice::new(store)
-    }
-
-    pub(crate) fn navigation_slice(store: Entity<Self>) -> StoreSlice<WorkspaceUiModel> {
         StoreSlice::new(store)
     }
 

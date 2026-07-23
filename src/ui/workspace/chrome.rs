@@ -39,14 +39,17 @@ impl Workspace {
     fn build_workspace_chrome_view_model(&self, cx: &App) -> WorkspaceChromeViewModel {
         let language = self.language(cx);
         let merged_file_size_hint = self.merged_file_size_hint(cx);
-        let process = self.process.read(cx);
-        model::build_workspace_chrome_view_model(process.state(), language, merged_file_size_hint)
+        model::build_workspace_chrome_view_model(
+            self.store.read(cx).process(),
+            language,
+            merged_file_size_hint,
+        )
     }
 
     fn merged_file_size_hint(&self, cx: &App) -> Option<String> {
-        self.result
+        self.store
             .read(cx)
-            .state()
+            .result()
             .result
             .as_ref()
             .and_then(|result| result.merged_content_path.as_ref())

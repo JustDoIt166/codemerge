@@ -52,7 +52,7 @@ impl Workspace {
     }
 
     fn persist_settings_async(&self, cx: &mut Context<Self>) {
-        let config = self.settings.read(cx).to_config();
+        let config = self.store.read(cx).config();
         let revision = crate::services::settings::begin_save();
         cx.spawn(async move |this, cx| {
             let result = crate::services::settings::save_if_latest(revision, config);
@@ -236,7 +236,7 @@ impl Workspace {
         );
         if cleared {
             self.tree_panel.data =
-                model::build_tree_panel_data(self.result.read(cx).state().result.as_ref());
+                model::build_tree_panel_data(self.store.read(cx).result().result.as_ref());
             self.tree_panel.input_exclusion_enabled = false;
             self.tree_panel.projection = model::TreeProjectionState::default();
             self.tree_panel.render_state = model::TreeRenderState::default();
@@ -353,7 +353,12 @@ impl Workspace {
         }
         if let TableEvent::SelectRow(ix) | TableEvent::DoubleClickedRow(ix) = event
             && let Some(row) = table.read(cx).delegate().rows.get(*ix)
-            && self.preview.read(cx).selected_preview_file_id() != Some(row.id)
+            && self
+                .store
+                .read(cx)
+                .preview_model()
+                .selected_preview_file_id()
+                != Some(row.id)
         {
             self.open_preview_file_from_results(row.id, true, cx);
         }
@@ -806,11 +811,7 @@ impl Workspace {
             .output,
             crate::application::store::ActionOutput::Changed(true)
         ) {
-            let _ = self
-                .coordinator
-                .read(cx)
-                .tasks()
-                .request_cancel(JobKind::Process);
+            let _ = self.coordinator.read(cx).request_cancel(JobKind::Process);
             self.push_notice(
                 NotificationType::Info,
                 tr(self.language(cx), "cancel_requested"),
@@ -1516,7 +1517,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let result = self.result.read(cx).state().result.clone();
+        let result = self.store.read(cx).result().result.clone();
         if let Some(result) = result.as_ref() {
             copy_to_clipboard(&result.tree_string, self.language(cx), window, cx);
         } else {
@@ -1535,7 +1536,12 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let document = self.preview.read(cx).preview_document().cloned();
+        let document = self
+            .store
+            .read(cx)
+            .preview_model()
+            .preview_document()
+            .cloned();
         let Some(document) = document else {
             self.push_notice(
                 NotificationType::Warning,
@@ -1676,7 +1682,7 @@ impl Workspace {
         let Some(save_revision) = save_revision else {
             return;
         };
-        let result = self.result.read(cx).state().result.clone();
+        let result = self.store.read(cx).result().result.clone();
         let Some(result) = result.as_ref() else {
             let _ = self.dispatch(
                 crate::application::store::WorkspaceAction::Execution(

@@ -24,7 +24,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(node_id) =
-            model::preview_file_node_id(self.result.read(cx).state().result.as_ref(), file_id)
+            model::preview_file_node_id(self.store.read(cx).result().result.as_ref(), file_id)
         else {
             return false;
         };
@@ -64,7 +64,7 @@ impl Workspace {
         preview_path: std::path::PathBuf,
         cx: &mut Context<Self>,
     ) {
-        let preview_state = self.preview.read(cx).state();
+        let preview_state = self.store.read(cx).preview();
         if preview_state.selected_preview_file_id == Some(file_id)
             && (preview_state.preview_document.is_some()
                 || preview_state.pending_request_type.is_some())
@@ -133,9 +133,9 @@ impl Workspace {
 
     pub(super) fn load_merged_content_preview(&mut self, cx: &mut Context<Self>) {
         let merged_content_path = self
-            .result
+            .store
             .read(cx)
-            .state()
+            .result()
             .result
             .as_ref()
             .and_then(|result| result.merged_content_path.clone());
@@ -143,7 +143,7 @@ impl Workspace {
             return;
         };
 
-        let preview_state = self.preview.read(cx).state();
+        let preview_state = self.store.read(cx).preview();
         if preview_state.selected_preview_file_id == Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
             && (preview_state.preview_document.is_some()
                 || preview_state.pending_request_type.is_some()
@@ -199,7 +199,7 @@ impl Workspace {
 
     pub(super) fn load_deferred_merged_content_excerpt(&mut self, cx: &mut Context<Self>) {
         let Some((source_path, source_byte_len)) = ({
-            let preview = self.preview.read(cx);
+            let preview = self.store.read(cx).preview_model();
             preview
                 .state()
                 .pending_request_type
@@ -240,7 +240,7 @@ impl Workspace {
 
     pub(super) fn load_deferred_merged_content_full(&mut self, cx: &mut Context<Self>) {
         let Some(source_path) = ({
-            let preview = self.preview.read(cx);
+            let preview = self.store.read(cx).preview_model();
             preview
                 .state()
                 .pending_request_type
@@ -264,7 +264,7 @@ impl Workspace {
     }
 
     fn apply_preflight_event(&mut self, event: PreflightEvent, cx: &mut Context<Self>) {
-        let current_revision = self.process.read(cx).state().preflight_revision;
+        let current_revision = self.store.read(cx).process().preflight_revision;
         let completed_files = match &event {
             PreflightEvent::Completed {
                 revision, files, ..
@@ -284,7 +284,7 @@ impl Workspace {
         if let Some(files) = completed_files {
             let data = model::build_preflight_tree_panel_data(
                 files.as_ref(),
-                self.result.read(cx).state().result.as_ref(),
+                self.store.read(cx).result().result.as_ref(),
             );
             let initialize_expansion = !self.tree_panel.input_exclusion_enabled;
             self.tree_panel.data = Some(data);
@@ -338,7 +338,7 @@ impl Workspace {
             ProcessEventEffect::Ignored | ProcessEventEffect::Continue => (false, false),
             ProcessEventEffect::Completed(result) => {
                 self.install_result_views(result.as_ref(), cx);
-                let process = self.process.read(cx).state();
+                let process = self.store.read(cx).process();
                 let completed = process.processing_completed;
                 let succeeded = process.processing_succeeded;
                 let failed = completed.saturating_sub(succeeded);
@@ -370,9 +370,9 @@ impl Workspace {
             }
             ProcessEventEffect::Failed => {
                 let error = self
-                    .process
+                    .store
                     .read(cx)
-                    .state()
+                    .process()
                     .last_error
                     .clone()
                     .unwrap_or_else(|| {
@@ -531,16 +531,20 @@ impl Workspace {
             .value()
             .trim()
             .to_ascii_lowercase();
-        let current_selected_id = self.preview.read(cx).selected_preview_file_id();
+        let current_selected_id = self
+            .store
+            .read(cx)
+            .preview_model()
+            .selected_preview_file_id();
         let sort = self.preview_table.read(cx).delegate().sort;
         let has_merged_content = self
-            .result
+            .store
             .read(cx)
-            .state()
+            .result()
             .result
             .as_ref()
             .is_some_and(|result| result.merged_content_path.is_some());
-        let result_key = self.result.read(cx).state().result_revision;
+        let result_key = self.store.read(cx).result().result_revision;
         let table_model = if self.preview_table_cache.filter == filter
             && self.preview_table_cache.result_key == result_key
             && self.preview_table_cache.current_selected_id == current_selected_id
@@ -548,7 +552,7 @@ impl Workspace {
         {
             self.preview_table_cache.model.clone().unwrap_or_else(|| {
                 model::build_preview_table_model(
-                    self.result.read(cx).state().result.as_ref(),
+                    self.store.read(cx).result().result.as_ref(),
                     filter.as_str(),
                     current_selected_id,
                     sort,
@@ -556,7 +560,7 @@ impl Workspace {
             })
         } else {
             let model = model::build_preview_table_model(
-                self.result.read(cx).state().result.as_ref(),
+                self.store.read(cx).result().result.as_ref(),
                 filter.as_str(),
                 current_selected_id,
                 sort,
@@ -773,10 +777,22 @@ impl Workspace {
         direction: crate::ui::preview_model::PreviewScrollDirection,
         cx: &mut Context<Self>,
     ) -> bool {
-        if self.preview.read(cx).preview_document().is_none() {
+        if self
+            .store
+            .read(cx)
+            .preview_model()
+            .preview_document()
+            .is_none()
+        {
             return false;
         }
-        if self.preview.read(cx).selected_preview_file_id().is_none() {
+        if self
+            .store
+            .read(cx)
+            .preview_model()
+            .selected_preview_file_id()
+            .is_none()
+        {
             return false;
         }
 
@@ -796,9 +812,9 @@ impl Workspace {
 
     pub(super) fn load_preview(&mut self, file_id: u32, cx: &mut Context<Self>) {
         let Some(entry) = self
-            .result
+            .store
             .read(cx)
-            .state()
+            .result()
             .result
             .as_ref()
             .and_then(|result| {

@@ -63,7 +63,7 @@ impl Workspace {
         let language = self.language(cx);
         let has_inputs = self.has_inputs(cx);
         let is_processing = self.is_processing(cx);
-        let is_cancelling = self.process.read(cx).state().ui_status == ProcessUiStatus::Cancelling;
+        let is_cancelling = self.store.read(cx).process().ui_status == ProcessUiStatus::Cancelling;
 
         h_flex()
             .gap_2()
@@ -791,18 +791,16 @@ impl Workspace {
     }
 
     fn build_status_panel_view_model(&self, cx: &App) -> super::model::StatusPanelViewModel {
-        let result = self.result.read(cx);
-        let result_state = result.state();
+        let store = self.store.read(cx);
+        let result_state = store.result();
         let merged_file_size_hint = result_state
             .result
             .as_ref()
             .and_then(|result| result.merged_content_path.as_ref())
             .and_then(|path| std::fs::metadata(path).ok())
             .map(|metadata| super::view::format_size(metadata.len()));
-        let process = self.process.read(cx);
-
         super::model::build_status_panel_view_model(
-            process.state(),
+            store.process(),
             result_state.result.as_ref(),
             self.language(cx),
             merged_file_size_hint,
@@ -1043,10 +1041,10 @@ impl Workspace {
     }
 
     fn build_results_panel_view_model(&self, cx: &App) -> super::model::ResultsPanelViewModel {
-        let result = self.result.read(cx);
+        let result = self.store.read(cx).result();
         super::model::build_results_panel_view_model(
-            result.state().active_tab,
-            result.has_content_result(),
+            result.active_tab,
+            self.result_has_content(cx),
             self.language(cx),
         )
     }
@@ -1071,7 +1069,7 @@ impl Workspace {
                 .on_click(cx.listener(Self::copy_preview))
                 .into_any_element(),
         };
-        let save_state = self.result.read(cx).state().save_state;
+        let save_state = self.store.read(cx).result().save_state;
         let (download_label, download_icon) = match save_state {
             crate::ui::result_model::ResultSaveState::Idle => {
                 (tr(language, "download"), IconName::ArrowDown)
@@ -1347,8 +1345,7 @@ impl Workspace {
     }
 
     fn build_content_panel_view_model(&self, cx: &App) -> super::model::ContentPanelViewModel {
-        let result = self.result.read(cx);
-        let preview_rows_len = result.state().preview_row_count;
+        let preview_rows_len = self.store.read(cx).result().preview_row_count;
         let filter_active = !self.preview_filter_input.read(cx).value().trim().is_empty();
 
         super::model::build_content_panel_view_model(
@@ -1683,12 +1680,12 @@ impl TreePaneView {
         let filter_input = workspace.tree_panel.filter_input.clone();
         let tree_state = workspace.tree_panel.state.clone();
         let tree_filter = filter_input.read(cx).value().trim().to_string();
-        let result = workspace.result.read(cx);
+        let result = workspace.store.read(cx).result();
         let view_model = super::model::build_tree_pane_view_model(
             &workspace.tree_panel.render_state,
             workspace.tree_panel.total_summary,
             tree_filter.as_str(),
-            result.state().result.as_ref(),
+            result.result.as_ref(),
             language,
             matches!(self.view_mode, TreeViewMode::PlainText),
         );
@@ -1903,11 +1900,12 @@ impl PreviewPaneView {
         &self,
         cx: &App,
     ) -> (crate::domain::Language, super::model::PreviewPaneViewModel) {
-        let language = self.settings.read(cx).language();
-        let result = self.result.read(cx);
-        let preview = self.preview.read(cx);
+        let store = self.store.read(cx);
+        let language = store.language();
+        let result = store.result();
+        let preview = store.preview_model();
         let view_model = super::model::build_preview_pane_view_model(
-            result.state().result.as_ref(),
+            result.result.as_ref(),
             preview.selected_preview_file_id(),
             preview.state().pending_request_type.is_some(),
             preview.state().preview_error.as_deref(),
@@ -2287,7 +2285,7 @@ impl PreviewPaneView {
     pub(super) fn sync_visible_range(&mut self, visible: std::ops::Range<usize>, cx: &mut App) {
         perf::record_preview_visible_sync();
         let (line_count, already_loaded, direction) = {
-            let preview = self.preview.read(cx);
+            let preview = self.store.read(cx).preview_model();
             let preview_state = preview.state();
             let Some(document) = &preview_state.preview_document else {
                 self.last_requested_load_range = 0..0;
@@ -2343,10 +2341,10 @@ impl PreviewPaneView {
         if visible.is_empty() {
             self.render_cache.clear();
             self.render_cache_range = visible;
-            self.render_cache_revision = self.preview.read(cx).render_revision();
+            self.render_cache_revision = self.store.read(cx).preview_model().render_revision();
             return;
         }
-        let render_revision = self.preview.read(cx).render_revision();
+        let render_revision = self.store.read(cx).preview_model().render_revision();
         if self.render_cache_revision == render_revision && self.render_cache_range == visible {
             return;
         }
@@ -2366,7 +2364,11 @@ impl PreviewPaneView {
             perf::record_preview_render_cache_partial_update();
         } else if range_changed {
             // No overlap — full rebuild is unavoidable.
-            self.render_cache = self.preview.read(cx).build_render_lines(visible.clone());
+            self.render_cache = self
+                .store
+                .read(cx)
+                .preview_model()
+                .build_render_lines(visible.clone());
             perf::record_preview_render_cache_rebuild();
         } else {
             // Same range, only revision changed — patch existing entries in-place.
@@ -2381,7 +2383,7 @@ impl PreviewPaneView {
         let overlap_start = self.render_cache_range.start.max(visible.start);
         let overlap_end = self.render_cache_range.end.min(visible.end);
         let mut next_cache = Vec::with_capacity(visible.end.saturating_sub(visible.start));
-        let preview = self.preview.read(cx);
+        let preview = self.store.read(cx).preview_model();
 
         if visible.start < overlap_start {
             next_cache.extend(preview.build_render_lines_partial(visible.start..overlap_start));
@@ -2400,7 +2402,7 @@ impl PreviewPaneView {
     }
 
     fn patch_render_cache_contents(&mut self, cx: &mut App) {
-        let preview = self.preview.read(cx);
+        let preview = self.store.read(cx).preview_model();
         for (offset, line) in self.render_cache.iter_mut().enumerate() {
             let ix = self.render_cache_range.start + offset;
             let loaded = preview.line_at(ix);
@@ -2431,7 +2433,7 @@ impl PreviewPaneView {
             return self.render_cache[offset..offset + len].to_vec();
         }
 
-        let preview = self.preview.read(cx);
+        let preview = self.store.read(cx).preview_model();
         visible_range
             .map(|ix| {
                 if ix >= self.render_cache_range.start

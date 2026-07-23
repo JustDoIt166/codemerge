@@ -27,16 +27,11 @@ use gpui_component::{
 
 use crate::application::coordinator::WorkspaceCoordinator;
 use crate::application::store::{
-    ChangeSet, NavigationAction, StoreSlice, Transition, WorkspaceAction, WorkspaceEffect,
-    WorkspaceStore,
+    ChangeSet, NavigationAction, Transition, WorkspaceAction, WorkspaceEffect, WorkspaceStore,
 };
 use crate::domain::Language;
 use crate::services::settings::{self, ConfigLoadIssue};
-use crate::ui::models::{ProcessModel, SettingsModel, WorkspaceUiModel};
 use crate::ui::perf;
-use crate::ui::preview_model::PreviewModel;
-use crate::ui::result_model::ResultModel;
-use crate::ui::selection_model::SelectionModel;
 use crate::ui::state::{ProcessUiStatus, TreePanelState, WorkspaceUiState};
 use crate::ui::view_model::PreviewRowViewModel;
 use crate::utils::i18n::tr;
@@ -316,9 +311,7 @@ struct TreePaneView {
 struct PreviewPaneView {
     entity_id: EntityId,
     workspace: Entity<Workspace>,
-    preview: StoreSlice<PreviewModel>,
-    result: StoreSlice<ResultModel>,
-    settings: StoreSlice<SettingsModel>,
+    store: Entity<WorkspaceStore>,
     scroll_handle: UniformListScrollHandle,
     last_requested_load_range: Range<usize>,
     render_cache_range: Range<usize>,
@@ -372,12 +365,6 @@ pub struct Workspace {
 }
 
 pub struct WorkspaceViews {
-    ui: StoreSlice<WorkspaceUiModel>,
-    selection: StoreSlice<SelectionModel>,
-    settings: StoreSlice<SettingsModel>,
-    process: StoreSlice<ProcessModel>,
-    result: StoreSlice<ResultModel>,
-    preview: StoreSlice<PreviewModel>,
     result_artifacts: ResultArtifacts,
     config_alert: Option<ConfigAlert>,
     tree_panel: TreePanelController,
@@ -459,12 +446,6 @@ impl Workspace {
             WorkspaceStore::new(cfg.clone(), tr(cfg.language, "status_ready").to_string())
         });
         let coordinator = cx.new(|_| WorkspaceCoordinator::new());
-        let settings_model = WorkspaceStore::settings_slice(store.clone());
-        let ui_model = WorkspaceStore::navigation_slice(store.clone());
-        let selection_model = WorkspaceStore::selection_slice(store.clone());
-        let process_model = WorkspaceStore::process_slice(store.clone());
-        let result_model = WorkspaceStore::result_slice(store.clone());
-        let preview_model = WorkspaceStore::preview_slice(store.clone());
         let workspace_entity = cx.entity();
         let input_panel_view =
             cx.new(|cx| InputPanelView::new(workspace_entity.clone(), store.clone(), cx));
@@ -529,12 +510,6 @@ impl Workspace {
             store,
             coordinator,
             views: WorkspaceViews {
-                ui: ui_model,
-                selection: selection_model,
-                settings: settings_model,
-                process: process_model,
-                result: result_model,
-                preview: preview_model,
                 result_artifacts: ResultArtifacts::default(),
                 config_alert,
                 tree_panel: TreePanelController {
@@ -588,11 +563,11 @@ impl Workspace {
     }
 
     fn has_inputs(&self, cx: &App) -> bool {
-        self.selection.read(cx).has_inputs()
+        self.store.read(cx).has_inputs()
     }
 
     fn is_processing(&self, cx: &App) -> bool {
-        self.process.read(cx).is_processing()
+        self.store.read(cx).is_processing()
     }
 
     fn dispatch(&mut self, action: WorkspaceAction, cx: &mut Context<Self>) -> Transition {
@@ -664,32 +639,31 @@ impl Workspace {
     }
 
     pub(super) fn ui_state(&self, cx: &App) -> WorkspaceUiState {
-        self.ui.read(cx).state()
+        self.store.read(cx).navigation()
     }
 
     pub(super) fn selection_snapshot(&self, cx: &App) -> crate::ui::state::SelectionState {
-        self.selection.read(cx).snapshot()
+        self.store.read(cx).selection_snapshot()
     }
 
     pub(super) fn settings_snapshot(&self, cx: &App) -> crate::ui::state::SettingsState {
-        self.settings.read(cx).snapshot()
+        self.store.read(cx).settings()
     }
 
     pub(super) fn language(&self, cx: &App) -> Language {
-        self.settings.read(cx).language()
+        self.store.read(cx).language()
     }
 
     pub(super) fn effective_filters(&self, cx: &App) -> crate::ui::models::EffectiveMergeFilters {
-        let selection = self.selection_snapshot(cx);
-        self.settings.read(cx).effective_filters(&selection)
+        self.store.read(cx).effective_filters()
     }
 
     pub(super) fn result_has_content(&self, cx: &App) -> bool {
-        self.result.read(cx).has_content_result()
+        self.store.read(cx).result_has_content()
     }
 
     pub(super) fn result_is_tree_only(&self, cx: &App) -> bool {
-        self.result.read(cx).is_tree_only_result()
+        self.store.read(cx).result_is_tree_only()
     }
 
     pub(super) fn invalidate_rules_panel_cache(&mut self) {
@@ -697,7 +671,7 @@ impl Workspace {
     }
 
     pub(super) fn refresh_rules_panel_cache(&mut self, cx: &Context<Self>) {
-        let settings = self.settings.read(cx).snapshot();
+        let settings = self.store.read(cx).settings();
         let language = settings.language;
         let filter = self
             .blacklist_filter_input
@@ -741,7 +715,7 @@ impl Workspace {
     }
 
     fn sync_localized_inputs(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let language = self.settings.read(cx).language();
+        let language = self.store.read(cx).language();
         self.tree_panel.filter_input.update(cx, |state, cx| {
             state.set_placeholder(tr(language, "tree_filter"), window, cx)
         });
@@ -765,7 +739,7 @@ impl Workspace {
             cx.notify();
         });
         if !self.is_processing(cx)
-            && self.process.read(cx).state().ui_status == ProcessUiStatus::Idle
+            && self.store.read(cx).process().ui_status == ProcessUiStatus::Idle
         {
             let _ = self.dispatch(
                 WorkspaceAction::Execution(
@@ -1047,9 +1021,7 @@ impl PreviewPaneView {
         Self {
             entity_id: cx.entity().entity_id(),
             workspace,
-            preview: WorkspaceStore::preview_slice(store.clone()),
-            result: WorkspaceStore::result_slice(store.clone()),
-            settings: WorkspaceStore::settings_slice(store),
+            store,
             scroll_handle: UniformListScrollHandle::new(),
             last_requested_load_range: 0..0,
             render_cache_range: 0..0,
@@ -1148,6 +1120,33 @@ impl Render for Workspace {
 impl Drop for Workspace {
     fn drop(&mut self) {
         Self::cleanup_result_artifacts(&self.result_artifacts);
+    }
+}
+
+#[cfg(test)]
+impl Workspace {
+    fn test_selection(
+        &self,
+    ) -> crate::application::store::StoreSlice<crate::ui::selection_model::SelectionModel> {
+        WorkspaceStore::selection_slice(self.store.clone())
+    }
+
+    fn test_process(
+        &self,
+    ) -> crate::application::store::StoreSlice<crate::ui::models::ProcessModel> {
+        WorkspaceStore::process_slice(self.store.clone())
+    }
+
+    fn test_result(
+        &self,
+    ) -> crate::application::store::StoreSlice<crate::ui::result_model::ResultModel> {
+        WorkspaceStore::result_slice(self.store.clone())
+    }
+
+    fn test_preview(
+        &self,
+    ) -> crate::application::store::StoreSlice<crate::ui::preview_model::PreviewModel> {
+        WorkspaceStore::preview_slice(self.store.clone())
     }
 }
 
@@ -1271,10 +1270,12 @@ mod tests {
         fs::write(root.join(".gitignore"), "dist\n").expect("write gitignore");
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.selection.update(cx, |selection, selection_cx| {
-                selection.set_selected_folder(root.clone(), vec!["target".into()]);
-                selection_cx.notify();
-            });
+            workspace
+                .test_selection()
+                .update(cx, |selection, selection_cx| {
+                    selection.set_selected_folder(root.clone(), vec!["target".into()]);
+                    selection_cx.notify();
+                });
 
             workspace.refresh_selected_folder_gitignore_rules(cx);
 
@@ -1295,19 +1296,21 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.selection.update(cx, |selection, selection_cx| {
-                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
-                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
-                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
-                selection.add_temporary_whitelist_tokens(&["src".into()], false);
-                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
-                let _ = selection.set_temporary_whitelist_mode(
-                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
-                );
-                selection_cx.notify();
-            });
-            let preflight_revision = workspace.process.read(cx).state().preflight_revision;
-            workspace.process.update(cx, |process, _| {
+            workspace
+                .test_selection()
+                .update(cx, |selection, selection_cx| {
+                    selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                    selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                    selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                    selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                    selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                    let _ = selection.set_temporary_whitelist_mode(
+                        crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                    );
+                    selection_cx.notify();
+                });
+            let preflight_revision = workspace.test_process().read(cx).state().preflight_revision;
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
             });
             workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
@@ -1322,7 +1325,9 @@ mod tests {
                 selection.temp_whitelist_mode,
                 crate::domain::TemporaryWhitelistMode::WhitelistThenBlacklist
             );
-            assert!(workspace.process.read(cx).state().preflight_revision > preflight_revision);
+            assert!(
+                workspace.test_process().read(cx).state().preflight_revision > preflight_revision
+            );
         });
     }
 
@@ -1334,22 +1339,24 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.selection.update(cx, |selection, selection_cx| {
-                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
-                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
-                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
-                selection.add_temporary_whitelist_tokens(&["src".into()], false);
-                let _ = selection.set_temporary_whitelist_mode(
-                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
-                );
-                selection_cx.notify();
-            });
-            workspace.process.update(cx, |process, _| {
+            workspace
+                .test_selection()
+                .update(cx, |selection, selection_cx| {
+                    selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                    selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                    selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                    selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                    let _ = selection.set_temporary_whitelist_mode(
+                        crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                    );
+                    selection_cx.notify();
+                });
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
             });
             workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
-            let process = workspace.process.read(cx).state();
+            let process = workspace.test_process().read(cx).state();
             assert_eq!(process.ui_status, ProcessUiStatus::Completed);
         });
     }
@@ -1360,18 +1367,20 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.selection.update(cx, |selection, selection_cx| {
-                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
-                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
-                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
-                selection.add_temporary_whitelist_tokens(&["src".into()], false);
-                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
-                let _ = selection.set_temporary_whitelist_mode(
-                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
-                );
-                selection_cx.notify();
-            });
-            workspace.process.update(cx, |process, _| {
+            workspace
+                .test_selection()
+                .update(cx, |selection, selection_cx| {
+                    selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                    selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                    selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                    selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                    selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                    let _ = selection.set_temporary_whitelist_mode(
+                        crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                    );
+                    selection_cx.notify();
+                });
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
             });
             workspace.handle_process_event(ProcessEvent::cancelled(1), cx);
@@ -1401,15 +1410,22 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.process.update(cx, |process, _| {
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
             });
 
             workspace.cancel_and_detach_background_work(cx);
             let _ = workspace.apply_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
-            assert!(workspace.result.read(cx).state().result.is_none());
-            assert!(workspace.process.read(cx).state().current_run_id.is_none());
+            assert!(workspace.test_result().read(cx).state().result.is_none());
+            assert!(
+                workspace
+                    .test_process()
+                    .read(cx)
+                    .state()
+                    .current_run_id
+                    .is_none()
+            );
         });
     }
 
@@ -1441,18 +1457,20 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.selection.update(cx, |selection, selection_cx| {
-                selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
-                selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
-                selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
-                selection.add_temporary_whitelist_tokens(&["src".into()], false);
-                selection.add_temporary_whitelist_tokens(&["rs".into()], true);
-                let _ = selection.set_temporary_whitelist_mode(
-                    crate::domain::TemporaryWhitelistMode::WhitelistOnly,
-                );
-                selection_cx.notify();
-            });
-            workspace.process.update(cx, |process, _| {
+            workspace
+                .test_selection()
+                .update(cx, |selection, selection_cx| {
+                    selection.set_gitignore_file(Some(PathBuf::from("manual.gitignore")));
+                    selection.append_temporary_gitignore_rules(vec!["node_modules".into()]);
+                    selection.add_temporary_blacklist_tokens(&["tmp".into()], true);
+                    selection.add_temporary_whitelist_tokens(&["src".into()], false);
+                    selection.add_temporary_whitelist_tokens(&["rs".into()], true);
+                    let _ = selection.set_temporary_whitelist_mode(
+                        crate::domain::TemporaryWhitelistMode::WhitelistOnly,
+                    );
+                    selection_cx.notify();
+                });
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(1);
             });
             workspace.handle_process_event(
@@ -1485,7 +1503,7 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.process.update(cx, |process, _| {
+            workspace.test_process().update(cx, |process, _| {
                 process.state_mut().current_run_id = Some(7);
                 process.state_mut().ui_status = ProcessUiStatus::Running;
                 process.state_mut().processing_started_at = Some(std::time::Instant::now());
@@ -1502,7 +1520,7 @@ mod tests {
                 cx,
             );
 
-            let process = workspace.process.read(cx).state();
+            let process = workspace.test_process().read(cx).state();
             assert_eq!(process.ui_status, ProcessUiStatus::Error);
             assert_eq!(
                 process.last_error.as_deref(),
@@ -1520,8 +1538,8 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
-            workspace.preview.update(cx, |preview, _| {
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..128, 1);
+            workspace.test_preview().update(cx, |preview, _| {
                 let _ = preview.load_preview_range_request(
                     256..320,
                     crate::ui::preview_model::PreviewScrollDirection::Down,
@@ -1529,7 +1547,7 @@ mod tests {
             });
             perf::reset();
 
-            workspace.preview.update(cx, |preview, preview_cx| {
+            workspace.test_preview().update(cx, |preview, preview_cx| {
                 preview.clear_request();
                 preview_cx.notify();
             });
@@ -1549,7 +1567,7 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..256, 1);
             perf::reset();
 
             workspace.preview_pane_view.update(cx, |view, cx| {
@@ -1579,7 +1597,7 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..256, 1);
 
             workspace.preview_pane_view.update(cx, |view, cx| {
                 view.queue_visible_range_sync(128..160, cx);
@@ -1608,7 +1626,7 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..256, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..256, 1);
 
             workspace.preview_pane_view.update(cx, |view, cx| {
                 view.queue_visible_range_sync(0..24, cx);
@@ -1633,13 +1651,13 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..128, 1);
             workspace.preview_pane_view.update(cx, |view, cx| {
                 view.refresh_render_cache(0..64, cx);
             });
             perf::reset();
 
-            workspace.preview.update(cx, |preview, preview_cx| {
+            workspace.test_preview().update(cx, |preview, preview_cx| {
                 let revision = preview.state().preview_revision;
                 let _ = preview.apply_event(PreviewEvent::Loaded {
                     revision,
@@ -1670,7 +1688,7 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..128, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..128, 1);
 
             workspace.preview_pane_view.update(cx, |view, cx| {
                 view.refresh_render_cache(0..64, cx);
@@ -1693,7 +1711,7 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..3_072, 1);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..3_072, 1);
             perf::reset();
 
             let start = Instant::now();
@@ -1741,13 +1759,13 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             seed_preview_model(
-                &workspace.preview,
+                &workspace.test_preview(),
                 &path,
                 cx,
                 0..1_536,
                 super::MERGED_CONTENT_PREVIEW_FILE_ID,
             );
-            workspace.result.update(cx, |result, result_cx| {
+            workspace.test_result().update(cx, |result, result_cx| {
                 result.set_active_tab(ResultTab::Content);
                 result_cx.notify();
             });
@@ -1809,14 +1827,18 @@ mod tests {
         for _ in 0..100 {
             cx.run_until_parked();
             if workspace.update(cx, |workspace, cx| {
-                workspace.preview.read(cx).preview_document().is_some()
+                workspace
+                    .test_preview()
+                    .read(cx)
+                    .preview_document()
+                    .is_some()
             }) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         workspace.update(cx, |workspace, cx| {
-            let preview = workspace.preview.read(cx);
+            let preview = workspace.test_preview().read(cx);
             assert_eq!(
                 preview.selected_preview_file_id(),
                 Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
@@ -1843,7 +1865,7 @@ mod tests {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             workspace.load_merged_content_preview(cx);
 
-            let preview = workspace.preview.read(cx);
+            let preview = workspace.test_preview().read(cx);
             assert_eq!(
                 preview.selected_preview_file_id(),
                 Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
@@ -1874,7 +1896,7 @@ mod tests {
 
         let excerpt_path = workspace
             .update(cx, |workspace: &mut Workspace, cx| {
-                let preview = workspace.preview.read(cx);
+                let preview = workspace.test_preview().read(cx);
                 preview
                     .deferred_preview()
                     .and_then(|state| state.excerpt_path.clone())
@@ -1883,14 +1905,18 @@ mod tests {
         for _ in 0..100 {
             cx.run_until_parked();
             if workspace.update(cx, |workspace, cx| {
-                workspace.preview.read(cx).preview_document().is_some()
+                workspace
+                    .test_preview()
+                    .read(cx)
+                    .preview_document()
+                    .is_some()
             }) {
                 break;
             }
             std::thread::sleep(Duration::from_millis(5));
         }
         workspace.update(cx, |workspace, cx| {
-            let preview = workspace.preview.read(cx);
+            let preview = workspace.test_preview().read(cx);
             assert_eq!(
                 preview.selected_preview_file_id(),
                 Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
@@ -1960,7 +1986,7 @@ mod tests {
                 .collect();
             workspace.set_result(result, cx);
             seed_preview_model(
-                &workspace.preview,
+                &workspace.test_preview(),
                 &path,
                 cx,
                 0..128,
@@ -1992,11 +2018,11 @@ mod tests {
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
-            workspace.result.update(cx, |result, result_cx| {
+            workspace.test_result().update(cx, |result, result_cx| {
                 result.set_active_tab(ResultTab::Content);
                 result_cx.notify();
             });
-            workspace.preview.update(cx, |preview, preview_cx| {
+            workspace.test_preview().update(cx, |preview, preview_cx| {
                 let request =
                     preview.open_preview(super::MERGED_CONTENT_PREVIEW_FILE_ID, path.clone());
                 let revision = match request {
@@ -2019,7 +2045,7 @@ mod tests {
         let rendered_line = workspace
             .update(cx, |workspace: &mut Workspace, cx| {
                 workspace
-                    .preview
+                    .test_preview()
                     .read(cx)
                     .line_at(0)
                     .map(|line| line.to_string())
@@ -2045,13 +2071,13 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             seed_preview_model(
-                &workspace.preview,
+                &workspace.test_preview(),
                 &path,
                 cx,
                 0..128,
                 super::MERGED_CONTENT_PREVIEW_FILE_ID,
             );
-            workspace.result.update(cx, |result, result_cx| {
+            workspace.test_result().update(cx, |result, result_cx| {
                 result.set_active_tab(ResultTab::Content);
                 result_cx.notify();
             });
@@ -2075,7 +2101,7 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             seed_preview_model(
-                &workspace.preview,
+                &workspace.test_preview(),
                 &path,
                 cx,
                 0..128,
@@ -2112,7 +2138,7 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_merged_content_path(&path), cx);
             seed_preview_model(
-                &workspace.preview,
+                &workspace.test_preview(),
                 &path,
                 cx,
                 0..64,
@@ -2121,7 +2147,7 @@ mod tests {
 
             workspace.sync_preview_table(cx);
 
-            let preview = workspace.preview.read(cx);
+            let preview = workspace.test_preview().read(cx);
             assert_eq!(
                 preview.selected_preview_file_id(),
                 Some(super::MERGED_CONTENT_PREVIEW_FILE_ID)
@@ -2140,7 +2166,7 @@ mod tests {
 
         cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
             workspace.set_result(sample_result_with_second_path(&path), cx);
-            seed_preview_model(&workspace.preview, &path, cx, 0..32, 2);
+            seed_preview_model(&workspace.test_preview(), &path, cx, 0..32, 2);
 
             workspace
                 .preview_filter_input
@@ -2149,7 +2175,7 @@ mod tests {
                 });
             workspace.handle_preview_filter_change(cx);
 
-            let preview = workspace.preview.read(cx);
+            let preview = workspace.test_preview().read(cx);
             assert_eq!(preview.selected_preview_file_id(), Some(2));
             assert!(preview.preview_document().is_some());
         });

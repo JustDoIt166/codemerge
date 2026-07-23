@@ -28,12 +28,12 @@ impl WorkspaceCoordinator {
         }
     }
 
-    pub fn tasks(&self) -> &TaskSupervisor {
-        &self.tasks
-    }
-
     pub fn cancel_all(&self) {
         self.tasks.cancel_all();
+    }
+
+    pub fn request_cancel(&self, kind: JobKind) -> bool {
+        self.tasks.request_cancel(kind)
     }
 
     pub fn start_process(&self, request: ProcessRequest) -> AppResult<TaskStream<ProcessEvent>> {
