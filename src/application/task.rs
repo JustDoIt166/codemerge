@@ -270,6 +270,7 @@ impl Drop for TaskSupervisor {
 mod tests {
     use super::{JobKind, TaskPayload, TaskSupervisor};
     use crate::error::{AppError, ErrorCode};
+    use crate::utils::temp_file::ProcessTempDir;
 
     #[test]
     fn latest_task_cancels_previous_task_of_same_kind() {
@@ -384,5 +385,46 @@ mod tests {
             stream
         };
         assert!(dropped_stream.cancel.is_cancelled());
+    }
+
+    #[test]
+    fn aborting_task_drops_owned_process_temp_dir() {
+        let supervisor = TaskSupervisor::new();
+        let mut stream = supervisor
+            .start_latest::<std::path::PathBuf, _, _>(JobKind::Process, |context| async move {
+                let process_dir = ProcessTempDir::create()?;
+                let path = process_dir.path().to_path_buf();
+                let _ = context.emit(path);
+                std::future::pending::<()>().await;
+                drop(process_dir);
+                Ok(())
+            })
+            .expect("process task");
+        let runtime = crate::services::runtime::RUNTIME
+            .as_ref()
+            .expect("runtime available");
+        let path = match runtime
+            .block_on(stream.events.recv())
+            .expect("process directory event")
+            .payload
+        {
+            TaskPayload::Event(path) => path,
+            other => panic!("unexpected payload: {other:?}"),
+        };
+        assert!(path.exists());
+
+        assert!(supervisor.cancel(JobKind::Process));
+        assert_eq!(supervisor.active_count(), 0);
+        runtime
+            .block_on(async {
+                tokio::time::timeout(std::time::Duration::from_secs(1), async {
+                    while path.exists() {
+                        tokio::task::yield_now().await;
+                    }
+                })
+                .await
+            })
+            .expect("aborted task should drop the process directory guard");
+        assert!(!path.exists());
     }
 }

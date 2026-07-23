@@ -107,3 +107,86 @@ impl WorkspaceCoordinator {
             })
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::application::store::{
+        ExecutionAction, WorkspaceAction, WorkspaceEffect, WorkspaceStore,
+    };
+    use crate::application::task::TaskPayload;
+    use crate::domain::{
+        AppConfigV1, Language, OutputFormat, ProcessingMode, ProcessingOptions,
+        TemporaryWhitelistMode,
+    };
+    use crate::services::process::ProcessRequest;
+
+    use super::WorkspaceCoordinator;
+
+    #[test]
+    fn process_task_events_flow_through_workspace_store() {
+        let source = tempfile::tempdir().expect("source tempdir");
+        let source_path = source.path().join("lib.rs");
+        std::fs::write(&source_path, "pub fn merged() {}\n").expect("write source");
+        let request = ProcessRequest {
+            selected_folder: None,
+            selected_files: vec![source_path],
+            folder_blacklist: Vec::new(),
+            ext_blacklist: Vec::new(),
+            excluded_files: Vec::new(),
+            folder_whitelist: Vec::new(),
+            ext_whitelist: Vec::new(),
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            options: ProcessingOptions {
+                compress: false,
+                use_gitignore: false,
+                ignore_git: false,
+                output_format: OutputFormat::Default,
+                mode: ProcessingMode::Full,
+            },
+            language: Language::En,
+        };
+        let coordinator = WorkspaceCoordinator::new();
+        let mut stream = coordinator.start_process(request).expect("start process");
+        let job_id = stream.job_id;
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: job_id,
+            scanning_label: "scanning".into(),
+        }));
+        let initial_revision = store.revisions().execution;
+        let runtime = crate::services::runtime::RUNTIME
+            .as_ref()
+            .expect("runtime available");
+        let mut completion_requested_preflight = false;
+
+        runtime.block_on(async {
+            while let Some(envelope) = stream.events.recv().await {
+                assert_eq!(envelope.job_id, job_id);
+                match envelope.payload {
+                    TaskPayload::Event(event) => {
+                        let transition = store
+                            .dispatch(WorkspaceAction::Execution(ExecutionAction::Process(event)));
+                        completion_requested_preflight |= transition.effects.iter().any(|effect| {
+                            matches!(
+                                effect,
+                                WorkspaceEffect::RestartPreflight {
+                                    preserve_completed_status: true
+                                }
+                            )
+                        });
+                    }
+                    TaskPayload::Finished => break,
+                    TaskPayload::Failed(error) => panic!("process task failed: {error}"),
+                }
+            }
+        });
+
+        assert!(store.revisions().execution > initial_revision);
+        assert!(completion_requested_preflight);
+        let result = store.result().result.as_ref().expect("completed result");
+        assert_eq!(result.stats.processed_files, 1);
+        let process_dir = result.process_dir.as_ref().expect("process directory");
+        assert!(process_dir.exists());
+        crate::utils::temp_file::cleanup_temp_dir(process_dir).expect("cleanup process directory");
+    }
+}

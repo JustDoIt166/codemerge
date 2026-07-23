@@ -187,13 +187,12 @@ async fn run_process_with_walker(
     }
 
     let output_format = request.options.output_format;
-    let process_dir = temp_file::make_temp_process_dir()?;
-    let result_path = temp_file::make_temp_result_path_in(&process_dir);
-    let preview_dir = temp_file::make_temp_preview_dir_in(&process_dir)?;
+    let process_dir = temp_file::ProcessTempDir::create()?;
+    let result_path = temp_file::make_temp_result_path_in(process_dir.path());
+    let preview_dir = temp_file::make_temp_preview_dir_in(process_dir.path())?;
     let mut output = match tokio::fs::File::create(&result_path).await {
         Ok(file) => file,
         Err(err) => {
-            let _ = temp_file::cleanup_temp_dir(&process_dir);
             return Err(AppError::new(format!("create merged file failed: {err}")));
         }
     };
@@ -201,7 +200,6 @@ async fn run_process_with_walker(
         .write_all(render_prefix(output_format, &walker.tree, lang).as_bytes())
         .await
     {
-        cleanup_failed_run(&process_dir);
         return Err(AppError::new(format!("write merged prefix failed: {err}")));
     }
 
@@ -219,7 +217,6 @@ async fn run_process_with_walker(
 
     while let Some(outcome) = processed_stream.next().await {
         if cancel.is_cancelled() {
-            cleanup_failed_run(&process_dir);
             return Err(AppError::new(tr(lang, "cancelled")));
         }
 
@@ -264,13 +261,11 @@ async fn run_process_with_walker(
                     .write_all(render_file_entry(output_format, &merged, lang).as_bytes())
                     .await
                 {
-                    cleanup_failed_run(&process_dir);
                     return Err(AppError::new(format!("write merged content failed: {err}")));
                 }
                 let next_id = preview_files.len() as u32;
                 let blob_path = preview_dir.join(format!("preview_{next_id}.txt"));
                 if let Err(err) = tokio::fs::write(&blob_path, merged.content.as_bytes()).await {
-                    cleanup_failed_run(&process_dir);
                     return Err(AppError::new(format!("write preview blob failed: {err}")));
                 }
                 preview_files.push(PreviewFileEntry {
@@ -298,7 +293,6 @@ async fn run_process_with_walker(
     }
 
     if stats.processed_files == 0 {
-        cleanup_failed_run(&process_dir);
         return Err(AppError::new(tr(lang, "no_content_generated")));
     }
 
@@ -306,13 +300,13 @@ async fn run_process_with_walker(
     if !suffix.is_empty()
         && let Err(err) = output.write_all(suffix.as_bytes()).await
     {
-        cleanup_failed_run(&process_dir);
         return Err(AppError::new(format!("write merged suffix failed: {err}")));
     }
     if let Err(err) = output.flush().await {
-        cleanup_failed_run(&process_dir);
         return Err(AppError::new(format!("flush merged file failed: {err}")));
     }
+
+    let process_dir = process_dir.into_persisted_path();
 
     Ok(ProcessResult {
         stats,
@@ -325,10 +319,6 @@ async fn run_process_with_walker(
         preview_files,
         preview_blob_dir: Some(preview_dir),
     })
-}
-
-fn cleanup_failed_run(process_dir: &std::path::Path) {
-    let _ = temp_file::cleanup_temp_dir(process_dir);
 }
 
 #[derive(Debug)]
@@ -440,14 +430,11 @@ mod tests {
     use zip::write::SimpleFileOptions;
 
     use super::{
-        ProcessEventSink, ProcessRequest, archive_entry_source, cleanup_failed_run, execute,
-        file_concurrency_limit, run_process_with_walker,
+        ProcessEventSink, ProcessRequest, archive_entry_source, execute, file_concurrency_limit,
+        run_process_with_walker,
     };
     use crate::domain::{
         Language, OutputFormat, ProcessingMode, ProcessingOptions, TemporaryWhitelistMode,
-    };
-    use crate::utils::temp_file::{
-        make_temp_preview_dir_in, make_temp_process_dir, make_temp_result_path_in,
     };
     use std::sync::Arc;
 
@@ -520,29 +507,6 @@ mod tests {
             error.to_string(),
             "All candidate files failed; no usable content was generated"
         );
-    }
-
-    #[test]
-    fn cleanup_failed_run_removes_process_dir_and_result_file() {
-        let process_dir = make_temp_process_dir().expect("process dir");
-        let result_path = make_temp_result_path_in(&process_dir);
-        let preview_dir = make_temp_preview_dir_in(&process_dir).expect("preview dir");
-        fs::write(&result_path, "merged").expect("write merged result");
-        fs::write(preview_dir.join("preview_0.txt"), "content").expect("write preview");
-
-        cleanup_failed_run(&process_dir);
-
-        assert!(!process_dir.exists());
-        assert!(!result_path.exists());
-    }
-
-    #[test]
-    fn cleanup_failed_run_is_idempotent_on_missing_dir() {
-        let dir = tempdir().expect("tempdir");
-        let process_dir = dir.path().join("missing-process-dir");
-
-        cleanup_failed_run(&process_dir);
-        cleanup_failed_run(&process_dir);
     }
 
     #[test]

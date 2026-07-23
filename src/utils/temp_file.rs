@@ -35,6 +35,37 @@ fn create_temp_child_dir(prefix: &str) -> AppResult<PathBuf> {
     Ok(dir)
 }
 
+pub(crate) struct ProcessTempDir {
+    path: PathBuf,
+    cleanup_on_drop: bool,
+}
+
+impl ProcessTempDir {
+    pub(crate) fn create() -> AppResult<Self> {
+        Ok(Self {
+            path: make_temp_process_dir()?,
+            cleanup_on_drop: true,
+        })
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+
+    pub(crate) fn into_persisted_path(mut self) -> PathBuf {
+        self.cleanup_on_drop = false;
+        self.path.clone()
+    }
+}
+
+impl Drop for ProcessTempDir {
+    fn drop(&mut self) {
+        if self.cleanup_on_drop {
+            let _ = cleanup_temp_dir(&self.path);
+        }
+    }
+}
+
 pub fn make_temp_result_path() -> AppResult<PathBuf> {
     let dir = codemerge_temp_root()?;
     Ok(dir.join(format!("merged_{}.txt", unique_suffix())))
@@ -127,7 +158,7 @@ fn is_owned_temp_entry(name: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::{
-        cleanup_preview_dir, cleanup_stale_temp_entries_in, cleanup_temp_dir,
+        ProcessTempDir, cleanup_preview_dir, cleanup_stale_temp_entries_in, cleanup_temp_dir,
         make_temp_preview_dir, make_temp_process_dir, make_temp_result_path,
         make_temp_result_path_in,
     };
@@ -158,6 +189,28 @@ mod tests {
         cleanup_temp_dir(&dir).expect("cleanup temp dir");
         assert!(!dir.exists());
         assert!(!result_path.exists());
+    }
+
+    #[test]
+    fn process_temp_dir_cleans_nested_files_on_drop() {
+        let process_dir = ProcessTempDir::create().expect("process temp dir");
+        let path = process_dir.path().to_path_buf();
+        let result_path = make_temp_result_path_in(process_dir.path());
+        std::fs::write(&result_path, "content").expect("write result file");
+
+        drop(process_dir);
+
+        assert!(!path.exists());
+        assert!(!result_path.exists());
+    }
+
+    #[test]
+    fn persisted_process_temp_dir_survives_guard_drop() {
+        let process_dir = ProcessTempDir::create().expect("process temp dir");
+        let path = process_dir.into_persisted_path();
+
+        assert!(path.exists());
+        cleanup_temp_dir(&path).expect("cleanup persisted process dir");
     }
 
     #[test]

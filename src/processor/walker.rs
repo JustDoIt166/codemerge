@@ -142,6 +142,7 @@ where
         let mut builder = WalkBuilder::new(&root);
         builder
             .hidden(false)
+            .follow_links(false)
             .ignore(options.use_gitignore)
             .git_ignore(options.use_gitignore)
             .git_global(options.use_gitignore)
@@ -601,6 +602,40 @@ mod tests {
         );
 
         assert!(out.candidates.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn folder_scan_does_not_follow_symlinked_directories() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempdir().expect("root tempdir");
+        let outside = tempdir().expect("outside tempdir");
+        fs::write(root.path().join("local.rs"), "local").expect("write local file");
+        fs::write(outside.path().join("outside.rs"), "outside").expect("write outside file");
+        symlink(outside.path(), root.path().join("linked")).expect("create directory symlink");
+
+        let out = collect_candidates(
+            Some(&root.path().to_path_buf()),
+            &[],
+            WalkerFilterRules {
+                folder_blacklist: &[],
+                ext_blacklist: &[],
+                excluded_files: &[],
+                folder_whitelist: &[],
+                ext_whitelist: &[],
+                whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            },
+            WalkerOptions::default(),
+        );
+
+        assert_eq!(
+            out.candidates
+                .iter()
+                .map(|candidate| candidate.relative.as_str())
+                .collect::<Vec<_>>(),
+            vec!["local.rs"]
+        );
     }
 
     #[test]

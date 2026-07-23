@@ -1155,7 +1155,7 @@ mod tests {
     use super::{
         PREVIEW_DEPENDENCIES, RULES_DEPENDENCIES, STATUS_DEPENDENCIES, TREE_DEPENDENCIES, Workspace,
     };
-    use crate::application::store::{ChangeSet, StoreSlice};
+    use crate::application::store::{ChangeSet, ExecutionAction, StoreSlice, WorkspaceAction};
     use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
     use crate::processor::stats::ProcessingStats;
     use crate::services::preview::{
@@ -1165,7 +1165,7 @@ mod tests {
     use crate::services::process::ProcessEvent;
     use crate::ui::view_model::ResultTab;
     use crate::ui::{perf, preview_model::PreviewModel, state::ProcessUiStatus};
-    use gpui::{AppContext as _, TestAppContext, VisualContext as _};
+    use gpui::{AppContext as _, Context, TestAppContext, VisualContext as _};
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
@@ -1310,9 +1310,7 @@ mod tests {
                     selection_cx.notify();
                 });
             let preflight_revision = workspace.test_process().read(cx).state().preflight_revision;
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(1);
-            });
+            start_test_process(workspace, 1, cx);
             workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
             let selection = workspace.selection_snapshot(cx);
@@ -1351,9 +1349,7 @@ mod tests {
                     );
                     selection_cx.notify();
                 });
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(1);
-            });
+            start_test_process(workspace, 1, cx);
             workspace.handle_process_event(ProcessEvent::completed(1, sample_result()), cx);
 
             let process = workspace.test_process().read(cx).state();
@@ -1380,9 +1376,7 @@ mod tests {
                     );
                     selection_cx.notify();
                 });
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(1);
-            });
+            start_test_process(workspace, 1, cx);
             workspace.handle_process_event(ProcessEvent::cancelled(1), cx);
 
             let selection = workspace.selection_snapshot(cx);
@@ -1410,9 +1404,7 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(1);
-            });
+            start_test_process(workspace, 1, cx);
 
             workspace.cancel_and_detach_background_work(cx);
             let _ = workspace.apply_process_event(ProcessEvent::completed(1, sample_result()), cx);
@@ -1470,9 +1462,7 @@ mod tests {
                     );
                     selection_cx.notify();
                 });
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(1);
-            });
+            start_test_process(workspace, 1, cx);
             workspace.handle_process_event(
                 ProcessEvent::failed(1, crate::error::AppError::new("boom")),
                 cx,
@@ -1503,11 +1493,7 @@ mod tests {
         let (workspace, cx) = cx.add_window_view(Workspace::new);
 
         workspace.update(cx, |workspace: &mut Workspace, cx| {
-            workspace.test_process().update(cx, |process, _| {
-                process.state_mut().current_run_id = Some(7);
-                process.state_mut().ui_status = ProcessUiStatus::Running;
-                process.state_mut().processing_started_at = Some(std::time::Instant::now());
-            });
+            start_test_process(workspace, 7, cx);
             workspace.handle_process_event(
                 ProcessEvent::failed(
                     7,
@@ -2264,6 +2250,16 @@ mod tests {
             ],
             preview_blob_dir: None,
         }
+    }
+
+    fn start_test_process(workspace: &mut Workspace, run_id: u64, cx: &mut Context<Workspace>) {
+        let _ = workspace.dispatch(
+            WorkspaceAction::Execution(ExecutionAction::StartRun {
+                run_id,
+                scanning_label: "scanning".into(),
+            }),
+            cx,
+        );
     }
 
     fn sample_result_with_path(path: &std::path::Path) -> ProcessResult {
