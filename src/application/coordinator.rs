@@ -175,6 +175,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Default,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             language: Language::En,

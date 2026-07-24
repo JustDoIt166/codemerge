@@ -11,7 +11,10 @@ use crate::domain::{
 };
 use crate::error::AppError;
 use crate::processor::archive::read_zip_entry_text;
-use crate::processor::merger::{MergedFile, render_file_entry, render_prefix, render_suffix};
+use crate::processor::merger::{
+    MergedFile, render_file_entry_with_metadata, render_prefix_with_metadata,
+    render_suffix_with_metadata,
+};
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text_blocking};
 use crate::processor::stats::ProcessingStats;
 use crate::processor::walker::{
@@ -188,6 +191,7 @@ async fn run_process_with_walker(
     }
 
     let output_format = request.options.output_format;
+    let output_metadata = &request.options.output_metadata;
     let process_dir = temp_file::ProcessTempDir::create()?;
     let result_path = temp_file::make_temp_result_path_in(process_dir.path());
     let preview_dir = temp_file::make_temp_preview_dir_in(process_dir.path())?;
@@ -198,7 +202,10 @@ async fn run_process_with_walker(
         }
     };
     if let Err(err) = output
-        .write_all(render_prefix(output_format, &walker.tree, lang).as_bytes())
+        .write_all(
+            render_prefix_with_metadata(output_format, &walker.tree, lang, output_metadata)
+                .as_bytes(),
+        )
         .await
     {
         return Err(AppError::new(format!("write merged prefix failed: {err}")));
@@ -259,7 +266,15 @@ async fn run_process_with_walker(
                 stats.total_chars += chars;
                 stats.total_tokens += tokens;
                 if let Err(err) = output
-                    .write_all(render_file_entry(output_format, &merged, lang).as_bytes())
+                    .write_all(
+                        render_file_entry_with_metadata(
+                            output_format,
+                            &merged,
+                            lang,
+                            output_metadata,
+                        )
+                        .as_bytes(),
+                    )
                     .await
                 {
                     return Err(AppError::new(format!("write merged content failed: {err}")));
@@ -297,7 +312,7 @@ async fn run_process_with_walker(
         return Err(AppError::new(tr(lang, "no_content_generated")));
     }
 
-    let suffix = render_suffix(output_format);
+    let suffix = render_suffix_with_metadata(output_format, output_metadata);
     if !suffix.is_empty()
         && let Err(err) = output.write_all(suffix.as_bytes()).await
     {
@@ -445,7 +460,8 @@ mod tests {
         run_process_with_walker,
     };
     use crate::domain::{
-        Language, OutputFormat, ProcessingMode, ProcessingOptions, TemporaryWhitelistMode,
+        Language, OutputFormat, OutputMetadataOptions, ProcessingMode, ProcessingOptions,
+        TemporaryWhitelistMode,
     };
     use std::sync::Arc;
 
@@ -481,6 +497,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Default,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             language: Language::En,
@@ -564,6 +581,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Default,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             language: Language::Zh,
@@ -611,6 +629,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Default,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             language: Language::Zh,
@@ -622,6 +641,40 @@ mod tests {
         let merged = fs::read_to_string(merged_path).expect("read merged");
         assert!(merged.contains("文件路径: src/lib.rs"));
         assert!(!merged.contains("文件路径: docs/guide.md"));
+    }
+
+    #[test]
+    fn full_run_can_write_content_without_any_metadata() {
+        let dir = tempdir().expect("tempdir");
+        let source_path = dir.path().join("plain.txt");
+        fs::write(&source_path, "exact content").expect("write source");
+
+        let result = run_request(ProcessRequest {
+            selected_folder: None,
+            selected_files: vec![source_path],
+            folder_blacklist: Vec::new(),
+            ext_blacklist: Vec::new(),
+            excluded_files: Vec::new(),
+            folder_whitelist: Vec::new(),
+            ext_whitelist: Vec::new(),
+            whitelist_mode: TemporaryWhitelistMode::WhitelistThenBlacklist,
+            options: ProcessingOptions {
+                output_metadata: OutputMetadataOptions {
+                    directory_structure: false,
+                    file_path: false,
+                    char_token_counts: false,
+                    separator: false,
+                },
+                ..ProcessingOptions::default()
+            },
+            language: Language::Zh,
+        });
+
+        let merged_path = result.merged_content_path.expect("merged path");
+        assert_eq!(
+            fs::read_to_string(merged_path).expect("read merged"),
+            "exact content"
+        );
     }
 
     fn write_test_zip(path: &std::path::Path, files: &[(&str, &str)]) {

@@ -209,6 +209,10 @@ pub enum DraftAction {
     SetUseGitignore(bool),
     SetIgnoreGit(bool),
     SetOutputFormat(OutputFormat),
+    SetOutputDirectoryStructure(bool),
+    SetOutputFilePath(bool),
+    SetOutputCharTokenCounts(bool),
+    SetOutputSeparator(bool),
     SetWhitelistMode(TemporaryWhitelistMode),
     ApplyConfig(AppConfigV1),
 }
@@ -718,6 +722,46 @@ impl WorkspaceStore {
                 }
                 changed_transition(changed, settings_change)
             }
+            DraftAction::SetOutputDirectoryStructure(value) => {
+                let changed = self
+                    .settings
+                    .snapshot()
+                    .options
+                    .output_metadata
+                    .directory_structure
+                    != value;
+                if changed {
+                    self.settings.set_output_directory_structure(value);
+                }
+                changed_transition(changed, settings_change)
+            }
+            DraftAction::SetOutputFilePath(value) => {
+                let changed = self.settings.snapshot().options.output_metadata.file_path != value;
+                if changed {
+                    self.settings.set_output_file_path(value);
+                }
+                changed_transition(changed, settings_change)
+            }
+            DraftAction::SetOutputCharTokenCounts(value) => {
+                let changed = self
+                    .settings
+                    .snapshot()
+                    .options
+                    .output_metadata
+                    .char_token_counts
+                    != value;
+                if changed {
+                    self.settings.set_output_char_token_counts(value);
+                }
+                changed_transition(changed, settings_change)
+            }
+            DraftAction::SetOutputSeparator(value) => {
+                let changed = self.settings.snapshot().options.output_metadata.separator != value;
+                if changed {
+                    self.settings.set_output_separator(value);
+                }
+                changed_transition(changed, settings_change)
+            }
             DraftAction::SetWhitelistMode(value) => changed_transition(
                 self.selection.set_temporary_whitelist_mode(value),
                 rules_change,
@@ -1175,6 +1219,23 @@ mod tests {
     use crate::processor::stats::ProcessingStats;
     use crate::services::process::ProcessEvent;
     use crate::ui::state::WorkspaceSheet;
+
+    #[test]
+    fn output_metadata_actions_update_persisted_config() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+
+        for action in [
+            DraftAction::SetOutputDirectoryStructure(false),
+            DraftAction::SetOutputFilePath(false),
+            DraftAction::SetOutputCharTokenCounts(false),
+            DraftAction::SetOutputSeparator(false),
+        ] {
+            let transition = store.dispatch(WorkspaceAction::Draft(action));
+            assert!(transition.changes.intersects(ChangeSet::DRAFT_SETTINGS));
+        }
+
+        assert!(store.config().options.output_metadata.is_empty());
+    }
 
     #[test]
     fn no_op_navigation_action_does_not_advance_revision() {

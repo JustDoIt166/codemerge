@@ -369,6 +369,7 @@ mod tests {
                 use_gitignore: true,
                 ignore_git: false,
                 output_format: OutputFormat::Markdown,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::TreeOnly,
             },
             folder_blacklist: vec!["target".into()],

@@ -700,6 +700,43 @@ impl Workspace {
                     ),
             )
             .child(
+                v_flex()
+                    .gap_2()
+                    .child(section_caption(
+                        tr(language, "output_metadata"),
+                        IconName::File,
+                        cx,
+                    ))
+                    .child(
+                        Checkbox::new("output-directory-structure")
+                            .disabled(locked)
+                            .checked(settings.options.output_metadata.directory_structure)
+                            .label(tr(language, "output_directory_structure"))
+                            .on_click(cx.listener(Self::toggle_output_directory_structure)),
+                    )
+                    .child(
+                        Checkbox::new("output-file-path")
+                            .disabled(locked)
+                            .checked(settings.options.output_metadata.file_path)
+                            .label(tr(language, "output_file_path"))
+                            .on_click(cx.listener(Self::toggle_output_file_path)),
+                    )
+                    .child(
+                        Checkbox::new("output-char-token-counts")
+                            .disabled(locked)
+                            .checked(settings.options.output_metadata.char_token_counts)
+                            .label(tr(language, "output_char_token_counts"))
+                            .on_click(cx.listener(Self::toggle_output_char_token_counts)),
+                    )
+                    .child(
+                        Checkbox::new("output-separator")
+                            .disabled(locked)
+                            .checked(settings.options.output_metadata.separator)
+                            .label(tr(language, "output_separator"))
+                            .on_click(cx.listener(Self::toggle_output_separator)),
+                    ),
+            )
+            .child(
                 Checkbox::new("compress")
                     .disabled(locked)
                     .checked(settings.options.compress)

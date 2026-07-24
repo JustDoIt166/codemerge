@@ -1434,6 +1434,67 @@ impl Workspace {
         self.persist_settings_async(cx);
     }
 
+    pub(super) fn toggle_output_directory_structure(
+        &mut self,
+        checked: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_output_metadata_option(
+            crate::application::store::DraftAction::SetOutputDirectoryStructure(*checked),
+            cx,
+        );
+    }
+
+    pub(super) fn toggle_output_file_path(
+        &mut self,
+        checked: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_output_metadata_option(
+            crate::application::store::DraftAction::SetOutputFilePath(*checked),
+            cx,
+        );
+    }
+
+    pub(super) fn toggle_output_char_token_counts(
+        &mut self,
+        checked: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_output_metadata_option(
+            crate::application::store::DraftAction::SetOutputCharTokenCounts(*checked),
+            cx,
+        );
+    }
+
+    pub(super) fn toggle_output_separator(
+        &mut self,
+        checked: &bool,
+        _: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.set_output_metadata_option(
+            crate::application::store::DraftAction::SetOutputSeparator(*checked),
+            cx,
+        );
+    }
+
+    fn set_output_metadata_option(
+        &mut self,
+        action: crate::application::store::DraftAction,
+        cx: &mut Context<Self>,
+    ) {
+        self.clear_pending_confirmation(cx);
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Draft(action),
+            cx,
+        );
+        self.persist_settings_async(cx);
+    }
+
     pub(super) fn set_tab(&mut self, ix: &usize, _: &mut Window, cx: &mut Context<Self>) {
         if *ix == 1 && !self.result_has_content(cx) {
             let _ = self.dispatch(

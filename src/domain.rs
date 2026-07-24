@@ -48,7 +48,34 @@ pub struct ProcessingOptions {
     pub use_gitignore: bool,
     pub ignore_git: bool,
     pub output_format: OutputFormat,
+    #[serde(default)]
+    pub output_metadata: OutputMetadataOptions,
     pub mode: ProcessingMode,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct OutputMetadataOptions {
+    pub directory_structure: bool,
+    pub file_path: bool,
+    pub char_token_counts: bool,
+    pub separator: bool,
+}
+
+impl OutputMetadataOptions {
+    pub fn is_empty(&self) -> bool {
+        !self.directory_structure && !self.file_path && !self.char_token_counts && !self.separator
+    }
+}
+
+impl Default for OutputMetadataOptions {
+    fn default() -> Self {
+        Self {
+            directory_structure: true,
+            file_path: true,
+            char_token_counts: true,
+            separator: true,
+        }
+    }
 }
 
 impl Default for ProcessingOptions {
@@ -58,6 +85,7 @@ impl Default for ProcessingOptions {
             use_gitignore: true,
             ignore_git: true,
             output_format: OutputFormat::Default,
+            output_metadata: OutputMetadataOptions::default(),
             mode: ProcessingMode::Full,
         }
     }

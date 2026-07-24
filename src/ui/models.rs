@@ -171,6 +171,22 @@ impl SettingsModel {
     pub fn set_output_format(&mut self, format: crate::domain::OutputFormat) {
         self.state.options.output_format = format;
     }
+
+    pub fn set_output_directory_structure(&mut self, checked: bool) {
+        self.state.options.output_metadata.directory_structure = checked;
+    }
+
+    pub fn set_output_file_path(&mut self, checked: bool) {
+        self.state.options.output_metadata.file_path = checked;
+    }
+
+    pub fn set_output_char_token_counts(&mut self, checked: bool) {
+        self.state.options.output_metadata.char_token_counts = checked;
+    }
+
+    pub fn set_output_separator(&mut self, checked: bool) {
+        self.state.options.output_metadata.separator = checked;
+    }
 }
 
 fn append_unique_rules(target: &mut Vec<String>, rules: &[String]) {
@@ -487,6 +503,7 @@ mod tests {
                 use_gitignore: true,
                 ignore_git: false,
                 output_format: OutputFormat::Markdown,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             folder_blacklist: vec!["target".into()],
@@ -560,6 +577,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Markdown,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::Full,
             },
             folder_blacklist: vec!["target".into()],

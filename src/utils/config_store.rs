@@ -166,6 +166,7 @@ mod tests {
                 use_gitignore: false,
                 ignore_git: false,
                 output_format: OutputFormat::Markdown,
+                output_metadata: Default::default(),
                 mode: ProcessingMode::TreeOnly,
             },
             folder_blacklist: vec!["src".to_string(), "build".to_string()],
@@ -229,6 +230,10 @@ mod tests {
         assert_eq!(report.issue, None);
         assert_eq!(report.config.version, APP_CONFIG_VERSION);
         assert_eq!(report.config.ext_blacklist, legacy_blacklist);
+        assert_eq!(
+            report.config.options.output_metadata,
+            crate::domain::OutputMetadataOptions::default()
+        );
     }
 
     #[test]
