@@ -9,13 +9,14 @@ pub(crate) mod view_model;
 mod workspace;
 
 use anyhow::Result;
-use gpui::{AppContext, Application, WindowDecorations, WindowOptions};
+use gpui::{AppContext, Application, KeyBinding, WindowDecorations, WindowOptions, px, size};
 use gpui_component::Root;
 
 pub fn run() {
     let app = Application::new().with_assets(assets::AppAssets);
     app.run(move |cx| {
         gpui_component::init(cx);
+        cx.bind_keys(workspace_key_bindings());
         cx.activate(true);
         cx.spawn(async move |cx| {
             cx.open_window(main_window_options(), |window, cx| {
@@ -29,6 +30,36 @@ pub fn run() {
         })
         .detach();
     });
+}
+
+fn workspace_key_bindings() -> Vec<KeyBinding> {
+    vec![
+        KeyBinding::new("ctrl-enter", workspace::StartProcess, Some("Workspace")),
+        KeyBinding::new("cmd-enter", workspace::StartProcess, Some("Workspace")),
+        KeyBinding::new("ctrl-.", workspace::CancelProcess, Some("Workspace")),
+        KeyBinding::new("cmd-.", workspace::CancelProcess, Some("Workspace")),
+        KeyBinding::new("ctrl-f", workspace::FocusSearch, Some("Workspace")),
+        KeyBinding::new("cmd-f", workspace::FocusSearch, Some("Workspace")),
+        KeyBinding::new(
+            "ctrl-shift-c",
+            workspace::CopyActiveResult,
+            Some("Workspace"),
+        ),
+        KeyBinding::new(
+            "cmd-shift-c",
+            workspace::CopyActiveResult,
+            Some("Workspace"),
+        ),
+        KeyBinding::new("ctrl-s", workspace::ExportResult, Some("Workspace")),
+        KeyBinding::new("cmd-s", workspace::ExportResult, Some("Workspace")),
+        KeyBinding::new("ctrl-,", workspace::OpenRules, Some("Workspace")),
+        KeyBinding::new("cmd-,", workspace::OpenRules, Some("Workspace")),
+        KeyBinding::new(
+            "escape",
+            workspace::CloseWorkspaceSurface,
+            Some("Workspace"),
+        ),
+    ]
 }
 
 fn main_window_options() -> WindowOptions {
@@ -52,7 +83,10 @@ fn build_main_window_options(
     is_macos: bool,
     prefer_custom_titlebar: bool,
 ) -> WindowOptions {
-    let mut options = WindowOptions::default();
+    let mut options = WindowOptions {
+        window_min_size: Some(size(px(1180.), px(720.))),
+        ..WindowOptions::default()
+    };
 
     if prefer_custom_titlebar && (is_windows || is_macos) {
         options.titlebar = Some(gpui_component::TitleBar::title_bar_options());
@@ -67,8 +101,8 @@ fn build_main_window_options(
 
 #[cfg(test)]
 mod tests {
-    use super::build_main_window_options;
-    use gpui::WindowDecorations;
+    use super::{build_main_window_options, workspace_key_bindings};
+    use gpui::{WindowDecorations, px};
 
     #[test]
     fn main_window_options_enable_custom_titlebar_on_windows_and_macos() {
@@ -82,6 +116,10 @@ mod tests {
         let macos_titlebar = macos.titlebar.expect("macos titlebar");
         assert!(macos_titlebar.appears_transparent);
         assert!(macos_titlebar.traffic_light_position.is_some());
+        assert_eq!(
+            windows.window_min_size,
+            Some(gpui::size(px(1180.), px(720.)))
+        );
     }
 
     #[test]
@@ -119,5 +157,10 @@ mod tests {
                 .appears_transparent,
             "macOS fallback should keep the default system titlebar configuration"
         );
+    }
+
+    #[test]
+    fn workspace_shortcut_contract_builds_for_both_platform_modifier_sets() {
+        assert_eq!(workspace_key_bindings().len(), 13);
     }
 }

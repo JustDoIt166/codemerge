@@ -2,7 +2,7 @@ use gpui::SharedString;
 use std::rc::Rc;
 
 use crate::domain::{Language, ProcessResult};
-use crate::ui::state::{DeferredPreviewState, NarrowContentTab};
+use crate::ui::state::DeferredPreviewState;
 use crate::ui::view_model::{PreviewRowViewModel, ResultTab};
 use crate::utils::i18n::tr;
 
@@ -56,18 +56,6 @@ pub(in crate::ui::workspace) enum ContentPanelBodyViewModel {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(in crate::ui::workspace) struct ContentPanelViewModel {
     pub body: ContentPanelBodyViewModel,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::ui::workspace) enum CompactContentBodyViewModel {
-    Status,
-    Results,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(in crate::ui::workspace) struct CompactContentPanelViewModel {
-    pub selected_tab: usize,
-    pub body: CompactContentBodyViewModel,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -162,7 +150,7 @@ pub(in crate::ui::workspace) fn build_results_panel_view_model(
             0,
         ),
         ResultsPanelBodyViewModel::Content => (
-            SharedString::from(tr(language, "copy_current_page")),
+            SharedString::from(tr(language, "copy_result")),
             ResultsCopyAction::Preview,
             1,
         ),
@@ -222,21 +210,6 @@ pub(in crate::ui::workspace) fn build_content_panel_view_model(
                 empty_state,
             },
         }),
-    }
-}
-
-pub(in crate::ui::workspace) fn build_compact_content_panel_view_model(
-    narrow_content_tab: NarrowContentTab,
-) -> CompactContentPanelViewModel {
-    match narrow_content_tab {
-        NarrowContentTab::Status => CompactContentPanelViewModel {
-            selected_tab: 0,
-            body: CompactContentBodyViewModel::Status,
-        },
-        NarrowContentTab::Results => CompactContentPanelViewModel {
-            selected_tab: 1,
-            body: CompactContentBodyViewModel::Results,
-        },
     }
 }
 

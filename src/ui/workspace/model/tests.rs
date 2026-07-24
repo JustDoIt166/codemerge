@@ -4,13 +4,13 @@ use std::time::{Duration, Instant};
 
 use gpui::{Decorations, SharedString};
 
+use super::status::WorkspaceChromeTone;
 use super::{
-    CompactContentBodyViewModel, ContentPanelBodyViewModel, PreviewDocumentViewModel,
-    PreviewPaneBodyViewModel, PreviewTableSort, ResultsCopyAction, ResultsPanelBodyViewModel,
-    TreeCountSummary, TreeIconKind, TreeInteractionSnapshot, TreePaneBodyViewModel,
-    TreePanelEffect, TreeRenderState, WindowChromeMode, WindowZoomAction, WorkspaceChromeTone,
-    ancestor_node_ids, apply_preflight_event, apply_tree_interaction, build_blacklist_sections,
-    build_compact_content_panel_view_model, build_content_panel_view_model,
+    ContentPanelBodyViewModel, PreviewDocumentViewModel, PreviewPaneBodyViewModel,
+    PreviewTableSort, ResultsCopyAction, ResultsPanelBodyViewModel, TreeCountSummary, TreeIconKind,
+    TreeInteractionSnapshot, TreePaneBodyViewModel, TreePanelEffect, TreeRenderState,
+    WindowChromeMode, WindowZoomAction, ancestor_node_ids, apply_preflight_event,
+    apply_tree_interaction, build_blacklist_sections, build_content_panel_view_model,
     build_preflight_tree_panel_data, build_preview_pane_view_model, build_preview_table_model,
     build_results_panel_view_model, build_status_panel_view_model, build_tree_pane_view_model,
     build_tree_panel_data, build_tree_projection, build_tree_projection_with_exclusions,
@@ -24,9 +24,7 @@ use crate::domain::{
 };
 use crate::processor::stats::ProcessingStats;
 use crate::services::preflight::PreflightEvent;
-use crate::ui::state::{
-    DeferredPreviewState, NarrowContentTab, ProcessState, ProcessUiStatus, TreePanelState,
-};
+use crate::ui::state::{DeferredPreviewState, ProcessState, ProcessUiStatus, TreePanelState};
 use crate::ui::view_model::ResultTab;
 use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
@@ -84,6 +82,7 @@ fn preview_table_selects_first_row_when_current_selection_disappears() {
         tree_nodes: Vec::new(),
         process_dir: None,
         merged_content_path: None,
+        merged_content_bytes: 0,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
         preview_files: vec![PreviewFileEntry {
@@ -323,7 +322,7 @@ fn results_panel_view_model_normalizes_tab_and_copy_action() {
     assert_eq!(content_vm.selected_tab, 1);
     assert_eq!(
         content_vm.copy_label.as_ref(),
-        tr(Language::En, "copy_current_page")
+        tr(Language::En, "copy_result")
     );
     assert_eq!(content_vm.copy_action, ResultsCopyAction::Preview);
     assert_eq!(content_vm.body, ResultsPanelBodyViewModel::Content);
@@ -381,7 +380,7 @@ fn content_panel_view_model_builds_tree_only_and_empty_states() {
 }
 
 #[test]
-fn content_and_compact_view_models_preserve_visible_rows_and_selected_tab() {
+fn content_view_model_preserves_visible_rows() {
     let content_vm = build_content_panel_view_model(false, 12, false, false, Language::En);
     match content_vm.body {
         ContentPanelBodyViewModel::Split(content) => {
@@ -390,14 +389,6 @@ fn content_and_compact_view_models_preserve_visible_rows_and_selected_tab() {
         }
         body => panic!("expected split content body, got {body:?}"),
     }
-
-    let status_vm = build_compact_content_panel_view_model(NarrowContentTab::Status);
-    assert_eq!(status_vm.selected_tab, 0);
-    assert_eq!(status_vm.body, CompactContentBodyViewModel::Status);
-
-    let results_vm = build_compact_content_panel_view_model(NarrowContentTab::Results);
-    assert_eq!(results_vm.selected_tab, 1);
-    assert_eq!(results_vm.body, CompactContentBodyViewModel::Results);
 }
 
 #[test]
@@ -453,9 +444,6 @@ fn status_panel_view_model_derives_metrics_progress_and_recent_activity() {
     assert!((vm.progress.fill_ratio - 0.9).abs() < 0.0001);
     assert_eq!(vm.progress.current_file.as_ref(), "src/current.rs");
     assert_ne!(vm.progress.elapsed_value.as_ref(), "--:--");
-    assert_eq!(vm.activity_rows.len(), 16);
-    assert_eq!(vm.activity_rows[0].file_name, "file-17.rs");
-    assert_eq!(vm.activity_rows[15].file_name, "file-2.rs");
     assert_eq!(
         vm.archive_summary
             .as_ref()
@@ -508,6 +496,7 @@ fn tree_pane_view_model_uses_tree_body_when_rows_are_visible() {
         projection.total_summary,
         "",
         Some(&result),
+        None,
         Language::En,
         false,
     );
@@ -533,6 +522,7 @@ fn tree_pane_view_model_uses_plain_text_lines_and_no_match_empty_state() {
         TreeCountSummary::default(),
         "",
         Some(&result),
+        None,
         Language::En,
         true,
     );
@@ -557,6 +547,7 @@ fn tree_pane_view_model_uses_plain_text_lines_and_no_match_empty_state() {
         TreeCountSummary::default(),
         "lib",
         Some(&result),
+        None,
         Language::En,
         false,
     );
@@ -570,6 +561,34 @@ fn tree_pane_view_model_uses_plain_text_lines_and_no_match_empty_state() {
             hint: SharedString::from(tr(Language::En, "tree_no_match_hint")),
         }
     );
+}
+
+#[test]
+fn preflight_plain_text_tree_uses_the_shared_filtered_projection() {
+    let files = vec![FileEntry {
+        path: PathBuf::from("src/lib.rs"),
+        name: "src/lib.rs".into(),
+        size: 12,
+    }];
+    let data = build_preflight_tree_panel_data(&files, None);
+    let projection = build_tree_projection(Some(&data), "lib");
+    let render = build_tree_render_state(&projection, true, &data.index.default_expanded_ids, None);
+
+    let vm = build_tree_pane_view_model(
+        &render,
+        projection.total_summary,
+        "lib",
+        None,
+        None,
+        Language::En,
+        true,
+    );
+
+    let TreePaneBodyViewModel::PlainText { lines } = vm.body else {
+        panic!("expected preflight text tree");
+    };
+    assert!(lines.iter().any(|line| line.contains("lib.rs")));
+    assert!(vm.filter_active);
 }
 
 #[test]
@@ -1137,6 +1156,7 @@ fn sample_result() -> ProcessResult {
         ],
         process_dir: None,
         merged_content_path: None,
+        merged_content_bytes: 0,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
         preview_files: vec![
@@ -1188,6 +1208,7 @@ fn sample_archive_result() -> ProcessResult {
         }],
         process_dir: None,
         merged_content_path: None,
+        merged_content_bytes: 0,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
         preview_files: vec![PreviewFileEntry {
@@ -1213,6 +1234,7 @@ fn sample_sort_result() -> ProcessResult {
         tree_nodes: Vec::new(),
         process_dir: None,
         merged_content_path: None,
+        merged_content_bytes: 0,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
         preview_files: vec![
@@ -1291,6 +1313,7 @@ fn nested_result() -> ProcessResult {
         ],
         process_dir: None,
         merged_content_path: None,
+        merged_content_bytes: 0,
         suggested_result_name: "workspace-20260319.txt".to_string(),
         file_details: Vec::new(),
         preview_files: vec![

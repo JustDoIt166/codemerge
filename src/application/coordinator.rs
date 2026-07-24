@@ -10,6 +10,9 @@ use crate::services::preview::{PreviewEvent, PreviewRequest, execute as execute_
 use crate::services::process::{
     ProcessEvent, ProcessEventSink, ProcessRequest, execute as execute_process,
 };
+use crate::services::result_copy::{
+    ResultCopyEvent, ResultCopyEventSink, ResultCopyRequest, execute as execute_result_copy,
+};
 
 pub struct WorkspaceCoordinator {
     tasks: TaskSupervisor,
@@ -103,6 +106,37 @@ impl WorkspaceCoordinator {
                         )
                     })??;
                 let _ = context.emit(event);
+                Ok(())
+            })
+    }
+
+    pub fn start_result_copy(
+        &self,
+        request: ResultCopyRequest,
+    ) -> AppResult<TaskStream<ResultCopyEvent>> {
+        self.tasks
+            .start_latest(JobKind::Copy, move |context| async move {
+                let event_context = context.clone();
+                let emit: ResultCopyEventSink = Arc::new(move |event| {
+                    let _ = event_context.emit(event);
+                });
+                execute_result_copy(request, context.cancel.clone(), emit).await
+            })
+    }
+
+    pub fn start_maintenance_cleanup(&self) -> AppResult<TaskStream<usize>> {
+        self.tasks
+            .start_latest(JobKind::Maintenance, move |context| async move {
+                let cleaned = tokio::task::spawn_blocking(move || {
+                    crate::utils::temp_file::cleanup_stale_temp_entries(
+                        std::time::Duration::from_secs(24 * 60 * 60),
+                    )
+                })
+                .await
+                .map_err(|error| {
+                    crate::error::AppError::new(format!("maintenance task failed: {error}"))
+                })??;
+                let _ = context.emit(cleaned);
                 Ok(())
             })
     }

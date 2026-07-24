@@ -497,6 +497,50 @@ pub fn tr(lang: Language, key: &str) -> &'static str {
         (Language::En, "load_all") => "Load All",
         (Language::Zh, "copied") => "已复制到剪贴板",
         (Language::En, "copied") => "Copied to clipboard",
+        (Language::Zh, "copy_result") => "复制合并结果",
+        (Language::En, "copy_result") => "Copy Result",
+        (Language::Zh, "cancel_copy") => "取消复制",
+        (Language::En, "cancel_copy") => "Cancel Copy",
+        (Language::Zh, "retry_copy") => "重试复制",
+        (Language::En, "retry_copy") => "Retry Copy",
+        (Language::Zh, "awaiting_confirmation") => "等待确认",
+        (Language::En, "awaiting_confirmation") => "Awaiting Confirmation",
+        (Language::Zh, "large_copy_title") => "复制超大结果？",
+        (Language::En, "large_copy_title") => "Copy Large Result?",
+        (Language::Zh, "large_copy_message") => {
+            "复制将在后台读取完整结果。建议优先导出文件。结果大小："
+        }
+        (Language::En, "large_copy_message") => {
+            "The complete result will be read in the background. Exporting is recommended. Size:"
+        }
+        (Language::Zh, "copy_anyway") => "仍然复制",
+        (Language::En, "copy_anyway") => "Copy Anyway",
+        (Language::Zh, "current_input") => "当前输入",
+        (Language::En, "current_input") => "Current Input",
+        (Language::Zh, "items") => "项",
+        (Language::En, "items") => "items",
+        (Language::Zh, "status") => "状态",
+        (Language::En, "status") => "Status",
+        (Language::Zh, "progress") => "进度",
+        (Language::En, "progress") => "Progress",
+        (Language::Zh, "activity_details") => "活动详情",
+        (Language::En, "activity_details") => "Activity",
+        (Language::Zh, "draft_locked_hint") => "任务结束后可修改输入、规则和处理选项。",
+        (Language::En, "draft_locked_hint") => {
+            "Inputs, rules, and processing options can be edited after the task finishes."
+        }
+        (Language::Zh, "filter_all") => "全部",
+        (Language::En, "filter_all") => "All",
+        (Language::Zh, "copy_all_failures") => "复制全部失败信息",
+        (Language::En, "copy_all_failures") => "Copy All Failures",
+        (Language::Zh, "no_diagnostic") => "无附加诊断信息",
+        (Language::En, "no_diagnostic") => "No additional diagnostic details",
+        (Language::Zh, "preview_line_truncated_hint") => {
+            "超长行显示已截断；复制和导出仍保留完整内容。"
+        }
+        (Language::En, "preview_line_truncated_hint") => {
+            "Long lines are truncated for display; copy and export preserve the complete content."
+        }
 
         // 进度
         (Language::Zh, "section_progress") => "进度",

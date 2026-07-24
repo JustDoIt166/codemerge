@@ -2,7 +2,7 @@ use std::collections::BTreeSet;
 
 use gpui::{Decorations, SharedString};
 
-use crate::domain::{Language, ProcessRecord, ProcessResult};
+use crate::domain::{Language, ProcessResult};
 use crate::services::preflight::PreflightEvent;
 use crate::ui::state::{ProcessState, ProcessUiStatus};
 use crate::utils::{app_metadata, i18n::tr};
@@ -74,7 +74,6 @@ pub(in crate::ui::workspace) struct StatusPanelViewModel {
     pub status_message: SharedString,
     pub archive_summary: Option<StatusInfoViewModel>,
     pub progress: StatusProgressViewModel,
-    pub activity_rows: Vec<ProcessRecord>,
 }
 
 pub(in crate::ui::workspace) fn resolve_window_chrome_mode(
@@ -141,13 +140,6 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
     let archive_totals = summarize_archive_entries(result);
     let result_stats = result.map(|result| &result.stats);
     let failed_count = process.processing_failed;
-    let activity_rows = process
-        .processing_records
-        .iter()
-        .rev()
-        .take(16)
-        .cloned()
-        .collect::<Vec<_>>();
     let processed_count = process.processing_completed;
     let progress_total = process
         .processing_candidates
@@ -214,7 +206,6 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
             elapsed_value: SharedString::from(elapsed),
             current_file: SharedString::from(process.processing_current_file.clone()),
         },
-        activity_rows,
     }
 }
 

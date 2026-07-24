@@ -96,7 +96,7 @@ pub struct FileEntry {
     pub size: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ProcessStatus {
     Success,
     Skipped,
@@ -152,6 +152,7 @@ pub struct ProcessResult {
     pub tree_nodes: Vec<TreeNode>,
     pub process_dir: Option<PathBuf>,
     pub merged_content_path: Option<PathBuf>,
+    pub merged_content_bytes: u64,
     pub suggested_result_name: String,
     pub file_details: Vec<FileDetail>,
     pub preview_files: Vec<PreviewFileEntry>,

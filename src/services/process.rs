@@ -179,6 +179,7 @@ async fn run_process_with_walker(
             tree_nodes,
             process_dir: None,
             merged_content_path: None,
+            merged_content_bytes: 0,
             suggested_result_name,
             file_details: Vec::new(),
             preview_files: Vec::new(),
@@ -306,6 +307,15 @@ async fn run_process_with_walker(
         return Err(AppError::new(format!("flush merged file failed: {err}")));
     }
 
+    let merged_content_bytes = match output.metadata().await {
+        Ok(metadata) => metadata.len(),
+        Err(err) => {
+            return Err(AppError::new(format!(
+                "read merged file metadata failed: {err}"
+            )));
+        }
+    };
+
     let process_dir = process_dir.into_persisted_path();
 
     Ok(ProcessResult {
@@ -314,6 +324,7 @@ async fn run_process_with_walker(
         tree_nodes,
         process_dir: Some(process_dir),
         merged_content_path: Some(result_path),
+        merged_content_bytes,
         suggested_result_name,
         file_details,
         preview_files,

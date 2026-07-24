@@ -19,48 +19,6 @@ use crate::ui::state::ProcessUiStatus;
 use crate::utils::i18n::tr;
 
 #[derive(IntoElement)]
-pub(super) struct Card {
-    base: Div,
-    style: StyleRefinement,
-}
-
-impl Card {
-    fn new() -> Self {
-        Self {
-            base: div(),
-            style: StyleRefinement::default(),
-        }
-    }
-}
-
-impl Styled for Card {
-    fn style(&mut self) -> &mut StyleRefinement {
-        &mut self.style
-    }
-}
-
-impl ParentElement for Card {
-    fn extend(&mut self, elements: impl IntoIterator<Item = AnyElement>) {
-        self.base.extend(elements);
-    }
-}
-
-impl RenderOnce for Card {
-    fn render(self, _: &mut Window, cx: &mut App) -> impl IntoElement {
-        self.base
-            .size_full()
-            .min_h(px(0.))
-            .overflow_hidden()
-            .p_4()
-            .border_1()
-            .border_color(cx.theme().border)
-            .bg(cx.theme().background)
-            .rounded(cx.theme().radius)
-            .refine_style(&self.style)
-    }
-}
-
-#[derive(IntoElement)]
 struct SectionTitle {
     base: Div,
     style: StyleRefinement,
@@ -527,21 +485,6 @@ pub(super) fn format_tree_summary(
         total.files,
         tr(language, "files")
     )
-}
-
-pub(super) fn card(cx: &App) -> Card {
-    let _ = cx;
-    Card::new()
-}
-
-pub(super) fn flow_card(cx: &App) -> Div {
-    div()
-        .w_full()
-        .p_4()
-        .border_1()
-        .border_color(cx.theme().border)
-        .bg(cx.theme().background)
-        .rounded(cx.theme().radius)
 }
 
 pub(super) fn panel_viewport(content: AnyElement, min_height: gpui::Pixels) -> gpui::Div {

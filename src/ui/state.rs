@@ -25,25 +25,25 @@ pub enum ProcessUiStatus {
     Error,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum WorkspaceSheet {
+    Rules,
+    Activity,
+}
+
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum SidePanelTab {
+pub enum WorkspaceRightTab {
     #[default]
     Results,
     Rules,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
-pub enum NarrowContentTab {
+pub enum ActivityFilter {
     #[default]
-    Status,
-    Results,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum PendingConfirmation {
-    ClearInputs,
-    ResetBlacklist,
-    ClearBlacklist,
+    All,
+    Failed,
+    Skipped,
 }
 
 pub const DEFAULT_SELECTED_FILES_PANEL_HEIGHT: u16 = 180;
@@ -59,21 +59,25 @@ pub fn clamp_selected_files_panel_height(height: u16) -> u16 {
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct WorkspaceUiState {
-    pub side_panel_tab: SidePanelTab,
-    pub narrow_content_tab: NarrowContentTab,
+    pub active_sheet: Option<WorkspaceSheet>,
+    pub right_tab: WorkspaceRightTab,
+    pub activity_filter: ActivityFilter,
+    pub narrow_input_sheet_open: bool,
+    pub expanded_activity_record: Option<usize>,
     pub content_file_list_collapsed: bool,
     pub selected_files_panel_height: u16,
-    pub pending_confirmation: Option<PendingConfirmation>,
 }
 
 impl Default for WorkspaceUiState {
     fn default() -> Self {
         Self {
-            side_panel_tab: SidePanelTab::default(),
-            narrow_content_tab: NarrowContentTab::default(),
+            active_sheet: None,
+            right_tab: WorkspaceRightTab::default(),
+            activity_filter: ActivityFilter::default(),
+            narrow_input_sheet_open: false,
+            expanded_activity_record: None,
             content_file_list_collapsed: false,
             selected_files_panel_height: DEFAULT_SELECTED_FILES_PANEL_HEIGHT,
-            pending_confirmation: None,
         }
     }
 }

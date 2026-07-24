@@ -1,6 +1,7 @@
-use gpui::{App, ClickEvent, Context, Entity, SharedString, Timer, Window};
+use gpui::{App, ClickEvent, Context, Entity, ParentElement as _, SharedString, Timer, Window};
 use gpui_component::{
     WindowExt as _,
+    dialog::DialogButtonProps,
     input::{InputEvent, InputState},
     notification::NotificationType,
     table::{TableEvent, TableState},
@@ -23,13 +24,15 @@ use crate::application::task::{JobKind, TaskPayload};
 use crate::domain::{FileEntry, OutputFormat, TemporaryWhitelistMode};
 use crate::services::external_link;
 use crate::services::process::ProcessRequest;
-use crate::ui::state::{NarrowContentTab, PendingConfirmation, SidePanelTab};
+use crate::services::result_copy::{ResultCopyEvent, ResultCopyRequest};
+use crate::ui::result_model::ResultCopyState;
 use crate::ui::view_model::ResultTab;
 use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
 use crate::utils::path::filename;
 
 impl Workspace {
+    const LARGE_RESULT_COPY_BYTES: u64 = 32 * 1024 * 1024;
     fn parse_blacklist_tokens(raw: &str) -> Vec<String> {
         raw.split(|ch: char| ch == ',' || ch == '\n' || ch.is_whitespace())
             .filter(|part| !part.trim().is_empty())
@@ -55,7 +58,10 @@ impl Workspace {
         let config = self.store.read(cx).config();
         let revision = crate::services::settings::begin_save();
         cx.spawn(async move |this, cx| {
-            let result = crate::services::settings::save_if_latest(revision, config);
+            let result = cx
+                .background_executor()
+                .spawn(async move { crate::services::settings::save_if_latest(revision, config) })
+                .await;
             let _ = this.update(cx, |workspace, cx| {
                 if !crate::services::settings::is_latest_save(revision) {
                     return;
@@ -87,10 +93,15 @@ impl Workspace {
             ConfigAlertAction::ResetDefaults => {
                 let revision = crate::services::settings::begin_save();
                 cx.spawn(async move |this, cx| {
-                    let result = crate::services::settings::save_if_latest(
-                        revision,
-                        crate::domain::AppConfigV1::default(),
-                    );
+                    let result = cx
+                        .background_executor()
+                        .spawn(async move {
+                            crate::services::settings::save_if_latest(
+                                revision,
+                                crate::domain::AppConfigV1::default(),
+                            )
+                        })
+                        .await;
                     let _ = this.update(cx, |workspace, cx| {
                         if !crate::services::settings::is_latest_save(revision) {
                             return;
@@ -165,17 +176,15 @@ impl Workspace {
         self.refresh_preflight(cx);
     }
 
+    #[cfg(test)]
     pub(super) fn refresh_selected_folder_gitignore_rules(&mut self, cx: &mut Context<Self>) {
         let Some(selected_folder) = self.selection_snapshot(cx).selected_folder else {
             return;
         };
-        let gitignore_rules =
-            crate::processor::walker::load_gitignore_rules_for_root(&selected_folder);
+        let rules = crate::processor::walker::load_gitignore_rules_for_root(&selected_folder);
         let _ = self.dispatch(
             crate::application::store::WorkspaceAction::Draft(
-                crate::application::store::DraftAction::UpdateSelectedFolderGitignore(
-                    gitignore_rules,
-                ),
+                crate::application::store::DraftAction::UpdateSelectedFolderGitignore(rules),
             ),
             cx,
         );
@@ -236,7 +245,7 @@ impl Workspace {
         );
         if cleared {
             self.tree_panel.data =
-                model::build_tree_panel_data(self.store.read(cx).result().result.as_ref());
+                model::build_tree_panel_data(self.store.read(cx).result().result.as_deref());
             self.tree_panel.input_exclusion_enabled = false;
             self.tree_panel.projection = model::TreeProjectionState::default();
             self.tree_panel.render_state = model::TreeRenderState::default();
@@ -324,7 +333,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) {
         if matches!(event, InputEvent::Change) {
-            self.sync_tree(cx);
+            self.schedule_tree_filter_sync(cx);
         }
     }
 
@@ -465,10 +474,16 @@ impl Workspace {
                 .pick_folder()
                 .await
                 .map(|handle| handle.path().to_path_buf());
-            let gitignore_rules = picked
-                .as_ref()
-                .map(|path| crate::processor::walker::load_gitignore_rules_for_root(path))
-                .unwrap_or_default();
+            let gitignore_path = picked.clone();
+            let gitignore_rules = cx
+                .background_executor()
+                .spawn(async move {
+                    gitignore_path
+                        .as_ref()
+                        .map(|path| crate::processor::walker::load_gitignore_rules_for_root(path))
+                        .unwrap_or_default()
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(path) = picked {
                     this.apply_selected_folder_path(path, gitignore_rules, cx);
@@ -486,23 +501,26 @@ impl Workspace {
     ) {
         let _ = window;
         cx.spawn(async move |this, cx| {
-            let picked = rfd::AsyncFileDialog::new()
-                .pick_files()
-                .await
-                .map(|handles| {
-                    handles
-                        .into_iter()
-                        .map(|handle| {
-                            let path = handle.path().to_path_buf();
-                            let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
-                            FileEntry {
-                                name: filename(&path),
-                                path,
-                                size,
-                            }
-                        })
-                        .collect::<Vec<_>>()
-                });
+            let picked = rfd::AsyncFileDialog::new().pick_files().await;
+            let picked = cx
+                .background_executor()
+                .spawn(async move {
+                    picked.map(|handles| {
+                        handles
+                            .into_iter()
+                            .map(|handle| {
+                                let path = handle.path().to_path_buf();
+                                let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+                                FileEntry {
+                                    name: filename(&path),
+                                    path,
+                                    size,
+                                }
+                            })
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .await;
             let _ = this.update(cx, |this, cx| {
                 if let Some(files) = picked {
                     this.apply_selected_files(files, cx);
@@ -551,8 +569,13 @@ impl Workspace {
         let language = self.language(cx);
         let _ = window;
         cx.spawn(async move |this, cx| {
-            let loaded = std::fs::read_to_string(&path)
-                .map(|content| crate::processor::walker::parse_gitignore_rules(&content));
+            let loaded = cx
+                .background_executor()
+                .spawn(async move {
+                    std::fs::read_to_string(&path)
+                        .map(|content| crate::processor::walker::parse_gitignore_rules(&content))
+                })
+                .await;
             let _ = this.update(cx, |this, cx| match loaded {
                 Ok(rules) => {
                     let transition = this.dispatch(
@@ -596,27 +619,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(
-            self.dispatch(
-                crate::application::store::WorkspaceAction::Navigation(
-                    crate::application::store::NavigationAction::SetPendingConfirmation(
-                        PendingConfirmation::ClearInputs,
-                    ),
-                ),
-                cx,
-            )
-            .output,
-            crate::application::store::ActionOutput::Changed(true)
-        ) {
-            self.push_notice(
-                NotificationType::Warning,
-                tr(self.language(cx), "confirm_clear_notice"),
-                window,
-                cx,
-            );
-            return;
-        }
-        self.clear_pending_confirmation(cx);
+        let language = self.language(cx);
+        self.open_destructive_confirmation(
+            tr(language, "confirm_clear_inputs"),
+            tr(language, "confirm_clear_notice"),
+            tr(language, "clear"),
+            Self::clear_inputs_confirmed,
+            window,
+            cx,
+        );
+    }
+
+    fn clear_inputs_confirmed(&mut self, cx: &mut Context<Self>) {
         self.cancel_and_detach_background_work(cx);
         self.preview_filter_task = None;
         self.preview_table_cache = super::PreviewTableCache::default();
@@ -645,12 +659,8 @@ impl Workspace {
         self.sync_tree(cx);
         self.sync_preview_table(cx);
         self.refresh_preflight(cx);
-        self.push_notice(
-            NotificationType::Info,
-            tr(self.language(cx), "files_cleared"),
-            window,
-            cx,
-        );
+        let language = self.language(cx);
+        Self::notify_active_window(cx, NotificationType::Info, tr(language, "files_cleared"));
     }
 
     pub(super) fn cancel_and_detach_background_work(&mut self, cx: &mut Context<Self>) {
@@ -681,7 +691,6 @@ impl Workspace {
             );
             return;
         }
-        self.cleanup_current_result_artifacts();
         self.preview_filter_task = None;
         self.preview_table_cache = super::PreviewTableCache::default();
         let _ = self.dispatch(
@@ -697,7 +706,6 @@ impl Workspace {
         self.tree_panel.last_interaction = None;
         self.sync_tree(cx);
         self.sync_preview_table(cx);
-        self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_filters = self.effective_filters(cx);
@@ -1073,7 +1081,11 @@ impl Workspace {
                 return;
             };
 
-            let notice = match std::fs::write(path, body) {
+            let write_result = cx
+                .background_executor()
+                .spawn(async move { std::fs::write(path, body) })
+                .await;
+            let notice = match write_result {
                 Ok(_) => (
                     NotificationType::Success,
                     tr(language, "blacklist_exported").to_string(),
@@ -1110,7 +1122,10 @@ impl Workspace {
                 return;
             };
 
-            let content = std::fs::read_to_string(path);
+            let content = cx
+                .background_executor()
+                .spawn(async move { std::fs::read_to_string(path) })
+                .await;
             let _ = this.update(cx, |this, cx| match content {
                 Ok(content) => {
                     let language = this.language(cx);
@@ -1143,27 +1158,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(
-            self.dispatch(
-                crate::application::store::WorkspaceAction::Navigation(
-                    crate::application::store::NavigationAction::SetPendingConfirmation(
-                        PendingConfirmation::ResetBlacklist,
-                    ),
-                ),
-                cx,
-            )
-            .output,
-            crate::application::store::ActionOutput::Changed(true)
-        ) {
-            self.push_notice(
-                NotificationType::Warning,
-                tr(self.language(cx), "confirm_reset_notice"),
-                window,
-                cx,
-            );
-            return;
-        }
-        self.clear_pending_confirmation(cx);
+        let language = self.language(cx);
+        self.open_destructive_confirmation(
+            tr(language, "confirm_reset_blacklist"),
+            tr(language, "confirm_reset_notice"),
+            tr(language, "blacklist_reset_default"),
+            Self::reset_blacklist_confirmed,
+            window,
+            cx,
+        );
+    }
+
+    fn reset_blacklist_confirmed(&mut self, cx: &mut Context<Self>) {
         let _ = self.dispatch(
             crate::application::store::WorkspaceAction::Draft(
                 crate::application::store::DraftAction::ResetBlacklist,
@@ -1173,11 +1179,11 @@ impl Workspace {
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
-        self.push_notice(
-            NotificationType::Info,
-            tr(self.language(cx), "blacklist_reset_default"),
-            window,
+        let language = self.language(cx);
+        Self::notify_active_window(
             cx,
+            NotificationType::Info,
+            tr(language, "blacklist_reset_default"),
         );
     }
 
@@ -1187,27 +1193,18 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if matches!(
-            self.dispatch(
-                crate::application::store::WorkspaceAction::Navigation(
-                    crate::application::store::NavigationAction::SetPendingConfirmation(
-                        PendingConfirmation::ClearBlacklist,
-                    ),
-                ),
-                cx,
-            )
-            .output,
-            crate::application::store::ActionOutput::Changed(true)
-        ) {
-            self.push_notice(
-                NotificationType::Warning,
-                tr(self.language(cx), "confirm_clear_notice"),
-                window,
-                cx,
-            );
-            return;
-        }
-        self.clear_pending_confirmation(cx);
+        let language = self.language(cx);
+        self.open_destructive_confirmation(
+            tr(language, "confirm_clear_blacklist"),
+            tr(language, "confirm_clear_notice"),
+            tr(language, "blacklist_clear_all"),
+            Self::clear_blacklist_confirmed,
+            window,
+            cx,
+        );
+    }
+
+    fn clear_blacklist_confirmed(&mut self, cx: &mut Context<Self>) {
         let _ = self.dispatch(
             crate::application::store::WorkspaceAction::Draft(
                 crate::application::store::DraftAction::ClearBlacklist,
@@ -1217,12 +1214,44 @@ impl Workspace {
         self.invalidate_rules_panel_cache();
         self.persist_settings_async(cx);
         self.refresh_preflight(cx);
-        self.push_notice(
-            NotificationType::Info,
-            tr(self.language(cx), "blacklist_cleared"),
-            window,
+        let language = self.language(cx);
+        Self::notify_active_window(
             cx,
+            NotificationType::Info,
+            tr(language, "blacklist_cleared"),
         );
+    }
+
+    fn open_destructive_confirmation(
+        &self,
+        title: impl Into<SharedString>,
+        message: impl Into<SharedString>,
+        confirm_label: impl Into<SharedString>,
+        action: fn(&mut Self, &mut Context<Self>),
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let title = title.into();
+        let message = message.into();
+        let confirm_label = confirm_label.into();
+        let cancel_label = SharedString::from(tr(self.language(cx), "cancel"));
+        let workspace = cx.entity().clone();
+        window.open_dialog(cx, move |dialog, _, _| {
+            let workspace = workspace.clone();
+            dialog
+                .title(title.clone())
+                .child(message.clone())
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(confirm_label.clone())
+                        .cancel_text(cancel_label.clone()),
+                )
+                .on_ok(move |_, _, cx| {
+                    workspace.update(cx, action);
+                    true
+                })
+                .confirm()
+        });
     }
 
     pub(super) fn clear_temporary_blacklist(
@@ -1431,44 +1460,6 @@ impl Workspace {
         }
     }
 
-    pub(super) fn set_side_panel_tab(
-        &mut self,
-        ix: &usize,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = if *ix == 0 {
-            SidePanelTab::Results
-        } else {
-            SidePanelTab::Rules
-        };
-        let _ = self.dispatch(
-            crate::application::store::WorkspaceAction::Navigation(
-                crate::application::store::NavigationAction::SetSidePanelTab(tab),
-            ),
-            cx,
-        );
-    }
-
-    pub(super) fn set_narrow_content_tab(
-        &mut self,
-        ix: &usize,
-        _: &mut Window,
-        cx: &mut Context<Self>,
-    ) {
-        let tab = if *ix == 0 {
-            NarrowContentTab::Status
-        } else {
-            NarrowContentTab::Results
-        };
-        let _ = self.dispatch(
-            crate::application::store::WorkspaceAction::Navigation(
-                crate::application::store::NavigationAction::SetNarrowContentTab(tab),
-            ),
-            cx,
-        );
-    }
-
     pub(super) fn toggle_content_file_list_collapsed(
         &mut self,
         _: &ClickEvent,
@@ -1536,13 +1527,8 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let document = self
-            .store
-            .read(cx)
-            .preview_model()
-            .preview_document()
-            .cloned();
-        let Some(document) = document else {
+        let result = self.store.read(cx).result().result.clone();
+        let Some(result) = result else {
             self.push_notice(
                 NotificationType::Warning,
                 tr(self.language(cx), "no_content"),
@@ -1551,26 +1537,205 @@ impl Workspace {
             );
             return;
         };
-        let language = self.language(cx);
-        let _ = window;
-        cx.spawn(async move |this, cx| {
-            let result = crate::services::preview::load_text(&document);
-            let _ = this.update(cx, |_, cx| match result {
-                Ok(content) => {
-                    if let Some(window) = cx.active_window() {
-                        let _ = window.update(cx, |_, window, cx| {
-                            copy_to_clipboard(&content, language, window, cx);
-                        });
-                    }
-                }
-                Err(err) => Self::notify_active_window(
-                    cx,
-                    NotificationType::Error,
-                    format!("{}{}", tr(language, "copy_failed"), err),
+        let Some(path) = result.merged_content_path.clone() else {
+            self.push_notice(
+                NotificationType::Warning,
+                tr(self.language(cx), "no_content"),
+                window,
+                cx,
+            );
+            return;
+        };
+        if let ResultCopyState::Copying { revision, .. } = self.store.read(cx).result().copy_state {
+            let _ = self.coordinator.read(cx).request_cancel(JobKind::Copy);
+            let _ = self.dispatch(
+                crate::application::store::WorkspaceAction::ResultCopy(
+                    crate::application::store::ResultCopyAction::Cancel { revision },
                 ),
-            });
+                cx,
+            );
+            return;
+        }
+
+        let total = result.merged_content_bytes;
+        let requires_confirmation = total > Self::LARGE_RESULT_COPY_BYTES;
+        let transition = self.dispatch(
+            crate::application::store::WorkspaceAction::ResultCopy(
+                crate::application::store::ResultCopyAction::Prepare {
+                    total,
+                    requires_confirmation,
+                },
+            ),
+            cx,
+        );
+        let crate::application::store::ActionOutput::CopyRevision(revision) = transition.output
+        else {
+            return;
+        };
+
+        if !requires_confirmation {
+            self.start_result_copy_job(revision, path, total, cx);
+            return;
+        }
+
+        let language = self.language(cx);
+        let workspace = cx.entity().clone();
+        let confirm_workspace = workspace.clone();
+        let cancel_workspace = workspace;
+        let confirm_path = path;
+        window.open_dialog(cx, move |dialog, _, _| {
+            let confirm_workspace = confirm_workspace.clone();
+            let cancel_workspace = cancel_workspace.clone();
+            let confirm_path = confirm_path.clone();
+            dialog
+                .title(tr(language, "large_copy_title"))
+                .child(format!(
+                    "{} {}",
+                    tr(language, "large_copy_message"),
+                    super::view::format_size(total)
+                ))
+                .button_props(
+                    DialogButtonProps::default()
+                        .ok_text(tr(language, "copy_anyway"))
+                        .cancel_text(tr(language, "cancel")),
+                )
+                .on_ok(move |_, _, cx| {
+                    let path = confirm_path.clone();
+                    confirm_workspace.update(cx, |workspace, cx| {
+                        let changed = workspace.dispatch(
+                            crate::application::store::WorkspaceAction::ResultCopy(
+                                crate::application::store::ResultCopyAction::Confirm { revision },
+                            ),
+                            cx,
+                        );
+                        if !changed.changes.is_empty() {
+                            workspace.start_result_copy_job(revision, path, total, cx);
+                        }
+                    });
+                    true
+                })
+                .on_cancel(move |_, _, cx| {
+                    cancel_workspace.update(cx, |workspace, cx| {
+                        let _ = workspace.dispatch(
+                            crate::application::store::WorkspaceAction::ResultCopy(
+                                crate::application::store::ResultCopyAction::Cancel { revision },
+                            ),
+                            cx,
+                        );
+                    });
+                    true
+                })
+                .confirm()
+        });
+    }
+
+    fn start_result_copy_job(
+        &mut self,
+        revision: u64,
+        path: std::path::PathBuf,
+        total: u64,
+        cx: &mut Context<Self>,
+    ) {
+        crate::ui::perf::record_copy_job();
+        let request = ResultCopyRequest {
+            revision,
+            path,
+            total,
+        };
+        let mut stream = match self.coordinator.read(cx).start_result_copy(request) {
+            Ok(stream) => stream,
+            Err(error) => {
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::ResultCopy(
+                        crate::application::store::ResultCopyAction::Fail {
+                            revision,
+                            error: error.to_string(),
+                        },
+                    ),
+                    cx,
+                );
+                return;
+            }
+        };
+        let language = self.language(cx);
+        cx.spawn(async move |this, cx| {
+            while let Some(envelope) = stream.events.recv().await {
+                match envelope.payload {
+                    TaskPayload::Event(event) => {
+                        let terminal = matches!(
+                            event,
+                            ResultCopyEvent::Copied { .. }
+                                | ResultCopyEvent::Failed { .. }
+                                | ResultCopyEvent::Cancelled { .. }
+                        );
+                        let notice = match &event {
+                            ResultCopyEvent::Copied { .. } => Some((
+                                NotificationType::Success,
+                                tr(language, "copied").to_string(),
+                            )),
+                            ResultCopyEvent::Failed { error, .. } => Some((
+                                NotificationType::Error,
+                                format!("{}{}", tr(language, "copy_failed"), error),
+                            )),
+                            _ => None,
+                        };
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_result_copy_event(event, cx);
+                            if let Some((kind, message)) = notice {
+                                Self::notify_active_window(cx, kind, message);
+                            }
+                        });
+                        if terminal {
+                            break;
+                        }
+                    }
+                    TaskPayload::Failed(error) => {
+                        let _ = this.update(cx, |workspace, cx| {
+                            workspace.apply_result_copy_event(
+                                ResultCopyEvent::Failed {
+                                    revision,
+                                    error: error.to_string(),
+                                },
+                                cx,
+                            );
+                        });
+                        break;
+                    }
+                    TaskPayload::Finished => break,
+                }
+            }
         })
         .detach();
+    }
+
+    fn apply_result_copy_event(&mut self, event: ResultCopyEvent, cx: &mut Context<Self>) {
+        if matches!(event, ResultCopyEvent::Progress { .. }) {
+            crate::ui::perf::record_copy_progress_batch();
+        }
+        let action = match event {
+            ResultCopyEvent::Progress {
+                revision,
+                read,
+                total,
+            } => crate::application::store::ResultCopyAction::Progress {
+                revision,
+                read,
+                total,
+            },
+            ResultCopyEvent::Copied { revision } => {
+                crate::application::store::ResultCopyAction::Complete { revision }
+            }
+            ResultCopyEvent::Failed { revision, error } => {
+                crate::application::store::ResultCopyAction::Fail { revision, error }
+            }
+            ResultCopyEvent::Cancelled { revision } => {
+                crate::application::store::ResultCopyAction::Cancel { revision }
+            }
+        };
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::ResultCopy(action),
+            cx,
+        );
     }
 
     pub(super) fn remove_blacklist_item(

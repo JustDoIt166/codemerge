@@ -4,7 +4,7 @@ use gpui::{
     AnyElement, App, AppContext as _, ClickEvent, Context, DragMoveEvent, Empty,
     InteractiveElement, IntoElement, ListSizingBehavior, ParentElement, Render, SharedString,
     StatefulInteractiveElement as _, Styled, UniformListDecoration, Window, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    prelude::FluentBuilder as _, px, relative, uniform_list,
 };
 use gpui_component::{
     ActiveTheme as _, Disableable, IconName, Sizable, Size, StyledExt as _,
@@ -20,22 +20,19 @@ use gpui_component::{
     tab::TabBar,
     table::Table,
     tree::{TreeState, tree},
-    v_flex, v_virtual_list,
+    v_flex,
 };
 
 use super::view::{
-    activity_row, card, empty_box, flow_card, format_tree_summary, panel_frame, panel_viewport,
-    render_blacklist_section, render_blacklist_tag, render_info_block, render_kv, render_tree_row,
-    section_caption, section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
+    empty_box, format_tree_summary, panel_frame, panel_viewport, render_blacklist_section,
+    render_blacklist_tag, render_info_block, render_kv, render_tree_row, section_caption,
+    section_title, selected_file_row, stat_tile, status_banner, tab_icon_badge,
 };
-use super::{
-    PreviewPaneView, TreePaneView, TreeViewMode, Workspace, fixed_list_sizes, preview_line_height,
-    workspace_panel_min_height,
-};
+use super::{PreviewPaneView, TreePaneView, TreeViewMode, Workspace, preview_line_height};
 use crate::domain::{OutputFormat, TemporaryWhitelistMode};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
-use crate::ui::state::{PendingConfirmation, ProcessUiStatus, SidePanelTab};
+use crate::ui::state::{ProcessUiStatus, WorkspaceRightTab};
 use crate::utils::i18n::tr;
 
 #[derive(Clone)]
@@ -59,30 +56,49 @@ impl Render for SelectedFilesResizeDrag {
 }
 
 impl Workspace {
-    fn render_process_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_process_actions(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
         let has_inputs = self.has_inputs(cx);
         let is_processing = self.is_processing(cx);
         let is_cancelling = self.store.read(cx).process().ui_status == ProcessUiStatus::Cancelling;
 
-        h_flex()
-            .gap_2()
-            .child(
-                Button::new("start-process")
-                    .primary()
-                    .icon(IconName::ArrowRight)
-                    .label(tr(language, "start"))
-                    .disabled(!has_inputs || is_processing)
-                    .on_click(cx.listener(Self::start_process)),
+        if is_processing {
+            h_flex().w_full().child(
+                div()
+                    .id("cancel-process-action")
+                    .debug_selector(|| "cancel-process-action".to_string())
+                    .w_full()
+                    .child(
+                        Button::new("primary-process-action")
+                            .w_full()
+                            .danger()
+                            .icon(IconName::Close)
+                            .label(if is_cancelling {
+                                tr(language, "cancelling")
+                            } else {
+                                tr(language, "cancel")
+                            })
+                            .disabled(is_cancelling)
+                            .on_click(cx.listener(Self::cancel_process)),
+                    ),
             )
-            .child(
-                Button::new("cancel-process")
-                    .outline()
-                    .icon(IconName::Close)
-                    .label(tr(language, "cancel"))
-                    .disabled(!is_processing || is_cancelling)
-                    .on_click(cx.listener(Self::cancel_process)),
+        } else {
+            h_flex().w_full().child(
+                div()
+                    .id("start-process-action")
+                    .debug_selector(|| "start-process-action".to_string())
+                    .w_full()
+                    .child(
+                        Button::new("start-process")
+                            .w_full()
+                            .primary()
+                            .icon(IconName::ArrowRight)
+                            .label(tr(language, "start"))
+                            .disabled(!has_inputs)
+                            .on_click(cx.listener(Self::start_process)),
+                    ),
             )
+        }
     }
 
     fn render_input_toolbar(
@@ -97,6 +113,7 @@ impl Workspace {
                     .primary()
                     .icon(IconName::FolderOpen)
                     .label(tr(language, "select_folder"))
+                    .disabled(self.store.read(cx).draft_locked())
                     .on_click(cx.listener(Self::select_folder)),
             )
             .child(
@@ -104,6 +121,7 @@ impl Workspace {
                     .outline()
                     .icon(IconName::File)
                     .label(tr(language, "select_files"))
+                    .disabled(self.store.read(cx).draft_locked())
                     .on_click(cx.listener(Self::select_files)),
             )
             .into_any_element()
@@ -197,6 +215,7 @@ impl Workspace {
                                     .filter_map(|ix| {
                                         if let Some(entry) = rows.get(ix) {
                                             let path = entry.path.clone();
+                                            let locked = view.store.read(app_cx).draft_locked();
                                             return Some(selected_file_row(
                                                 entry,
                                                 Button::new(("remove-selected-file", ix))
@@ -204,6 +223,7 @@ impl Workspace {
                                                     .compact()
                                                     .with_size(Size::Small)
                                                     .icon(IconName::Delete)
+                                                    .disabled(locked)
                                                     .tooltip(tr(
                                                         view.language(app_cx),
                                                         "remove_selected_file",
@@ -300,6 +320,7 @@ impl Workspace {
         selection: &crate::ui::state::SelectionState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locked = self.store.read(cx).draft_locked();
         let sections = Rc::new(super::model::build_blacklist_sections(
             &selection.temp_folder_blacklist,
             &selection.temp_ext_blacklist,
@@ -349,7 +370,7 @@ impl Workspace {
                                         .compact()
                                         .with_size(Size::Small)
                                         .icon(IconName::Delete)
-                                        .disabled(!item.deletable)
+                                        .disabled(!item.deletable || locked)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.remove_temporary_blacklist_item(
                                                 kind,
@@ -377,6 +398,7 @@ impl Workspace {
         selection: &crate::ui::state::SelectionState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locked = self.store.read(cx).draft_locked();
         let sections = Rc::new(super::model::build_blacklist_sections(
             &selection.temp_folder_whitelist,
             &selection.temp_ext_whitelist,
@@ -426,7 +448,7 @@ impl Workspace {
                                         .compact()
                                         .with_size(Size::Small)
                                         .icon(IconName::Delete)
-                                        .disabled(!item.deletable)
+                                        .disabled(!item.deletable || locked)
                                         .on_click(cx.listener(move |this, _, window, cx| {
                                             this.remove_temporary_whitelist_item(
                                                 kind,
@@ -456,6 +478,7 @@ impl Workspace {
         has_gitignore_file: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let locked = self.store.read(cx).draft_locked();
         let has_temporary_rules =
             !selection.temp_folder_blacklist.is_empty() || !selection.temp_ext_blacklist.is_empty();
         let has_temporary_whitelist = !selection.temp_folder_whitelist.is_empty()
@@ -494,6 +517,7 @@ impl Workspace {
                             .outline()
                             .icon(IconName::BookOpen)
                             .label(tr(language, "select_gitignore"))
+                            .disabled(locked)
                             .on_click(cx.listener(Self::select_gitignore)),
                     )
                     .child(
@@ -501,7 +525,7 @@ impl Workspace {
                             .outline()
                             .icon(IconName::Check)
                             .label(tr(language, "apply_gitignore"))
-                            .disabled(!has_gitignore_file)
+                            .disabled(!has_gitignore_file || locked)
                             .on_click(cx.listener(Self::apply_gitignore)),
                     ),
             )
@@ -511,7 +535,11 @@ impl Workspace {
                     .text_color(cx.theme().muted_foreground)
                     .child(tr(language, "temporary_rules_hint")),
             )
-            .child(Input::new(&self.temp_blacklist_add_input).prefix(IconName::Plus))
+            .child(
+                Input::new(&self.temp_blacklist_add_input)
+                    .prefix(IconName::Plus)
+                    .disabled(locked),
+            )
             .child(
                 h_flex()
                     .gap_2()
@@ -520,6 +548,7 @@ impl Workspace {
                             .outline()
                             .icon(IconName::Folder)
                             .label(tr(language, "add_temp_folder"))
+                            .disabled(locked)
                             .on_click(cx.listener(Self::add_temporary_folder_blacklist)),
                     )
                     .child(
@@ -527,6 +556,7 @@ impl Workspace {
                             .outline()
                             .icon(IconName::File)
                             .label(tr(language, "add_temp_ext"))
+                            .disabled(locked)
                             .on_click(cx.listener(Self::add_temporary_ext_blacklist)),
                     ),
             )
@@ -536,7 +566,7 @@ impl Workspace {
                     .outline()
                     .icon(IconName::Delete)
                     .label(tr(language, "clear_temporary_rules"))
-                    .disabled(!has_temporary_rules)
+                    .disabled(!has_temporary_rules || locked)
                     .on_click(cx.listener(Self::clear_temporary_blacklist)),
             )
             .child(
@@ -564,15 +594,19 @@ impl Workspace {
                                     .on_click(cx.listener(Self::set_temporary_whitelist_mode))
                                     .child(
                                         Tab::new()
+                                            .disabled(locked)
                                             .label(tr(language, "whitelist_mode_then_blacklist")),
                                     )
                                     .child(
                                         Tab::new()
+                                            .disabled(locked)
                                             .label(tr(language, "whitelist_mode_whitelist_only")),
                                     ),
                             )
                             .child(
-                                Input::new(&self.temp_whitelist_add_input).prefix(IconName::Plus),
+                                Input::new(&self.temp_whitelist_add_input)
+                                    .prefix(IconName::Plus)
+                                    .disabled(locked),
                             )
                             .child(
                                 h_flex()
@@ -582,6 +616,7 @@ impl Workspace {
                                             .outline()
                                             .icon(IconName::Folder)
                                             .label(tr(language, "add_temp_whitelist_folder"))
+                                            .disabled(locked)
                                             .on_click(
                                                 cx.listener(Self::add_temporary_folder_whitelist),
                                             ),
@@ -591,6 +626,7 @@ impl Workspace {
                                             .outline()
                                             .icon(IconName::File)
                                             .label(tr(language, "add_temp_whitelist_ext"))
+                                            .disabled(locked)
                                             .on_click(
                                                 cx.listener(Self::add_temporary_ext_whitelist),
                                             ),
@@ -604,7 +640,7 @@ impl Workspace {
                                     .outline()
                                     .icon(IconName::Delete)
                                     .label(tr(language, "clear_temporary_whitelist"))
-                                    .disabled(!has_temporary_whitelist)
+                                    .disabled(!has_temporary_whitelist || locked)
                                     .on_click(cx.listener(Self::clear_temporary_whitelist)),
                             ),
                     ),
@@ -615,10 +651,11 @@ impl Workspace {
     fn render_options_section(
         &self,
         language: crate::domain::Language,
+        settings: &crate::ui::state::SettingsState,
+        selection: &crate::ui::state::SelectionState,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let settings = self.settings_snapshot(cx);
-        let selection = self.selection_snapshot(cx);
+        let locked = self.store.read(cx).draft_locked();
 
         v_flex()
             .gap_3()
@@ -640,32 +677,52 @@ impl Workspace {
                                 OutputFormat::Markdown => 3,
                             })
                             .on_click(cx.listener(Self::set_output_format))
-                            .child(Tab::new().label(tr(language, "format_default")))
-                            .child(Tab::new().label(tr(language, "format_xml")))
-                            .child(Tab::new().label(tr(language, "format_plain")))
-                            .child(Tab::new().label(tr(language, "format_markdown"))),
+                            .child(
+                                Tab::new()
+                                    .disabled(locked)
+                                    .label(tr(language, "format_default")),
+                            )
+                            .child(
+                                Tab::new()
+                                    .disabled(locked)
+                                    .label(tr(language, "format_xml")),
+                            )
+                            .child(
+                                Tab::new()
+                                    .disabled(locked)
+                                    .label(tr(language, "format_plain")),
+                            )
+                            .child(
+                                Tab::new()
+                                    .disabled(locked)
+                                    .label(tr(language, "format_markdown")),
+                            ),
                     ),
             )
             .child(
                 Checkbox::new("compress")
+                    .disabled(locked)
                     .checked(settings.options.compress)
                     .label(tr(language, "compress"))
                     .on_click(cx.listener(Self::toggle_compress)),
             )
             .child(
                 Checkbox::new("use-gitignore")
+                    .disabled(locked)
                     .checked(settings.options.use_gitignore)
                     .label(tr(language, "use_gitignore"))
                     .on_click(cx.listener(Self::toggle_use_gitignore)),
             )
             .child(
                 Checkbox::new("ignore-git")
+                    .disabled(locked)
                     .checked(settings.options.ignore_git)
                     .label(tr(language, "ignore_git"))
                     .on_click(cx.listener(Self::toggle_ignore_git)),
             )
             .child(
                 Checkbox::new("dedupe")
+                    .disabled(locked)
                     .checked(selection.dedupe_exact_path)
                     .label(tr(language, "dedupe_exact_path"))
                     .on_click(cx.listener(Self::toggle_dedupe)),
@@ -676,7 +733,6 @@ impl Workspace {
     fn render_input_danger_zone(
         &self,
         language: crate::domain::Language,
-        pending_confirmation: Option<PendingConfirmation>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -701,13 +757,7 @@ impl Workspace {
                         Button::new("clear-inputs")
                             .danger()
                             .icon(IconName::Delete)
-                            .label(
-                                if pending_confirmation == Some(PendingConfirmation::ClearInputs) {
-                                    tr(language, "confirm_clear_inputs")
-                                } else {
-                                    tr(language, "clear")
-                                },
-                            )
+                            .label(tr(language, "clear"))
                             .on_click(cx.listener(Self::clear_inputs)),
                     ),
             )
@@ -715,79 +765,101 @@ impl Workspace {
     }
 
     pub(super) fn render_input_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = self.settings_snapshot(cx);
-        let selection = self.selection_snapshot(cx);
+        let (selection, selected_files, settings) = self.cached_input_snapshots(cx);
         let ui_state = self.ui_state(cx);
         let language = settings.language;
-        let selected_files = Rc::new(selection.selected_files.clone());
         let selected_files_panel_height = px(f32::from(ui_state.selected_files_panel_height));
-        let folder_label = self
-            .selection_snapshot(cx)
+        let folder_label = selection
             .selected_folder
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| tr(language, "input_folder_empty").to_string());
         let has_selected_folder = selection.selected_folder.is_some();
-        let gitignore_label = self
-            .selection_snapshot(cx)
+        let gitignore_label = selection
             .gitignore_file
             .as_ref()
             .map(|path| path.display().to_string())
             .unwrap_or_else(|| tr(language, "temporary_gitignore_empty").to_string());
 
-        flow_card(cx).child(
-            v_flex()
-                .gap_4()
-                .w_full()
-                .child(section_title(
-                    tr(language, "panel_inputs"),
-                    IconName::PanelLeft,
-                    cx,
-                ))
-                .child(self.render_input_toolbar(language, cx))
-                .child(
-                    h_flex()
-                        .w_full()
-                        .gap_2()
-                        .items_center()
-                        .child(div().flex_1().child(render_info_block(
-                            tr(language, "folder"),
-                            folder_label,
-                            has_selected_folder,
-                            IconName::FolderOpen,
-                            cx,
-                        )))
-                        .child(
-                            Button::new("clear-selected-folder")
-                                .outline()
-                                .compact()
-                                .icon(IconName::Delete)
-                                .label(tr(language, "clear_folder"))
-                                .disabled(!has_selected_folder)
-                                .on_click(cx.listener(Self::clear_selected_folder)),
-                        ),
-                )
-                .child(self.render_selected_files_section(
-                    language,
-                    selected_files,
-                    selected_files_panel_height,
-                    ui_state.selected_files_panel_height,
-                    cx,
-                ))
-                .child(self.render_temporary_rules_section(
-                    language,
-                    &selection,
-                    gitignore_label,
-                    selection.gitignore_file.is_some(),
-                    cx,
-                ))
-                .child(self.render_options_section(language, cx))
-                .child(self.render_input_danger_zone(language, ui_state.pending_confirmation, cx)),
-        )
+        div()
+            .id("input-workspace-panel")
+            .debug_selector(|| "input-workspace-panel".to_string())
+            .w_full()
+            .p_4()
+            .bg(cx.theme().background)
+            .child(
+                v_flex()
+                    .gap_4()
+                    .w_full()
+                    .child(section_title(
+                        tr(language, "panel_inputs"),
+                        IconName::PanelLeft,
+                        cx,
+                    ))
+                    .when(self.store.read(cx).draft_locked(), |panel| {
+                        panel.child(
+                            h_flex()
+                                .gap_2()
+                                .p_2()
+                                .rounded(super::design_tokens::RADIUS_PANEL)
+                                .bg(cx.theme().warning.opacity(0.12))
+                                .child(IconName::Info)
+                                .child(tr(language, "draft_locked_hint")),
+                        )
+                    })
+                    .child(self.render_input_toolbar(language, cx))
+                    .child(
+                        h_flex()
+                            .w_full()
+                            .gap_2()
+                            .items_center()
+                            .child(div().flex_1().child(render_info_block(
+                                tr(language, "folder"),
+                                folder_label,
+                                has_selected_folder,
+                                IconName::FolderOpen,
+                                cx,
+                            )))
+                            .child(
+                                Button::new("clear-selected-folder")
+                                    .outline()
+                                    .compact()
+                                    .icon(IconName::Delete)
+                                    .label(tr(language, "clear_folder"))
+                                    .disabled(
+                                        !has_selected_folder || self.store.read(cx).draft_locked(),
+                                    )
+                                    .on_click(cx.listener(Self::clear_selected_folder)),
+                            ),
+                    )
+                    .child(self.render_selected_files_section(
+                        language,
+                        selected_files,
+                        selected_files_panel_height,
+                        ui_state.selected_files_panel_height,
+                        cx,
+                    ))
+                    .child(self.render_temporary_rules_section(
+                        language,
+                        &selection,
+                        gitignore_label,
+                        selection.gitignore_file.is_some(),
+                        cx,
+                    ))
+                    .child(self.render_options_section(language, &settings, &selection, cx))
+                    .child(self.render_input_danger_zone(language, cx)),
+            )
     }
 
     pub(super) fn render_status_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        card(cx).child(self.render_status_panel_body(cx))
+        div()
+            .id("status-workspace-panel")
+            .debug_selector(|| "status-workspace-panel".to_string())
+            .size_full()
+            .min_h(px(0.))
+            .p_3()
+            .bg(cx.theme().background)
+            .child(self.render_status_panel_body(cx))
     }
 
     fn build_status_panel_view_model(&self, cx: &App) -> super::model::StatusPanelViewModel {
@@ -796,12 +868,11 @@ impl Workspace {
         let merged_file_size_hint = result_state
             .result
             .as_ref()
-            .and_then(|result| result.merged_content_path.as_ref())
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| super::view::format_size(metadata.len()));
+            .filter(|result| result.merged_content_path.is_some())
+            .map(|result| super::view::format_size(result.merged_content_bytes));
         super::model::build_status_panel_view_model(
             store.process(),
-            result_state.result.as_ref(),
+            result_state.result.as_deref(),
             self.language(cx),
             merged_file_size_hint,
         )
@@ -828,8 +899,6 @@ impl Workspace {
         progress: &super::model::StatusProgressViewModel,
         cx: &App,
     ) -> AnyElement {
-        let bar_fill = px((progress.fill_ratio * 240.0).round());
-
         v_flex()
             .gap_2()
             .child(
@@ -850,14 +919,14 @@ impl Workspace {
             )
             .child(
                 div()
-                    .w(px(240.))
+                    .w_full()
                     .h(px(10.))
                     .rounded(px(999.))
                     .bg(cx.theme().secondary)
                     .child(
                         div()
                             .h_full()
-                            .w(bar_fill)
+                            .w(relative(progress.fill_ratio))
                             .rounded(px(999.))
                             .bg(cx.theme().primary),
                     ),
@@ -875,64 +944,13 @@ impl Workspace {
             .into_any_element()
     }
 
-    fn render_status_activity_section(
-        &self,
-        language: crate::domain::Language,
-        activity_rows: &[crate::domain::ProcessRecord],
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        v_flex()
-            .gap_2()
-            .flex_1()
-            .min_h(px(0.))
-            .child(section_caption(
-                tr(language, "recent_activity"),
-                IconName::SquareTerminal,
-                cx,
-            ))
-            .child(if activity_rows.is_empty() {
-                empty_box(
-                    tr(language, "activity_empty"),
-                    tr(language, "activity_empty_hint"),
-                    IconName::File,
-                    cx,
-                )
-                .into_any_element()
-            } else {
-                let rows = Rc::new(activity_rows.to_vec());
-                div()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .border_1()
-                    .border_color(cx.theme().border)
-                    .rounded(px(12.))
-                    .bg(cx.theme().secondary.opacity(0.22))
-                    .child(
-                        v_virtual_list(
-                            cx.entity().clone(),
-                            "activity-rows",
-                            fixed_list_sizes(rows.len(), px(38.)),
-                            move |_, visible_range, _, cx| {
-                                visible_range
-                                    .filter_map(|ix| rows.get(ix))
-                                    .map(|record| activity_row(record, cx))
-                                    .collect::<Vec<_>>()
-                            },
-                        )
-                        .p_1(),
-                    )
-                    .into_any_element()
-            })
-            .into_any_element()
-    }
-
     fn render_status_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
         let process_actions = self.render_process_actions(cx).into_any_element();
         let vm = self.build_status_panel_view_model(cx);
 
         let content = v_flex()
-            .gap_4()
+            .gap_3()
             .size_full()
             .min_h(px(0.))
             .child(section_title(
@@ -940,7 +958,13 @@ impl Workspace {
                 IconName::LayoutDashboard,
                 cx,
             ))
-            .child(process_actions)
+            .child(
+                div()
+                    .id("primary-process-action-slot")
+                    .debug_selector(|| "primary-process-action-slot".to_string())
+                    .w_full()
+                    .child(process_actions),
+            )
             .child(self.render_status_metric_row(&vm.summary_metrics, cx))
             .child(self.render_status_metric_row(&vm.result_metrics, cx))
             .child(status_banner(
@@ -997,47 +1021,111 @@ impl Workspace {
 
         content
             .child(self.render_status_progress_section(language, &vm.progress, cx))
-            .child(self.render_status_activity_section(language, &vm.activity_rows, cx))
+            .child(
+                v_flex()
+                    .gap_2()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .child(section_caption(
+                        tr(language, "recent_activity"),
+                        IconName::SquareTerminal,
+                        cx,
+                    ))
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_h(px(0.))
+                            .overflow_hidden()
+                            .child(self.activity_panel_view.clone()),
+                    ),
+            )
     }
 
     pub(super) fn render_right_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
-        card(cx).child(self.render_right_panel_body(cx))
+        div()
+            .id("results-workspace-panel")
+            .debug_selector(|| "results-workspace-panel".to_string())
+            .size_full()
+            .bg(cx.theme().background)
+            .child(self.render_right_panel_body(cx))
     }
 
     fn render_right_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
-        let ui_state = self.ui_state(cx);
-        let selected_index = if ui_state.side_panel_tab == SidePanelTab::Results {
-            0
-        } else {
-            1
-        };
-
+        let right_tab = self.ui_state(cx).right_tab;
         v_flex()
-            .gap_3()
             .size_full()
             .min_h(px(0.))
             .child(
-                TabBar::new("side-panel-tabs")
-                    .selected_index(selected_index)
-                    .on_click(cx.listener(Self::set_side_panel_tab))
+                h_flex()
+                    .h(super::design_tokens::RESULTS_TOOLBAR_HEIGHT)
+                    .flex_none()
+                    .items_center()
+                    .px_3()
+                    .border_b_1()
+                    .border_color(cx.theme().border)
                     .child(
-                        Tab::new()
-                            .prefix(tab_icon_badge(IconName::LayoutDashboard, false, cx))
-                            .label(tr(language, "panel_results")),
-                    )
-                    .child(
-                        Tab::new()
-                            .prefix(tab_icon_badge(IconName::Settings2, true, cx))
-                            .label(tr(language, "panel_rules")),
+                        div()
+                            .id("right-workspace-tabs")
+                            .debug_selector(|| "right-workspace-tabs".to_string())
+                            .child(
+                                TabBar::new("right-workspace-tab-bar")
+                                    .selected_index(match right_tab {
+                                        WorkspaceRightTab::Results => 0,
+                                        WorkspaceRightTab::Rules => 1,
+                                    })
+                                    .on_click(cx.listener(|this, index, _, cx| {
+                                        this.set_right_workspace_tab(
+                                            if *index == 0 {
+                                                WorkspaceRightTab::Results
+                                            } else {
+                                                WorkspaceRightTab::Rules
+                                            },
+                                            cx,
+                                        );
+                                    }))
+                                    .child(
+                                        Tab::new().child(
+                                            div()
+                                                .id("results-tab-target")
+                                                .debug_selector(|| "results-tab-target".to_string())
+                                                .child(tr(language, "panel_results")),
+                                        ),
+                                    )
+                                    .child(
+                                        Tab::new().child(
+                                            div()
+                                                .id("rules-tab-target")
+                                                .debug_selector(|| "rules-tab-target".to_string())
+                                                .child(tr(language, "panel_rules")),
+                                        ),
+                                    ),
+                            ),
                     ),
             )
-            .child(div().flex_1().min_h(px(0.)).overflow_hidden().child(
-                match ui_state.side_panel_tab {
-                    SidePanelTab::Results => self.results_panel_view.clone().into_any_element(),
-                    SidePanelTab::Rules => self.rules_panel_view.clone().into_any_element(),
-                },
-            ))
+            .child(
+                div()
+                    .flex_1()
+                    .min_h(px(0.))
+                    .overflow_hidden()
+                    .child(match right_tab {
+                        WorkspaceRightTab::Results => {
+                            self.results_panel_view.clone().into_any_element()
+                        }
+                        WorkspaceRightTab::Rules => {
+                            self.rules_panel_view.clone().into_any_element()
+                        }
+                    }),
+            )
+    }
+
+    fn set_right_workspace_tab(&mut self, tab: WorkspaceRightTab, cx: &mut Context<Self>) {
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetRightTab(tab),
+            ),
+            cx,
+        );
     }
 
     fn build_results_panel_view_model(&self, cx: &App) -> super::model::ResultsPanelViewModel {
@@ -1053,8 +1141,10 @@ impl Workspace {
         &self,
         language: crate::domain::Language,
         view_model: &super::model::ResultsPanelViewModel,
+        stacked: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
+        let copy_state = self.store.read(cx).result().copy_state.clone();
         let copy_button = match view_model.copy_action {
             super::model::ResultsCopyAction::Tree => Button::new("copy-active")
                 .outline()
@@ -1062,12 +1152,40 @@ impl Workspace {
                 .label(view_model.copy_label.clone())
                 .on_click(cx.listener(Self::copy_tree))
                 .into_any_element(),
-            super::model::ResultsCopyAction::Preview => Button::new("copy-active")
-                .outline()
-                .icon(IconName::Copy)
-                .label(view_model.copy_label.clone())
-                .on_click(cx.listener(Self::copy_preview))
-                .into_any_element(),
+            super::model::ResultsCopyAction::Preview => {
+                let (label, icon) = match copy_state {
+                    crate::ui::result_model::ResultCopyState::Idle
+                    | crate::ui::result_model::ResultCopyState::Cancelled { .. } => (
+                        SharedString::from(tr(language, "copy_result")),
+                        IconName::Copy,
+                    ),
+                    crate::ui::result_model::ResultCopyState::Confirming { .. } => (
+                        SharedString::from(tr(language, "awaiting_confirmation")),
+                        IconName::Info,
+                    ),
+                    crate::ui::result_model::ResultCopyState::Copying { read, total, .. } => (
+                        SharedString::from(format!(
+                            "{} {}%",
+                            tr(language, "cancel_copy"),
+                            read.saturating_mul(100).checked_div(total).unwrap_or(0)
+                        )),
+                        IconName::LoaderCircle,
+                    ),
+                    crate::ui::result_model::ResultCopyState::Copied { .. } => {
+                        (SharedString::from(tr(language, "copied")), IconName::Check)
+                    }
+                    crate::ui::result_model::ResultCopyState::Failed { .. } => (
+                        SharedString::from(tr(language, "retry_copy")),
+                        IconName::TriangleAlert,
+                    ),
+                };
+                Button::new("copy-active")
+                    .outline()
+                    .icon(icon)
+                    .label(label)
+                    .on_click(cx.listener(Self::copy_preview))
+                    .into_any_element()
+            }
         };
         let save_state = self.store.read(cx).result().save_state;
         let (download_label, download_icon) = match save_state {
@@ -1085,39 +1203,65 @@ impl Workspace {
             }
         };
 
-        h_flex()
-            .justify_between()
-            .items_center()
+        let tabs = TabBar::new("result-tabs")
+            .selected_index(view_model.selected_tab)
+            .on_click(cx.listener(Self::set_tab))
             .child(
-                TabBar::new("result-tabs")
-                    .selected_index(view_model.selected_tab)
-                    .on_click(cx.listener(Self::set_tab))
-                    .child(
-                        Tab::new()
-                            .prefix(tab_icon_badge(IconName::FolderOpen, false, cx))
-                            .label(tr(language, "tab_tree_preview")),
-                    )
-                    .child(
-                        Tab::new()
-                            .prefix(tab_icon_badge(IconName::SquareTerminal, true, cx))
-                            .disabled(!view_model.has_content_result)
-                            .label(tr(language, "tab_merged_content")),
-                    ),
+                Tab::new()
+                    .prefix(tab_icon_badge(IconName::FolderOpen, false, cx))
+                    .label(tr(language, "tab_tree_preview")),
             )
             .child(
-                h_flex().gap_2().child(copy_button).child(
-                    Button::new("download-result")
-                        .outline()
-                        .icon(download_icon)
-                        .label(download_label)
-                        .disabled(
-                            !view_model.has_content_result
-                                || save_state == crate::ui::result_model::ResultSaveState::Saving,
-                        )
-                        .on_click(cx.listener(Self::download_result)),
-                ),
-            )
-            .into_any_element()
+                Tab::new()
+                    .prefix(tab_icon_badge(IconName::SquareTerminal, true, cx))
+                    .disabled(!view_model.has_content_result)
+                    .label(tr(language, "tab_merged_content")),
+            );
+        let actions = h_flex().gap_2().child(copy_button).child(
+            Button::new("download-result")
+                .outline()
+                .icon(download_icon)
+                .label(download_label)
+                .disabled(
+                    !view_model.has_content_result
+                        || save_state == crate::ui::result_model::ResultSaveState::Saving,
+                )
+                .on_click(cx.listener(Self::download_result)),
+        );
+        if stacked {
+            v_flex()
+                .gap_2()
+                .child(
+                    div()
+                        .id("result-tabs-slot")
+                        .debug_selector(|| "result-tabs-slot".to_string())
+                        .child(tabs),
+                )
+                .child(
+                    div()
+                        .id("result-actions-slot")
+                        .debug_selector(|| "result-actions-slot".to_string())
+                        .child(actions),
+                )
+                .into_any_element()
+        } else {
+            h_flex()
+                .justify_between()
+                .items_center()
+                .child(
+                    div()
+                        .id("result-tabs-slot")
+                        .debug_selector(|| "result-tabs-slot".to_string())
+                        .child(tabs),
+                )
+                .child(
+                    div()
+                        .id("result-actions-slot")
+                        .debug_selector(|| "result-actions-slot".to_string())
+                        .child(actions),
+                )
+                .into_any_element()
+        }
     }
 
     fn render_results_body(
@@ -1140,15 +1284,22 @@ impl Workspace {
             .into_any_element()
     }
 
-    pub(super) fn render_results_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_results_panel(
+        &mut self,
+        stacked_toolbar: bool,
+        cx: &mut Context<Self>,
+    ) -> impl IntoElement {
         let language = self.language(cx);
         let view_model = self.build_results_panel_view_model(cx);
 
         v_flex()
+            .id("results-panel-content")
+            .debug_selector(|| "results-panel-content".to_string())
             .gap_3()
             .size_full()
             .min_h(px(0.))
-            .child(self.render_results_toolbar(language, &view_model, cx))
+            .p_3()
+            .child(self.render_results_toolbar(language, &view_model, stacked_toolbar, cx))
             .child(self.render_results_body(&view_model, cx))
     }
 
@@ -1275,7 +1426,6 @@ impl Workspace {
     fn render_rules_footer(
         &self,
         language: crate::domain::Language,
-        pending_confirmation: Option<PendingConfirmation>,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         div()
@@ -1289,44 +1439,45 @@ impl Workspace {
                         Button::new("reset-blacklist")
                             .outline()
                             .icon(IconName::Undo2)
-                            .label(
-                                if pending_confirmation == Some(PendingConfirmation::ResetBlacklist)
-                                {
-                                    tr(language, "confirm_reset_blacklist")
-                                } else {
-                                    tr(language, "blacklist_reset_default")
-                                },
-                            )
+                            .label(tr(language, "blacklist_reset_default"))
                             .on_click(cx.listener(Self::reset_blacklist)),
                     )
                     .child(
                         Button::new("clear-blacklist")
                             .danger()
                             .icon(IconName::Delete)
-                            .label(
-                                if pending_confirmation == Some(PendingConfirmation::ClearBlacklist)
-                                {
-                                    tr(language, "confirm_clear_blacklist")
-                                } else {
-                                    tr(language, "blacklist_clear_all")
-                                },
-                            )
+                            .label(tr(language, "blacklist_clear_all"))
                             .on_click(cx.listener(Self::clear_blacklist)),
                     ),
             )
             .into_any_element()
     }
 
-    pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
+    pub(super) fn render_rules_panel(&mut self, cx: &mut Context<Self>) -> AnyElement {
         let language = self.language(cx);
-        let ui_state = self.ui_state(cx);
+        if self.store.read(cx).draft_locked() {
+            return v_flex()
+                .id("rules-workspace-panel")
+                .debug_selector(|| "rules-workspace-panel".to_string())
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_3()
+                .p_3()
+                .child(IconName::Info)
+                .child(tr(language, "draft_locked_hint"))
+                .into_any_element();
+        }
         self.refresh_rules_panel_cache(cx);
         let blacklist_sections = self.rules_panel.cache.sections.clone();
 
         v_flex()
+            .id("rules-workspace-panel")
+            .debug_selector(|| "rules-workspace-panel".to_string())
             .gap_3()
             .size_full()
             .min_h(px(0.))
+            .p_3()
             .child(
                 div()
                     .text_sm()
@@ -1341,7 +1492,8 @@ impl Workspace {
             )
             .child(self.render_blacklist_transfer_actions(language, cx))
             .child(self.render_blacklist_sections(language, blacklist_sections, cx))
-            .child(self.render_rules_footer(language, ui_state.pending_confirmation, cx))
+            .child(self.render_rules_footer(language, cx))
+            .into_any_element()
     }
 
     fn build_content_panel_view_model(&self, cx: &App) -> super::model::ContentPanelViewModel {
@@ -1556,118 +1708,72 @@ impl Workspace {
         }
     }
 
-    fn build_compact_content_panel_view_model(
-        &self,
-        cx: &App,
-    ) -> super::model::CompactContentPanelViewModel {
-        super::model::build_compact_content_panel_view_model(self.ui_state(cx).narrow_content_tab)
-    }
-
-    fn render_compact_content_body(
-        &mut self,
-        view_model: &super::model::CompactContentPanelViewModel,
-        cx: &mut Context<Self>,
-    ) -> AnyElement {
-        div()
-            .flex_1()
-            .min_h(px(0.))
-            .overflow_hidden()
-            .child(match view_model.body {
-                super::model::CompactContentBodyViewModel::Status => {
-                    self.status_panel_view.clone().into_any_element()
-                }
-                super::model::CompactContentBodyViewModel::Results => {
-                    self.render_right_panel_body(cx).into_any_element()
-                }
-            })
-            .into_any_element()
-    }
-
-    pub(super) fn render_compact_content_panel(
-        &mut self,
-        cx: &mut Context<Self>,
-    ) -> impl IntoElement {
-        let language = self.language(cx);
-        let view_model = self.build_compact_content_panel_view_model(cx);
-
-        card(cx).size_full().child(
-            v_flex()
-                .gap_3()
-                .size_full()
-                .min_h(px(0.))
-                .child(
-                    TabBar::new("compact-content-tabs")
-                        .selected_index(view_model.selected_tab)
-                        .on_click(cx.listener(Self::set_narrow_content_tab))
-                        .child(
-                            Tab::new()
-                                .prefix(tab_icon_badge(IconName::LayoutDashboard, false, cx))
-                                .label(tr(language, "panel_status")),
-                        )
-                        .child(
-                            Tab::new()
-                                .prefix(tab_icon_badge(IconName::PanelRight, true, cx))
-                                .label(tr(language, "panel_results")),
-                        ),
-                )
-                .child(self.render_compact_content_body(&view_model, cx)),
-        )
-    }
-
     pub(super) fn render_main_content(
         &mut self,
-        window: &mut Window,
+        _window: &mut Window,
         _cx: &mut Context<Self>,
     ) -> impl IntoElement {
-        let is_narrow = window.bounds().size.width < px(1320.);
-        let panel_min_height = workspace_panel_min_height(is_narrow);
-
-        if is_narrow {
-            h_resizable("codemerge-layout-compact")
-                .child(
-                    resizable_panel()
-                        .size(px(340.))
-                        .size_range(px(280.)..px(420.))
-                        .child(panel_viewport(
-                            self.input_panel_view.clone().into_any_element(),
-                            panel_min_height,
-                        )),
-                )
-                .child(resizable_panel().child(panel_viewport(
-                    self.compact_content_view.clone().into_any_element(),
-                    panel_min_height,
-                )))
-        } else {
-            h_resizable("codemerge-layout")
-                .child(
-                    resizable_panel()
-                        .size(px(340.))
-                        .size_range(px(280.)..px(460.))
-                        .child(panel_viewport(
-                            self.input_panel_view.clone().into_any_element(),
-                            panel_min_height,
-                        )),
-                )
-                .child(
-                    resizable_panel()
-                        .size(px(360.))
-                        .size_range(px(300.)..px(520.))
-                        .child(panel_viewport(
-                            self.status_panel_view.clone().into_any_element(),
-                            panel_min_height,
-                        )),
-                )
-                .child(resizable_panel().child(panel_frame(
-                    self.right_panel_view.clone().into_any_element(),
-                    panel_min_height,
-                )))
-        }
+        h_resizable("codemerge-layout")
+            .child(
+                resizable_panel()
+                    .size(super::design_tokens::INPUT_SIDEBAR_DEFAULT)
+                    .size_range(
+                        super::design_tokens::INPUT_SIDEBAR_MIN
+                            ..super::design_tokens::INPUT_SIDEBAR_MAX,
+                    )
+                    .child(
+                        div()
+                            .id("input-workspace-column")
+                            .debug_selector(|| "input-workspace-column".to_string())
+                            .size_full()
+                            .min_h(px(0.))
+                            .child(panel_viewport(
+                                self.input_panel_view.clone().into_any_element(),
+                                px(0.),
+                            )),
+                    ),
+            )
+            .child(
+                resizable_panel()
+                    .size(super::design_tokens::STATUS_PANEL_DEFAULT)
+                    .size_range(
+                        super::design_tokens::STATUS_PANEL_MIN
+                            ..super::design_tokens::STATUS_PANEL_MAX,
+                    )
+                    .child(
+                        div()
+                            .id("status-workspace-column")
+                            .debug_selector(|| "status-workspace-column".to_string())
+                            .size_full()
+                            .min_h(px(0.))
+                            .child(panel_frame(
+                                self.status_panel_view.clone().into_any_element(),
+                                px(0.),
+                            )),
+                    ),
+            )
+            .child(
+                resizable_panel()
+                    .size_range(super::design_tokens::RESULTS_WORKSPACE_MIN..px(2400.))
+                    .child(
+                        div()
+                            .id("results-workspace-column")
+                            .debug_selector(|| "results-workspace-column".to_string())
+                            .size_full()
+                            .min_h(px(0.))
+                            .child(panel_frame(
+                                self.right_panel_view.clone().into_any_element(),
+                                px(0.),
+                            )),
+                    ),
+            )
+            .into_any_element()
     }
 }
 
 impl TreePaneView {
     fn build_tree_pane_view_model(
-        &self,
+        &mut self,
         cx: &App,
     ) -> (
         crate::domain::Language,
@@ -1681,11 +1787,32 @@ impl TreePaneView {
         let tree_state = workspace.tree_panel.state.clone();
         let tree_filter = filter_input.read(cx).value().trim().to_string();
         let result = workspace.store.read(cx).result();
+        let revisions = workspace.store.read(cx).revisions();
+        let plain_text_body = if matches!(self.view_mode, TreeViewMode::PlainText) {
+            let key = (
+                revisions.result,
+                revisions.tree,
+                workspace.tree_panel.render_state.structure_signature,
+                tree_filter.clone(),
+            );
+            if self.plain_text_cache_key.as_ref() != Some(&key) {
+                self.plain_text_cache = Some(super::model::build_tree_plain_text_body(
+                    &workspace.tree_panel.render_state,
+                    result.result.as_deref(),
+                    language,
+                ));
+                self.plain_text_cache_key = Some(key);
+            }
+            self.plain_text_cache.clone()
+        } else {
+            None
+        };
         let view_model = super::model::build_tree_pane_view_model(
             &workspace.tree_panel.render_state,
             workspace.tree_panel.total_summary,
             tree_filter.as_str(),
-            result.result.as_ref(),
+            result.result.as_deref(),
+            plain_text_body,
             language,
             matches!(self.view_mode, TreeViewMode::PlainText),
         );
@@ -1707,11 +1834,16 @@ impl TreePaneView {
             .gap(px(6.))
             .items_center()
             .child(
-                div().min_w(px(0.)).flex_1().child(
-                    Input::new(filter_input)
-                        .prefix(IconName::Search)
-                        .cleanable(true),
-                ),
+                div()
+                    .id("tree-search-slot")
+                    .debug_selector(|| "tree-search-slot".to_string())
+                    .min_w(px(0.))
+                    .flex_1()
+                    .child(
+                        Input::new(filter_input)
+                            .prefix(IconName::Search)
+                            .cleanable(true),
+                    ),
             )
             .child(
                 Button::new("tree-expand")
@@ -1822,19 +1954,32 @@ impl TreePaneView {
         .into_any_element()
     }
 
-    fn render_tree_plain_text_body(&self, lines: &[SharedString], cx: &App) -> AnyElement {
+    fn render_tree_plain_text_body(
+        &self,
+        lines: Rc<[SharedString]>,
+        _cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let row_count = lines.len();
         div()
             .size_full()
             .min_h(px(0.))
-            .overflow_y_scrollbar()
             .p_2()
-            .child(v_flex().children(lines.iter().cloned().map(|line| {
-                div()
-                    .font_family(cx.theme().mono_font_family.clone())
-                    .text_sm()
-                    .whitespace_nowrap()
-                    .child(line)
-            })))
+            .child(
+                uniform_list("tree-plain-text-rows", row_count, move |range, _, cx| {
+                    range
+                        .filter_map(|ix| lines.get(ix))
+                        .map(|line| {
+                            div()
+                                .h(preview_line_height())
+                                .font_family(cx.theme().mono_font_family.clone())
+                                .text_sm()
+                                .whitespace_nowrap()
+                                .child(line.clone())
+                        })
+                        .collect::<Vec<_>>()
+                })
+                .h_full(),
+            )
             .into_any_element()
     }
 
@@ -1847,7 +1992,7 @@ impl TreePaneView {
         let content = match &view_model.body {
             super::model::TreePaneBodyViewModel::Tree => tree_view,
             super::model::TreePaneBodyViewModel::PlainText { lines } => {
-                self.render_tree_plain_text_body(lines, cx)
+                self.render_tree_plain_text_body(lines.clone(), cx)
             }
             super::model::TreePaneBodyViewModel::Empty { title, hint } => {
                 empty_box(title.clone(), hint.clone(), IconName::FolderOpen, cx).into_any_element()
@@ -1905,7 +2050,7 @@ impl PreviewPaneView {
         let result = store.result();
         let preview = store.preview_model();
         let view_model = super::model::build_preview_pane_view_model(
-            result.result.as_ref(),
+            result.result.as_deref(),
             preview.selected_preview_file_id(),
             preview.state().pending_request_type.is_some(),
             preview.state().preview_error.as_deref(),
@@ -2005,6 +2150,19 @@ impl PreviewPaneView {
                 cx,
             ))
             .when_some(excerpt_banner, |this, banner| this.child(banner));
+        let metadata = if self.render_cache.iter().any(|line| line.truncated) {
+            metadata.child(
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .rounded(super::design_tokens::RADIUS_PANEL)
+                    .bg(cx.theme().warning.opacity(0.12))
+                    .child(IconName::Info)
+                    .child(tr(language, "preview_line_truncated_hint")),
+            )
+        } else {
+            metadata
+        };
         let metadata =
             if let Some((archive_path, archive_entry_path)) = content.archive_paths.as_ref() {
                 metadata

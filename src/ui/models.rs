@@ -2,10 +2,11 @@ use crate::domain::{AppConfigV1, ProcessRecord, ProcessResult, TemporaryWhitelis
 use crate::services::preflight::PreflightEvent;
 use crate::services::process::{ProcessEvent, ProcessEventKind, ProcessRunId};
 use crate::ui::state::{
-    NarrowContentTab, PendingConfirmation, ProcessState, ProcessUiStatus, SelectionState,
-    SettingsState, SidePanelTab, WorkspaceUiState, clamp_selected_files_panel_height,
+    ActivityFilter, ProcessState, ProcessUiStatus, SelectionState, SettingsState,
+    WorkspaceRightTab, WorkspaceSheet, WorkspaceUiState, clamp_selected_files_panel_height,
 };
 use crate::utils::i18n::tr;
+use std::sync::Arc;
 
 const MAX_PROCESSING_RECORDS: usize = 1000;
 
@@ -199,27 +200,33 @@ impl WorkspaceUiModel {
         self.state
     }
 
-    pub fn clear_pending_confirmation(&mut self) -> bool {
-        let changed = self.state.pending_confirmation.is_some();
-        self.state.pending_confirmation = None;
+    pub fn set_active_sheet(&mut self, sheet: Option<WorkspaceSheet>) -> bool {
+        let changed = self.state.active_sheet != sheet;
+        self.state.active_sheet = sheet;
         changed
     }
 
-    pub fn set_pending_confirmation(&mut self, pending_confirmation: PendingConfirmation) -> bool {
-        let changed = self.state.pending_confirmation != Some(pending_confirmation);
-        self.state.pending_confirmation = Some(pending_confirmation);
+    pub fn set_right_tab(&mut self, tab: WorkspaceRightTab) -> bool {
+        let changed = self.state.right_tab != tab;
+        self.state.right_tab = tab;
         changed
     }
 
-    pub fn set_side_panel_tab(&mut self, tab: SidePanelTab) -> bool {
-        let changed = self.state.side_panel_tab != tab;
-        self.state.side_panel_tab = tab;
+    pub fn set_activity_filter(&mut self, filter: ActivityFilter) -> bool {
+        let changed = self.state.activity_filter != filter;
+        self.state.activity_filter = filter;
         changed
     }
 
-    pub fn set_narrow_content_tab(&mut self, tab: NarrowContentTab) -> bool {
-        let changed = self.state.narrow_content_tab != tab;
-        self.state.narrow_content_tab = tab;
+    pub fn set_narrow_input_sheet_open(&mut self, open: bool) -> bool {
+        let changed = self.state.narrow_input_sheet_open != open;
+        self.state.narrow_input_sheet_open = open;
+        changed
+    }
+
+    pub fn set_expanded_activity_record(&mut self, record: Option<usize>) -> bool {
+        let changed = self.state.expanded_activity_record != record;
+        self.state.expanded_activity_record = record;
         changed
     }
 
@@ -406,7 +413,7 @@ impl ProcessModel {
                 self.state.last_error = None;
                 self.state.processing_current_file =
                     tr(language, "status_completed_hint").to_string();
-                ProcessEventEffect::Completed(Box::new(result))
+                ProcessEventEffect::Completed(Arc::new(result))
             }
             ProcessEventKind::Cancelled => {
                 self.state.preflight.is_scanning = false;
@@ -449,7 +456,7 @@ impl ProcessModel {
 pub enum ProcessEventEffect {
     Ignored,
     Continue,
-    Completed(Box<ProcessResult>),
+    Completed(Arc<ProcessResult>),
     Cancelled,
     Failed,
 }
@@ -467,7 +474,7 @@ mod tests {
     use crate::services::preflight::PreflightEvent;
     use crate::services::process::ProcessEvent;
     use crate::ui::state::{
-        NarrowContentTab, PendingConfirmation, ProcessUiStatus, SelectionState, SidePanelTab,
+        ActivityFilter, ProcessUiStatus, SelectionState, WorkspaceRightTab, WorkspaceSheet,
     };
 
     #[test]
@@ -594,6 +601,7 @@ mod tests {
             tree_nodes: Vec::new(),
             process_dir: None,
             merged_content_path: None,
+            merged_content_bytes: 0,
             suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: Vec::new(),
@@ -794,27 +802,30 @@ mod tests {
     }
 
     #[test]
-    fn workspace_ui_model_skips_noop_tab_updates() {
+    fn workspace_ui_model_skips_noop_navigation_updates() {
         let mut model = WorkspaceUiModel::new();
-        assert!(!model.set_side_panel_tab(SidePanelTab::Results));
-        assert!(model.set_side_panel_tab(SidePanelTab::Rules));
-        assert!(!model.set_side_panel_tab(SidePanelTab::Rules));
-        assert!(!model.set_narrow_content_tab(NarrowContentTab::Status));
-        assert!(model.set_narrow_content_tab(NarrowContentTab::Results));
-        assert!(!model.set_narrow_content_tab(NarrowContentTab::Results));
+        assert!(!model.set_active_sheet(None));
+        assert!(model.set_active_sheet(Some(WorkspaceSheet::Rules)));
+        assert!(!model.set_active_sheet(Some(WorkspaceSheet::Rules)));
+        assert!(!model.set_right_tab(WorkspaceRightTab::Results));
+        assert!(model.set_right_tab(WorkspaceRightTab::Rules));
+        assert!(!model.set_right_tab(WorkspaceRightTab::Rules));
+        assert!(!model.set_activity_filter(ActivityFilter::All));
+        assert!(model.set_activity_filter(ActivityFilter::Failed));
+        assert!(!model.set_activity_filter(ActivityFilter::Failed));
         assert!(!model.set_content_file_list_collapsed(false));
         assert!(model.set_content_file_list_collapsed(true));
         assert!(!model.set_content_file_list_collapsed(true));
     }
 
     #[test]
-    fn workspace_ui_model_tracks_pending_confirmation_changes() {
+    fn workspace_ui_model_tracks_sheet_and_expansion_state() {
         let mut model = WorkspaceUiModel::new();
 
-        assert!(model.set_pending_confirmation(PendingConfirmation::ClearInputs));
-        assert!(!model.set_pending_confirmation(PendingConfirmation::ClearInputs));
-        assert!(model.clear_pending_confirmation());
-        assert!(!model.clear_pending_confirmation());
+        assert!(model.set_active_sheet(Some(WorkspaceSheet::Activity)));
+        assert!(model.set_expanded_activity_record(Some(4)));
+        assert!(!model.set_expanded_activity_record(Some(4)));
+        assert!(model.set_active_sheet(None));
     }
 
     #[test]

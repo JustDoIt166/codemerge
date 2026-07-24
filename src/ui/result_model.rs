@@ -1,5 +1,6 @@
 use crate::domain::ProcessResult;
 use crate::ui::view_model::ResultTab;
+use std::sync::Arc;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum ResultSaveState {
@@ -10,15 +11,42 @@ pub enum ResultSaveState {
     Failed,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ResultCopyState {
+    #[default]
+    Idle,
+    Confirming {
+        revision: u64,
+        total: u64,
+    },
+    Copying {
+        revision: u64,
+        read: u64,
+        total: u64,
+    },
+    Copied {
+        revision: u64,
+    },
+    Failed {
+        revision: u64,
+        error: String,
+    },
+    Cancelled {
+        revision: u64,
+    },
+}
+
 #[derive(Default, Clone)]
 pub struct ResultState {
-    pub result: Option<ProcessResult>,
+    pub result: Option<Arc<ProcessResult>>,
     pub active_tab: ResultTab,
     pub preview_row_count: usize,
     pub result_revision: u64,
     pub preview_rows_revision: u64,
     pub save_state: ResultSaveState,
+    pub copy_state: ResultCopyState,
     save_revision: u64,
+    copy_revision: u64,
 }
 
 pub struct ResultModel {
@@ -43,17 +71,21 @@ impl ResultModel {
         self.state.result_revision = self.state.result_revision.wrapping_add(1);
         self.state.preview_rows_revision = self.state.preview_rows_revision.wrapping_add(1);
         self.state.save_state = ResultSaveState::Idle;
+        self.state.copy_state = ResultCopyState::Idle;
         self.state.save_revision = self.state.save_revision.wrapping_add(1);
+        self.state.copy_revision = self.state.copy_revision.wrapping_add(1);
     }
 
-    pub fn set_result(&mut self, result: ProcessResult) {
-        self.state.result = Some(result);
+    pub fn set_result(&mut self, result: impl Into<Arc<ProcessResult>>) {
+        self.state.result = Some(result.into());
         self.state.active_tab = ResultTab::Tree;
         self.state.preview_row_count = 0;
         self.state.result_revision = self.state.result_revision.wrapping_add(1);
         self.state.preview_rows_revision = self.state.preview_rows_revision.wrapping_add(1);
         self.state.save_state = ResultSaveState::Idle;
+        self.state.copy_state = ResultCopyState::Idle;
         self.state.save_revision = self.state.save_revision.wrapping_add(1);
+        self.state.copy_revision = self.state.copy_revision.wrapping_add(1);
     }
 
     pub fn set_active_tab(&mut self, tab: ResultTab) {
@@ -96,6 +128,91 @@ impl ResultModel {
         true
     }
 
+    pub fn prepare_copy(&mut self, total: u64, requires_confirmation: bool) -> u64 {
+        self.state.copy_revision = self.state.copy_revision.wrapping_add(1);
+        let revision = self.state.copy_revision;
+        self.state.copy_state = if requires_confirmation {
+            ResultCopyState::Confirming { revision, total }
+        } else {
+            ResultCopyState::Copying {
+                revision,
+                read: 0,
+                total,
+            }
+        };
+        revision
+    }
+
+    pub fn confirm_copy(&mut self, revision: u64) -> bool {
+        let ResultCopyState::Confirming {
+            revision: current,
+            total,
+        } = self.state.copy_state
+        else {
+            return false;
+        };
+        if current != revision {
+            return false;
+        }
+        self.state.copy_state = ResultCopyState::Copying {
+            revision,
+            read: 0,
+            total,
+        };
+        true
+    }
+
+    pub fn update_copy_progress(&mut self, revision: u64, read: u64, total: u64) -> bool {
+        let ResultCopyState::Copying {
+            revision: current, ..
+        } = self.state.copy_state
+        else {
+            return false;
+        };
+        if current != revision {
+            return false;
+        }
+        self.state.copy_state = ResultCopyState::Copying {
+            revision,
+            read: read.min(total),
+            total,
+        };
+        true
+    }
+
+    pub fn finish_copy(&mut self, revision: u64) -> bool {
+        if !self.copy_is_current(revision) {
+            return false;
+        }
+        self.state.copy_state = ResultCopyState::Copied { revision };
+        true
+    }
+
+    pub fn fail_copy(&mut self, revision: u64, error: String) -> bool {
+        if !self.copy_is_current(revision) {
+            return false;
+        }
+        self.state.copy_state = ResultCopyState::Failed { revision, error };
+        true
+    }
+
+    pub fn cancel_copy(&mut self, revision: u64) -> bool {
+        if !self.copy_is_current(revision) {
+            return false;
+        }
+        self.state.copy_state = ResultCopyState::Cancelled { revision };
+        true
+    }
+
+    fn copy_is_current(&self, revision: u64) -> bool {
+        matches!(
+            self.state.copy_state,
+            ResultCopyState::Confirming { revision: current, .. }
+                | ResultCopyState::Copying { revision: current, .. }
+                if current == revision
+        )
+    }
+
     pub fn has_content_result(&self) -> bool {
         self.state.result.as_ref().is_some_and(|result| {
             result.merged_content_path.is_some() || !result.preview_files.is_empty()
@@ -130,6 +247,7 @@ mod tests {
             tree_nodes: Vec::new(),
             process_dir: None,
             merged_content_path: Some(PathBuf::from("merged.txt")),
+            merged_content_bytes: 0,
             suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: vec![PreviewFileEntry {
@@ -161,6 +279,7 @@ mod tests {
             tree_nodes: Vec::new(),
             process_dir: None,
             merged_content_path: None,
+            merged_content_bytes: 0,
             suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: Vec::new(),
@@ -190,6 +309,7 @@ mod tests {
             tree_nodes: Vec::new(),
             process_dir: None,
             merged_content_path: Some(PathBuf::from("merged.txt")),
+            merged_content_bytes: 0,
             suggested_result_name: "workspace-20260319.txt".into(),
             file_details: Vec::new(),
             preview_files: Vec::new(),
@@ -229,5 +349,38 @@ mod tests {
 
         assert!(!model.finish_save(revision, true));
         assert_eq!(model.state().save_state, super::ResultSaveState::Idle);
+    }
+
+    #[test]
+    fn stale_copy_events_cannot_replace_a_new_copy_job() {
+        let mut model = ResultModel::new();
+        let stale_revision = model.prepare_copy(64, false);
+        let current_revision = model.prepare_copy(128, false);
+
+        assert!(!model.update_copy_progress(stale_revision, 64, 64));
+        assert!(!model.finish_copy(stale_revision));
+        assert!(model.update_copy_progress(current_revision, 32, 128));
+        assert_eq!(
+            model.state().copy_state,
+            super::ResultCopyState::Copying {
+                revision: current_revision,
+                read: 32,
+                total: 128,
+            }
+        );
+    }
+
+    #[test]
+    fn large_copy_requires_confirmation_before_progress_is_accepted() {
+        let mut model = ResultModel::new();
+        let revision = model.prepare_copy(64 * 1024 * 1024, true);
+
+        assert!(matches!(
+            model.state().copy_state,
+            super::ResultCopyState::Confirming { .. }
+        ));
+        assert!(!model.update_copy_progress(revision, 1, 64 * 1024 * 1024));
+        assert!(model.confirm_copy(revision));
+        assert!(model.update_copy_progress(revision, 1024 * 1024, 64 * 1024 * 1024));
     }
 }

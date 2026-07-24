@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use gpui::EventEmitter;
 #[cfg(test)]
@@ -17,8 +18,8 @@ use crate::ui::preview_model::{PreviewEventEffect, PreviewModel, PreviewScrollDi
 use crate::ui::result_model::{ResultModel, ResultState};
 use crate::ui::selection_model::SelectionModel;
 use crate::ui::state::{
-    NarrowContentTab, PendingConfirmation, PreviewPanelState, ProcessState, SelectionState,
-    SettingsState, SidePanelTab, TreePanelState, WorkspaceUiState,
+    ActivityFilter, PreviewPanelState, ProcessState, SelectionState, SettingsState, TreePanelState,
+    WorkspaceRightTab, WorkspaceSheet, WorkspaceUiState,
 };
 use crate::ui::view_model::ResultTab;
 
@@ -137,7 +138,9 @@ pub enum ActionOutput {
     Preview(PreviewEventEffect),
     PreviewRequest(Option<PreviewRequest>),
     SaveRevision(Option<u64>),
+    CopyRevision(u64),
     PreflightRevision(u64),
+    DraftLocked,
 }
 
 #[derive(Debug)]
@@ -145,6 +148,7 @@ pub enum WorkspaceAction {
     Draft(DraftAction),
     Execution(ExecutionAction),
     Preview(PreviewAction),
+    ResultCopy(ResultCopyAction),
     Navigation(NavigationAction),
     PrepareProcess,
     ClearInputs {
@@ -209,6 +213,12 @@ pub enum DraftAction {
     ApplyConfig(AppConfigV1),
 }
 
+impl DraftAction {
+    fn affects_run_inputs(&self) -> bool {
+        !matches!(self, Self::ToggleLanguage)
+    }
+}
+
 #[derive(Debug)]
 pub enum ExecutionAction {
     ClearRuntime {
@@ -228,7 +238,7 @@ pub enum ExecutionAction {
     ProcessBatch(Vec<ProcessEvent>),
     FinishRun,
     FailDisconnected(String),
-    SetResult(ProcessResult),
+    SetResult(Arc<ProcessResult>),
     ClearResult,
     SetResultTab(ResultTab),
     SetPreviewRowCount(usize),
@@ -278,11 +288,38 @@ pub enum PreviewAction {
 }
 
 #[derive(Debug)]
+pub enum ResultCopyAction {
+    Prepare {
+        total: u64,
+        requires_confirmation: bool,
+    },
+    Confirm {
+        revision: u64,
+    },
+    Progress {
+        revision: u64,
+        read: u64,
+        total: u64,
+    },
+    Complete {
+        revision: u64,
+    },
+    Fail {
+        revision: u64,
+        error: String,
+    },
+    Cancel {
+        revision: u64,
+    },
+}
+
+#[derive(Debug)]
 pub enum NavigationAction {
-    ClearPendingConfirmation,
-    SetPendingConfirmation(PendingConfirmation),
-    SetSidePanelTab(SidePanelTab),
-    SetNarrowContentTab(NarrowContentTab),
+    SetActiveSheet(Option<WorkspaceSheet>),
+    SetRightTab(WorkspaceRightTab),
+    SetActivityFilter(ActivityFilter),
+    SetNarrowInputSheetOpen(bool),
+    SetExpandedActivityRecord(Option<usize>),
     SetContentFileListCollapsed(bool),
     SetSelectedFilesPanelHeight(u16),
     ResetTree,
@@ -422,23 +459,25 @@ impl WorkspaceStore {
 
     pub fn dispatch(&mut self, action: WorkspaceAction) -> Transition {
         let transition = match action {
-            WorkspaceAction::Draft(action) => self.reduce_draft(action),
+            WorkspaceAction::Draft(action) => {
+                if self.draft_locked() && action.affects_run_inputs() {
+                    Transition::default().with_output(ActionOutput::DraftLocked)
+                } else {
+                    self.reduce_draft(action)
+                }
+            }
             WorkspaceAction::Execution(action) => self.reduce_execution(action),
             WorkspaceAction::Preview(action) => self.reduce_preview(action),
+            WorkspaceAction::ResultCopy(action) => self.reduce_result_copy(action),
             WorkspaceAction::Navigation(action) => self.reduce_navigation(action),
             WorkspaceAction::PrepareProcess => {
-                self.result.clear();
-                self.preview.clear();
-                self.navigation.clear_pending_confirmation();
-                self.navigation_tree = TreePanelState::default();
-                Transition::changed(
-                    ChangeSet::EXECUTION_RESULT
-                        .union(ChangeSet::PREVIEW)
-                        .union(ChangeSet::NAVIGATION)
-                        .union(ChangeSet::NAVIGATION_TREE),
-                )
+                let _ = self.navigation.set_active_sheet(None);
+                Transition::changed(ChangeSet::NAVIGATION)
             }
             WorkspaceAction::ClearInputs { ready_label } => {
+                if self.draft_locked() {
+                    return Transition::default().with_output(ActionOutput::DraftLocked);
+                }
                 self.selection.clear();
                 self.process.clear_runtime(ready_label);
                 self.result.clear();
@@ -458,6 +497,9 @@ impl WorkspaceStore {
                 config,
                 ready_label,
             } => {
+                if self.draft_locked() {
+                    return Transition::default().with_output(ActionOutput::DraftLocked);
+                }
                 *self = Self::new(config, ready_label);
                 Transition {
                     changes: ChangeSet::ALL,
@@ -735,7 +777,7 @@ impl WorkspaceStore {
                     ProcessEventEffect::Ignored => changes = ChangeSet::NONE,
                     ProcessEventEffect::Continue => {}
                     ProcessEventEffect::Completed(result) => {
-                        self.result.set_result((**result).clone());
+                        self.result.set_result(Arc::clone(result));
                         self.preview.clear();
                         self.process.state_mut().finish_run();
                         changes = changes
@@ -966,22 +1008,57 @@ impl WorkspaceStore {
         }
     }
 
+    fn reduce_result_copy(&mut self, action: ResultCopyAction) -> Transition {
+        let changed = ChangeSet::EXECUTION_RESULT;
+        match action {
+            ResultCopyAction::Prepare {
+                total,
+                requires_confirmation,
+            } => Transition::changed(changed).with_output(ActionOutput::CopyRevision(
+                self.result.prepare_copy(total, requires_confirmation),
+            )),
+            ResultCopyAction::Confirm { revision } => {
+                changed_transition(self.result.confirm_copy(revision), changed)
+            }
+            ResultCopyAction::Progress {
+                revision,
+                read,
+                total,
+            } => changed_transition(
+                self.result.update_copy_progress(revision, read, total),
+                changed,
+            ),
+            ResultCopyAction::Complete { revision } => {
+                changed_transition(self.result.finish_copy(revision), changed)
+            }
+            ResultCopyAction::Fail { revision, error } => {
+                changed_transition(self.result.fail_copy(revision, error), changed)
+            }
+            ResultCopyAction::Cancel { revision } => {
+                changed_transition(self.result.cancel_copy(revision), changed)
+            }
+        }
+    }
+
     fn reduce_navigation(&mut self, action: NavigationAction) -> Transition {
         let (changed, changes) = match action {
-            NavigationAction::ClearPendingConfirmation => (
-                self.navigation.clear_pending_confirmation(),
+            NavigationAction::SetActiveSheet(value) => (
+                self.navigation.set_active_sheet(value),
                 ChangeSet::NAVIGATION,
             ),
-            NavigationAction::SetPendingConfirmation(value) => (
-                self.navigation.set_pending_confirmation(value),
+            NavigationAction::SetRightTab(value) => {
+                (self.navigation.set_right_tab(value), ChangeSet::NAVIGATION)
+            }
+            NavigationAction::SetActivityFilter(value) => (
+                self.navigation.set_activity_filter(value),
                 ChangeSet::NAVIGATION,
             ),
-            NavigationAction::SetSidePanelTab(value) => (
-                self.navigation.set_side_panel_tab(value),
+            NavigationAction::SetNarrowInputSheetOpen(value) => (
+                self.navigation.set_narrow_input_sheet_open(value),
                 ChangeSet::NAVIGATION,
             ),
-            NavigationAction::SetNarrowContentTab(value) => (
-                self.navigation.set_narrow_content_tab(value),
+            NavigationAction::SetExpandedActivityRecord(value) => (
+                self.navigation.set_expanded_activity_record(value),
                 ChangeSet::NAVIGATION,
             ),
             NavigationAction::SetContentFileListCollapsed(value) => (
@@ -1066,6 +1143,14 @@ impl WorkspaceStore {
         self.process.is_processing()
     }
 
+    pub fn draft_locked(&self) -> bool {
+        self.is_processing()
+    }
+
+    pub fn can_edit_run_inputs(&self) -> bool {
+        !self.draft_locked()
+    }
+
     pub fn result_has_content(&self) -> bool {
         self.result.has_content_result()
     }
@@ -1089,18 +1174,23 @@ mod tests {
     use crate::domain::{AppConfigV1, ProcessResult};
     use crate::processor::stats::ProcessingStats;
     use crate::services::process::ProcessEvent;
-    use crate::ui::state::SidePanelTab;
+    use crate::ui::state::WorkspaceSheet;
 
     #[test]
     fn no_op_navigation_action_does_not_advance_revision() {
         let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
 
         let transition = store.dispatch(WorkspaceAction::Navigation(
-            NavigationAction::SetSidePanelTab(SidePanelTab::Results),
+            NavigationAction::SetActiveSheet(None),
         ));
 
         assert!(transition.changes.is_empty());
         assert_eq!(store.revisions().navigation, 0);
+
+        let transition = store.dispatch(WorkspaceAction::Navigation(
+            NavigationAction::SetActiveSheet(Some(WorkspaceSheet::Rules)),
+        ));
+        assert!(transition.changes.intersects(ChangeSet::NAVIGATION));
     }
 
     #[test]
@@ -1164,6 +1254,7 @@ mod tests {
             tree_nodes: Vec::new(),
             process_dir: None,
             merged_content_path: None,
+            merged_content_bytes: 0,
             suggested_result_name: "result.txt".into(),
             file_details: Vec::new(),
             preview_files: Vec::new(),
@@ -1186,5 +1277,116 @@ mod tests {
                 preserve_completed_status: true
             }]
         ));
+    }
+
+    #[test]
+    fn running_task_rejects_result_affecting_draft_mutations() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: 11,
+            scanning_label: "scanning".into(),
+        }));
+        let revisions = store.revisions();
+
+        let draft = store.dispatch(WorkspaceAction::Draft(DraftAction::SetCompress(true)));
+        let clear = store.dispatch(WorkspaceAction::ClearInputs {
+            ready_label: "ready".into(),
+        });
+
+        assert!(matches!(draft.output, ActionOutput::DraftLocked));
+        assert!(matches!(clear.output, ActionOutput::DraftLocked));
+        assert_eq!(store.revisions(), revisions);
+        assert!(!store.settings().options.compress);
+        assert!(store.draft_locked());
+        assert!(!store.can_edit_run_inputs());
+    }
+
+    #[test]
+    fn completed_result_uses_the_same_arc_in_output_and_store() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: 12,
+            scanning_label: "scanning".into(),
+        }));
+        let result = ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            process_dir: None,
+            merged_content_path: None,
+            merged_content_bytes: 0,
+            suggested_result_name: "result.txt".into(),
+            file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
+        };
+
+        let transition = store.dispatch(WorkspaceAction::Execution(ExecutionAction::Process(
+            ProcessEvent::completed(12, result),
+        )));
+        let ActionOutput::Process(crate::ui::models::ProcessEventEffect::Completed(output)) =
+            transition.output
+        else {
+            panic!("expected completed result");
+        };
+        let stored = store.result().result.as_ref().expect("stored result");
+
+        assert!(std::sync::Arc::ptr_eq(&output, stored));
+    }
+
+    #[test]
+    fn preparing_a_new_run_keeps_the_previous_result_available_for_copy() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+        let result = std::sync::Arc::new(ProcessResult {
+            stats: ProcessingStats::default(),
+            tree_string: String::new(),
+            tree_nodes: Vec::new(),
+            process_dir: None,
+            merged_content_path: None,
+            merged_content_bytes: 64,
+            suggested_result_name: "result.txt".into(),
+            file_details: Vec::new(),
+            preview_files: Vec::new(),
+            preview_blob_dir: None,
+        });
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::SetResult(
+            std::sync::Arc::clone(&result),
+        )));
+
+        let _ = store.dispatch(WorkspaceAction::PrepareProcess);
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: 13,
+            scanning_label: "scanning".into(),
+        }));
+
+        let stored = store.result().result.as_ref().expect("stored result");
+        assert!(std::sync::Arc::ptr_eq(&result, stored));
+        assert!(store.draft_locked());
+    }
+
+    #[test]
+    fn cancelled_and_failed_runs_keep_temporary_rules() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+        let _ = store.dispatch(WorkspaceAction::Draft(DraftAction::AddTemporaryBlacklist {
+            tokens: vec!["target".into()],
+            as_ext: false,
+        }));
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: 20,
+            scanning_label: "scanning".into(),
+        }));
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::Process(
+            ProcessEvent::cancelled(20),
+        )));
+        assert_eq!(store.selection().temp_folder_blacklist, ["target"]);
+
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::StartRun {
+            run_id: 21,
+            scanning_label: "scanning".into(),
+        }));
+        let _ = store.dispatch(WorkspaceAction::Execution(ExecutionAction::Process(
+            ProcessEvent::failed(21, crate::error::AppError::new("failed")),
+        )));
+        assert_eq!(store.selection().temp_folder_blacklist, ["target"]);
     }
 }

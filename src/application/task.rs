@@ -48,6 +48,8 @@ pub enum JobKind {
     Settings,
     Export,
     Cleanup,
+    Copy,
+    Maintenance,
 }
 
 #[derive(Debug)]

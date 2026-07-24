@@ -1,6 +1,6 @@
 use gpui::{
-    AnyElement, App, Context, Hsla, InteractiveElement, IntoElement, MouseButton, ParentElement,
-    Render, StatefulInteractiveElement as _, Styled, Window, WindowControlArea, div,
+    AnyElement, App, Context, InteractiveElement, IntoElement, MouseButton, ParentElement, Render,
+    StatefulInteractiveElement as _, Styled, Window, WindowControlArea, div,
     prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
@@ -8,7 +8,7 @@ use gpui_component::{
     button::Button, h_flex,
 };
 
-use super::model::{self, WorkspaceChromeTone, WorkspaceChromeViewModel};
+use super::model::{self, WorkspaceChromeViewModel};
 use super::{Workspace, actions};
 
 impl Workspace {
@@ -52,9 +52,8 @@ impl Workspace {
             .result()
             .result
             .as_ref()
-            .and_then(|result| result.merged_content_path.as_ref())
-            .and_then(|path| std::fs::metadata(path).ok())
-            .map(|metadata| super::view::format_size(metadata.len()))
+            .filter(|result| result.merged_content_path.is_some())
+            .map(|result| super::view::format_size(result.merged_content_bytes))
     }
 
     fn render_custom_title_bar(
@@ -94,7 +93,7 @@ impl Workspace {
     fn render_chrome_content(
         &mut self,
         chrome: &WorkspaceChromeViewModel,
-        compact: bool,
+        _compact: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         h_flex()
@@ -103,14 +102,13 @@ impl Workspace {
             .justify_between()
             .items_center()
             .gap_3()
-            .child(self.render_chrome_leading_content(chrome, compact, cx))
+            .child(self.render_chrome_leading_content(chrome, cx))
             .child(self.render_chrome_actions(chrome, cx))
     }
 
     fn render_chrome_leading_content(
         &self,
         chrome: &WorkspaceChromeViewModel,
-        compact: bool,
         cx: &App,
     ) -> impl IntoElement {
         h_flex()
@@ -126,7 +124,6 @@ impl Workspace {
                     .whitespace_nowrap()
                     .child(chrome.title.clone()),
             )
-            .child(self.render_status_capsule(chrome, compact, cx))
     }
 
     fn render_language_button(
@@ -244,7 +241,7 @@ impl Workspace {
                             let _ = actions::begin_window_drag(window);
                         }
                     }))
-                    .child(self.render_chrome_leading_content(chrome, true, cx)),
+                    .child(self.render_chrome_leading_content(chrome, cx)),
             )
             .child(
                 div()
@@ -384,75 +381,6 @@ impl Workspace {
                     .text_color(cx.theme().primary_foreground)
                     .with_size(Size::Small),
             )
-    }
-
-    fn render_status_capsule(
-        &self,
-        chrome: &WorkspaceChromeViewModel,
-        compact: bool,
-        cx: &App,
-    ) -> impl IntoElement {
-        let (bg, border, label_fg) = chrome_tone_palette(chrome.status_tone, cx);
-        let max_message_width = if compact { px(260.) } else { px(420.) };
-
-        h_flex()
-            .min_w(px(0.))
-            .max_w(px(520.))
-            .items_center()
-            .gap_2()
-            .px_3()
-            .py_1()
-            .rounded(px(999.))
-            .border_1()
-            .border_color(border)
-            .bg(bg)
-            .child(
-                div()
-                    .text_xs()
-                    .font_semibold()
-                    .whitespace_nowrap()
-                    .text_color(label_fg)
-                    .child(chrome.status_label.clone()),
-            )
-            .child(
-                div()
-                    .min_w(px(0.))
-                    .max_w(max_message_width)
-                    .truncate()
-                    .text_xs()
-                    .text_color(cx.theme().muted_foreground)
-                    .child(chrome.status_message.clone()),
-            )
-    }
-}
-
-fn chrome_tone_palette(tone: WorkspaceChromeTone, cx: &App) -> (Hsla, Hsla, Hsla) {
-    match tone {
-        WorkspaceChromeTone::Neutral => (
-            cx.theme().secondary.opacity(0.75),
-            cx.theme().border,
-            cx.theme().foreground.opacity(0.85),
-        ),
-        WorkspaceChromeTone::Accent => (
-            cx.theme().accent.opacity(0.14),
-            cx.theme().accent.opacity(0.28),
-            cx.theme().accent,
-        ),
-        WorkspaceChromeTone::Success => (
-            cx.theme().primary.opacity(0.16),
-            cx.theme().primary.opacity(0.28),
-            cx.theme().primary,
-        ),
-        WorkspaceChromeTone::Warning => (
-            cx.theme().warning.opacity(0.18),
-            cx.theme().warning.opacity(0.34),
-            cx.theme().warning,
-        ),
-        WorkspaceChromeTone::Danger => (
-            cx.theme().danger.opacity(0.16),
-            cx.theme().danger.opacity(0.3),
-            cx.theme().danger,
-        ),
     }
 }
 

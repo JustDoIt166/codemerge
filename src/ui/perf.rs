@@ -16,6 +16,10 @@ pub struct PerfSnapshot {
     pub preview_table_syncs: usize,
     pub tree_syncs: usize,
     pub tree_set_items: usize,
+    pub input_cache_rebuilds: usize,
+    pub tree_filter_rebuilds: usize,
+    pub copy_jobs: usize,
+    pub copy_progress_batches: usize,
 }
 
 static STORE_DISPATCHES: AtomicUsize = AtomicUsize::new(0);
@@ -30,6 +34,10 @@ static PREVIEW_RENDER_CACHE_PARTIAL_UPDATES: AtomicUsize = AtomicUsize::new(0);
 static PREVIEW_TABLE_SYNCS: AtomicUsize = AtomicUsize::new(0);
 static TREE_SYNCS: AtomicUsize = AtomicUsize::new(0);
 static TREE_SET_ITEMS: AtomicUsize = AtomicUsize::new(0);
+static INPUT_CACHE_REBUILDS: AtomicUsize = AtomicUsize::new(0);
+static TREE_FILTER_REBUILDS: AtomicUsize = AtomicUsize::new(0);
+static COPY_JOBS: AtomicUsize = AtomicUsize::new(0);
+static COPY_PROGRESS_BATCHES: AtomicUsize = AtomicUsize::new(0);
 
 #[inline]
 pub fn record_workspace_view_notify() {
@@ -87,6 +95,26 @@ pub fn record_tree_set_items() {
     TREE_SET_ITEMS.fetch_add(1, Ordering::Relaxed);
 }
 
+#[inline]
+pub fn record_input_cache_rebuild() {
+    INPUT_CACHE_REBUILDS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_tree_filter_rebuild() {
+    TREE_FILTER_REBUILDS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_copy_job() {
+    COPY_JOBS.fetch_add(1, Ordering::Relaxed);
+}
+
+#[inline]
+pub fn record_copy_progress_batch() {
+    COPY_PROGRESS_BATCHES.fetch_add(1, Ordering::Relaxed);
+}
+
 pub fn snapshot() -> PerfSnapshot {
     let task_metrics = crate::application::task::task_metrics();
     PerfSnapshot {
@@ -105,6 +133,10 @@ pub fn snapshot() -> PerfSnapshot {
         preview_table_syncs: PREVIEW_TABLE_SYNCS.load(Ordering::Relaxed),
         tree_syncs: TREE_SYNCS.load(Ordering::Relaxed),
         tree_set_items: TREE_SET_ITEMS.load(Ordering::Relaxed),
+        input_cache_rebuilds: INPUT_CACHE_REBUILDS.load(Ordering::Relaxed),
+        tree_filter_rebuilds: TREE_FILTER_REBUILDS.load(Ordering::Relaxed),
+        copy_jobs: COPY_JOBS.load(Ordering::Relaxed),
+        copy_progress_batches: COPY_PROGRESS_BATCHES.load(Ordering::Relaxed),
     }
 }
 
@@ -122,4 +154,8 @@ pub fn reset() {
     PREVIEW_TABLE_SYNCS.store(0, Ordering::Relaxed);
     TREE_SYNCS.store(0, Ordering::Relaxed);
     TREE_SET_ITEMS.store(0, Ordering::Relaxed);
+    INPUT_CACHE_REBUILDS.store(0, Ordering::Relaxed);
+    TREE_FILTER_REBUILDS.store(0, Ordering::Relaxed);
+    COPY_JOBS.store(0, Ordering::Relaxed);
+    COPY_PROGRESS_BATCHES.store(0, Ordering::Relaxed);
 }

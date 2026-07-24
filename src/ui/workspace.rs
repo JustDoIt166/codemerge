@@ -1,10 +1,25 @@
 mod actions;
 mod background;
 mod chrome;
+mod design_tokens;
 mod model;
 mod panels;
+mod sheets;
 mod tree_palette;
 mod view;
+
+gpui::actions!(
+    workspace,
+    [
+        StartProcess,
+        CancelProcess,
+        FocusSearch,
+        CopyActiveResult,
+        ExportResult,
+        OpenRules,
+        CloseWorkspaceSurface
+    ]
+);
 
 use std::cell::Cell;
 use std::ops::{Deref, DerefMut, Range};
@@ -14,10 +29,11 @@ use gpui::{
     AnyElement, App, AppContext, ClickEvent, Context, Entity, EntityId, FocusHandle, Focusable,
     InteractiveElement, ParentElement, Pixels, Render, SharedString,
     StatefulInteractiveElement as _, Styled, Subscription, Task, Timer, UniformListScrollHandle,
-    Window, div, prelude::FluentBuilder as _, px, size,
+    Window, div, prelude::FluentBuilder as _, px,
 };
 use gpui_component::{
-    ActiveTheme as _, Icon, IconName, Sizable, Size, WindowExt as _, h_flex,
+    ActiveTheme as _, Icon, IconName, Sizable, Size, VirtualListScrollHandle, WindowExt as _,
+    h_flex,
     input::InputState,
     notification::NotificationType,
     table::{Column, TableDelegate, TableState},
@@ -45,6 +61,7 @@ const INPUT_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_SELECTION
     .union(ChangeSet::NAVIGATION);
 const STATUS_DEPENDENCIES: ChangeSet = ChangeSet::EXECUTION
     .union(ChangeSet::EXECUTION_RESULT)
+    .union(ChangeSet::DRAFT_SELECTION)
     .union(ChangeSet::DRAFT_SETTINGS);
 const RULES_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_RULES
     .union(ChangeSet::DRAFT_SETTINGS)
@@ -61,14 +78,6 @@ const PREVIEW_DEPENDENCIES: ChangeSet = ChangeSet::PREVIEW
 
 pub(super) fn preview_line_height() -> Pixels {
     px(22.)
-}
-
-pub(super) fn workspace_panel_min_height(is_narrow: bool) -> Pixels {
-    if is_narrow { px(900.) } else { px(720.) }
-}
-
-pub(super) fn fixed_list_sizes(len: usize, height: Pixels) -> Rc<Vec<gpui::Size<Pixels>>> {
-    Rc::new((0..len).map(|_| size(px(100.), height)).collect::<Vec<_>>())
 }
 
 pub(crate) use crate::application::store::BlacklistItemKind;
@@ -273,7 +282,6 @@ enum TreeViewMode {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 enum WorkspacePanelKind {
     Right,
-    CompactContent,
 }
 
 struct WorkspacePanelView {
@@ -284,6 +292,12 @@ struct WorkspacePanelView {
 
 struct StatusPanelView {
     workspace: Entity<Workspace>,
+    _subscriptions: Vec<Subscription>,
+}
+
+struct ActivityPanelView {
+    workspace: Entity<Workspace>,
+    scroll_handle: VirtualListScrollHandle,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -305,6 +319,8 @@ struct ResultsPanelView {
 struct TreePaneView {
     workspace: Entity<Workspace>,
     view_mode: TreeViewMode,
+    plain_text_cache_key: Option<(u64, u64, u64, String)>,
+    plain_text_cache: Option<model::TreePaneBodyViewModel>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -331,6 +347,37 @@ struct PreviewTableCache {
     current_selected_id: Option<u32>,
     sort: model::PreviewTableSort,
     model: Option<model::PreviewTableModel>,
+}
+
+#[derive(Default)]
+struct InputPanelCache {
+    selection_revision: Option<u64>,
+    settings_revision: Option<u64>,
+    selection: Option<Rc<crate::ui::state::SelectionState>>,
+    selected_files: Option<Rc<Vec<crate::domain::FileEntry>>>,
+    settings: Option<Rc<crate::ui::state::SettingsState>>,
+}
+
+struct ActivityPanelCache {
+    execution_revision: Option<u64>,
+    filter: crate::ui::state::ActivityFilter,
+    expanded: Option<usize>,
+    records: Rc<Vec<(usize, crate::domain::ProcessRecord)>>,
+    row_sizes: Rc<Vec<gpui::Size<Pixels>>>,
+    failed_diagnostics: Rc<str>,
+}
+
+impl Default for ActivityPanelCache {
+    fn default() -> Self {
+        Self {
+            execution_revision: None,
+            filter: crate::ui::state::ActivityFilter::default(),
+            expanded: None,
+            records: Rc::default(),
+            row_sizes: Rc::default(),
+            failed_diagnostics: Rc::from(""),
+        }
+    }
 }
 
 #[derive(Clone, Default)]
@@ -372,7 +419,11 @@ pub struct WorkspaceViews {
     preview_filter_input: Entity<InputState>,
     preview_filter_revision: u64,
     preview_filter_task: Option<Task<()>>,
+    tree_filter_revision: u64,
+    tree_filter_task: Option<Task<()>>,
     preview_table_cache: PreviewTableCache,
+    input_panel_cache: InputPanelCache,
+    activity_panel_cache: ActivityPanelCache,
     suppress_tree_interaction_sync: Rc<Cell<bool>>,
     suppress_preview_table_events: bool,
     blacklist_filter_input: Entity<InputState>,
@@ -381,13 +432,14 @@ pub struct WorkspaceViews {
     temp_whitelist_add_input: Entity<InputState>,
     rules_panel: RulesPanelController,
     input_panel_view: Entity<InputPanelView>,
+    #[allow(dead_code)]
     status_panel_view: Entity<StatusPanelView>,
+    activity_panel_view: Entity<ActivityPanelView>,
     rules_panel_view: Entity<RulesPanelView>,
     results_panel_view: Entity<ResultsPanelView>,
     tree_pane_view: Entity<TreePaneView>,
     preview_pane_view: Entity<PreviewPaneView>,
     right_panel_view: Entity<WorkspacePanelView>,
-    compact_content_view: Entity<WorkspacePanelView>,
 }
 
 impl Deref for Workspace {
@@ -410,9 +462,6 @@ impl Workspace {
     }
 
     fn new(window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let _ = crate::utils::temp_file::cleanup_stale_temp_entries(
-            std::time::Duration::from_secs(24 * 60 * 60),
-        );
         let config_report = settings::load_report();
         let config_alert =
             Self::config_alert_from_report(&config_report, config_report.config.language);
@@ -451,6 +500,8 @@ impl Workspace {
             cx.new(|cx| InputPanelView::new(workspace_entity.clone(), store.clone(), cx));
         let status_panel_view =
             cx.new(|cx| StatusPanelView::new(workspace_entity.clone(), store.clone(), cx));
+        let activity_panel_view =
+            cx.new(|cx| ActivityPanelView::new(workspace_entity.clone(), store.clone(), cx));
         let rules_panel_view = cx.new(|cx| {
             RulesPanelView::new(
                 workspace_entity.clone(),
@@ -487,14 +538,6 @@ impl Workspace {
                 cx,
             )
         });
-        let compact_content_view = cx.new(|cx| {
-            WorkspacePanelView::new(
-                workspace_entity.clone(),
-                store.clone(),
-                WorkspacePanelKind::CompactContent,
-                cx,
-            )
-        });
         let subscriptions = vec![
             cx.subscribe_in(&tree_filter_input, window, Self::on_tree_filter_event),
             cx.subscribe_in(&preview_filter_input, window, Self::on_preview_filter_event),
@@ -527,7 +570,11 @@ impl Workspace {
                 preview_filter_input,
                 preview_filter_revision: 0,
                 preview_filter_task: None,
+                tree_filter_revision: 0,
+                tree_filter_task: None,
                 preview_table_cache: PreviewTableCache::default(),
+                input_panel_cache: InputPanelCache::default(),
+                activity_panel_cache: ActivityPanelCache::default(),
                 suppress_tree_interaction_sync,
                 suppress_preview_table_events: false,
                 blacklist_filter_input,
@@ -540,12 +587,12 @@ impl Workspace {
                 },
                 input_panel_view,
                 status_panel_view,
+                activity_panel_view,
                 rules_panel_view,
                 results_panel_view,
                 tree_pane_view,
                 preview_pane_view,
                 right_panel_view,
-                compact_content_view,
             },
             subscriptions,
         };
@@ -559,7 +606,29 @@ impl Workspace {
             );
         }
         this.refresh_preflight(cx);
+        this.schedule_maintenance_cleanup(cx);
         this
+    }
+
+    fn schedule_maintenance_cleanup(&self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            gpui::Timer::after(std::time::Duration::ZERO).await;
+            let stream = this.update(cx, |workspace, cx| {
+                workspace.coordinator.read(cx).start_maintenance_cleanup()
+            });
+            let Ok(Ok(mut stream)) = stream else {
+                return;
+            };
+            while let Some(envelope) = stream.events.recv().await {
+                if matches!(
+                    envelope.payload,
+                    crate::application::task::TaskPayload::Finished
+                ) {
+                    break;
+                }
+            }
+        })
+        .detach();
     }
 
     fn has_inputs(&self, cx: &App) -> bool {
@@ -608,6 +677,75 @@ impl Workspace {
         )
     }
 
+    fn action_start_process(
+        &mut self,
+        _: &StartProcess,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.start_process(&ClickEvent::default(), window, cx);
+    }
+
+    fn action_cancel_process(
+        &mut self,
+        _: &CancelProcess,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.cancel_process(&ClickEvent::default(), window, cx);
+    }
+
+    fn action_focus_search(
+        &mut self,
+        _: &FocusSearch,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let input = if self.store.read(cx).result().active_tab
+            == crate::ui::view_model::ResultTab::Content
+        {
+            self.preview_filter_input.clone()
+        } else {
+            self.tree_panel.filter_input.clone()
+        };
+        input.focus_handle(cx).focus(window);
+    }
+
+    fn action_copy_active_result(
+        &mut self,
+        _: &CopyActiveResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        if self.store.read(cx).result().active_tab == crate::ui::view_model::ResultTab::Content {
+            self.copy_preview(&ClickEvent::default(), window, cx);
+        } else {
+            self.copy_tree(&ClickEvent::default(), window, cx);
+        }
+    }
+
+    fn action_export_result(
+        &mut self,
+        _: &ExportResult,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.download_result(&ClickEvent::default(), window, cx);
+    }
+
+    fn action_open_rules(&mut self, _: &OpenRules, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_rules_sheet(&ClickEvent::default(), window, cx);
+    }
+
+    fn action_close_workspace_surface(
+        &mut self,
+        _: &CloseWorkspaceSurface,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let _ = self.close_workspace_surface(window, cx);
+    }
+
     fn execute_effects(&mut self, effects: &[WorkspaceEffect], cx: &mut Context<Self>) {
         for effect in effects {
             match effect {
@@ -627,15 +765,8 @@ impl Workspace {
         }
     }
 
-    fn clear_pending_confirmation(&mut self, cx: &mut Context<Self>) -> bool {
-        matches!(
-            self.dispatch(
-                WorkspaceAction::Navigation(NavigationAction::ClearPendingConfirmation),
-                cx,
-            )
-            .output,
-            crate::application::store::ActionOutput::Changed(true)
-        )
+    fn clear_pending_confirmation(&mut self, _: &mut Context<Self>) -> bool {
+        false
     }
 
     pub(super) fn ui_state(&self, cx: &App) -> WorkspaceUiState {
@@ -648,6 +779,50 @@ impl Workspace {
 
     pub(super) fn settings_snapshot(&self, cx: &App) -> crate::ui::state::SettingsState {
         self.store.read(cx).settings()
+    }
+
+    fn cached_input_snapshots(
+        &mut self,
+        cx: &App,
+    ) -> (
+        Rc<crate::ui::state::SelectionState>,
+        Rc<Vec<crate::domain::FileEntry>>,
+        Rc<crate::ui::state::SettingsState>,
+    ) {
+        let revisions = self.store.read(cx).revisions();
+        if self.input_panel_cache.selection_revision != Some(revisions.selection)
+            || self.input_panel_cache.selection.is_none()
+        {
+            let selection = Rc::new(self.store.read(cx).selection_snapshot());
+            self.input_panel_cache.selected_files = Some(Rc::new(selection.selected_files.clone()));
+            self.input_panel_cache.selection = Some(selection);
+            self.input_panel_cache.selection_revision = Some(revisions.selection);
+            perf::record_input_cache_rebuild();
+        }
+        if self.input_panel_cache.settings_revision != Some(revisions.settings)
+            || self.input_panel_cache.settings.is_none()
+        {
+            self.input_panel_cache.settings = Some(Rc::new(self.store.read(cx).settings()));
+            self.input_panel_cache.settings_revision = Some(revisions.settings);
+            perf::record_input_cache_rebuild();
+        }
+        (
+            self.input_panel_cache
+                .selection
+                .as_ref()
+                .cloned()
+                .unwrap_or_default(),
+            self.input_panel_cache
+                .selected_files
+                .as_ref()
+                .cloned()
+                .unwrap_or_default(),
+            self.input_panel_cache
+                .settings
+                .as_ref()
+                .cloned()
+                .unwrap_or_default(),
+        )
     }
 
     pub(super) fn language(&self, cx: &App) -> Language {
@@ -767,6 +942,26 @@ impl Workspace {
         }));
     }
 
+    fn schedule_tree_filter_sync(&mut self, cx: &mut Context<Self>) {
+        self.tree_filter_revision = self.tree_filter_revision.wrapping_add(1);
+        let revision = self.tree_filter_revision;
+        self.tree_filter_task = Some(cx.spawn(async move |this, cx| {
+            Timer::after(std::time::Duration::from_millis(75)).await;
+            let _ = this.update(cx, |workspace, cx| {
+                let _ = workspace.apply_scheduled_tree_filter(revision, cx);
+            });
+        }));
+    }
+
+    fn apply_scheduled_tree_filter(&mut self, revision: u64, cx: &mut Context<Self>) -> bool {
+        if self.tree_filter_revision != revision {
+            return false;
+        }
+        self.tree_filter_task = None;
+        self.sync_tree(cx);
+        true
+    }
+
     fn config_alert_from_report(
         report: &settings::ConfigLoadReport,
         language: Language,
@@ -869,9 +1064,6 @@ impl WorkspacePanelView {
                 WorkspacePanelKind::Right => workspace
                     .render_right_panel(workspace_cx)
                     .into_any_element(),
-                WorkspacePanelKind::CompactContent => workspace
-                    .render_compact_content_panel(workspace_cx)
-                    .into_any_element(),
             })
     }
 }
@@ -909,6 +1101,29 @@ impl StatusPanelView {
         })];
         Self {
             workspace,
+            _subscriptions: subscriptions,
+        }
+    }
+}
+
+impl ActivityPanelView {
+    fn new(
+        workspace: Entity<Workspace>,
+        store: Entity<WorkspaceStore>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let subscriptions = vec![cx.subscribe(&store, |_, _, event, cx| {
+            if event
+                .0
+                .intersects(ChangeSet::EXECUTION.union(ChangeSet::NAVIGATION))
+            {
+                perf::record_workspace_view_notify();
+                cx.notify();
+            }
+        })];
+        Self {
+            workspace,
+            scroll_handle: VirtualListScrollHandle::new(),
             _subscriptions: subscriptions,
         }
     }
@@ -1000,6 +1215,8 @@ impl TreePaneView {
         Self {
             workspace,
             view_mode: TreeViewMode::Tree,
+            plain_text_cache_key: None,
+            plain_text_cache: None,
             _subscriptions: subscriptions,
         }
     }
@@ -1062,6 +1279,15 @@ impl Render for StatusPanelView {
     }
 }
 
+impl Render for ActivityPanelView {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let scroll_handle = self.scroll_handle.clone();
+        self.workspace.update(cx, |workspace, workspace_cx| {
+            workspace.render_activity_sheet_panel(scroll_handle, workspace_cx)
+        })
+    }
+}
+
 impl Render for RulesPanelView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.workspace.update(cx, |workspace, workspace_cx| {
@@ -1073,10 +1299,11 @@ impl Render for RulesPanelView {
 }
 
 impl Render for ResultsPanelView {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let stacked_toolbar = window.bounds().size.width < px(1280.);
         self.workspace.update(cx, |workspace, workspace_cx| {
             workspace
-                .render_results_panel(workspace_cx)
+                .render_results_panel(stacked_toolbar, workspace_cx)
                 .into_any_element()
         })
     }
@@ -1102,18 +1329,29 @@ impl Focusable for Workspace {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        let sheet_overlay = self.render_workspace_sheet_overlay(cx);
         gpui_component::v_flex()
             .id("codemerge-root")
+            .debug_selector(|| "codemerge-root".to_string())
+            .key_context("Workspace")
             .track_focus(&self.focus_handle)
+            .on_action(cx.listener(Self::action_start_process))
+            .on_action(cx.listener(Self::action_cancel_process))
+            .on_action(cx.listener(Self::action_focus_search))
+            .on_action(cx.listener(Self::action_copy_active_result))
+            .on_action(cx.listener(Self::action_export_result))
+            .on_action(cx.listener(Self::action_open_rules))
+            .on_action(cx.listener(Self::action_close_workspace_surface))
+            .relative()
             .size_full()
             .child(self.render_window_chrome(window, cx))
             .child(
                 gpui::div()
                     .flex_1()
                     .min_h(px(0.))
-                    .p_4()
                     .child(self.render_main_content(window, cx)),
             )
+            .when_some(sheet_overlay, |root, overlay| root.child(overlay))
     }
 }
 
@@ -1152,11 +1390,20 @@ impl Workspace {
 
 #[cfg(test)]
 mod tests {
+    use std::rc::Rc;
+
+    use gpui::Focusable as _;
+
     use super::{
         PREVIEW_DEPENDENCIES, RULES_DEPENDENCIES, STATUS_DEPENDENCIES, TREE_DEPENDENCIES, Workspace,
     };
-    use crate::application::store::{ChangeSet, ExecutionAction, StoreSlice, WorkspaceAction};
-    use crate::domain::{PreviewFileEntry, ProcessResult, TreeNode};
+    use crate::application::store::{
+        ChangeSet, DraftAction, ExecutionAction, StoreSlice, WorkspaceAction,
+    };
+    use crate::domain::{
+        AppConfigV1, FileEntry, Language, PreviewFileEntry, ProcessRecord, ProcessResult,
+        ProcessStatus, TreeNode,
+    };
     use crate::processor::stats::ProcessingStats;
     use crate::services::preview::{
         EXCERPT_PREVIEW_BYTES, MAX_PREVIEW_LINE_BYTES, PreviewEvent, PreviewRequest,
@@ -1165,7 +1412,10 @@ mod tests {
     use crate::services::process::ProcessEvent;
     use crate::ui::view_model::ResultTab;
     use crate::ui::{perf, preview_model::PreviewModel, state::ProcessUiStatus};
-    use gpui::{AppContext as _, Context, TestAppContext, VisualContext as _};
+    use gpui::{
+        AppContext as _, Context, ScrollDelta, ScrollWheelEvent, TestAppContext,
+        VisualContext as _, point,
+    };
     use gpui_component::tree::TreeState;
     use std::fs;
     use std::path::PathBuf;
@@ -1249,6 +1499,7 @@ mod tests {
         assert!(RULES_DEPENDENCIES.intersects(ChangeSet::DRAFT_RULES));
         assert!(!PREVIEW_DEPENDENCIES.intersects(ChangeSet::DRAFT_RULES));
         assert!(STATUS_DEPENDENCIES.intersects(ChangeSet::EXECUTION));
+        assert!(STATUS_DEPENDENCIES.intersects(ChangeSet::DRAFT_SELECTION));
         assert!(!RULES_DEPENDENCIES.intersects(ChangeSet::EXECUTION));
         assert!(TREE_DEPENDENCIES.intersects(ChangeSet::NAVIGATION_TREE));
         assert!(!STATUS_DEPENDENCIES.intersects(ChangeSet::NAVIGATION_TREE));
@@ -1513,6 +1764,12 @@ mod tests {
                 Some("后台任务意外中断，未收到完成状态")
             );
             assert!(process.processing_elapsed.is_some());
+            let ui_state = workspace.ui_state(cx);
+            assert_eq!(
+                ui_state.activity_filter,
+                crate::ui::state::ActivityFilter::Failed
+            );
+            assert_eq!(ui_state.active_sheet, None);
         });
     }
 
@@ -1554,7 +1811,6 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
             seed_preview_model(&workspace.test_preview(), &path, cx, 0..256, 1);
-            perf::reset();
 
             workspace.preview_pane_view.update(cx, |view, cx| {
                 view.queue_visible_range_sync(0..24, cx);
@@ -1566,10 +1822,8 @@ mod tests {
                     view.render_cache_range,
                     128..192.min(crate::ui::state::PreviewPanelState::RENDER_WINDOW_LINES + 128)
                 );
+                assert_eq!(view.last_synced_visible_range, Some(128..160));
             });
-
-            let snapshot = perf::snapshot();
-            assert_eq!(snapshot.preview_visible_syncs, 1);
         });
 
         let _ = fs::remove_file(path);
@@ -1638,10 +1892,10 @@ mod tests {
         workspace.update(cx, |workspace: &mut Workspace, cx| {
             workspace.set_result(sample_result_with_path(&path), cx);
             seed_preview_model(&workspace.test_preview(), &path, cx, 0..128, 1);
-            workspace.preview_pane_view.update(cx, |view, cx| {
+            let initial_cache = workspace.preview_pane_view.update(cx, |view, cx| {
                 view.refresh_render_cache(0..64, cx);
+                (view.render_cache_range.clone(), view.render_cache.clone())
             });
-            perf::reset();
 
             workspace.test_preview().update(cx, |preview, preview_cx| {
                 let revision = preview.state().preview_revision;
@@ -1654,13 +1908,12 @@ mod tests {
                 preview_cx.notify();
             });
 
-            workspace.preview_pane_view.update(cx, |view, cx| {
+            let current_cache = workspace.preview_pane_view.update(cx, |view, cx| {
                 view.refresh_render_cache(view.render_cache_range.clone(), cx);
+                (view.render_cache_range.clone(), view.render_cache.clone())
             });
 
-            let snapshot = perf::snapshot();
-            assert_eq!(snapshot.preview_render_cache_rebuilds, 0);
-            assert!(snapshot.preview_render_cache_partial_updates >= 1);
+            assert_eq!(current_cache, initial_cache);
         });
 
         let _ = fs::remove_file(path);
@@ -1880,14 +2133,22 @@ mod tests {
             workspace.load_deferred_merged_content_excerpt(cx);
         });
 
-        let excerpt_path = workspace
-            .update(cx, |workspace: &mut Workspace, cx| {
-                let preview = workspace.test_preview().read(cx);
-                preview
+        let mut excerpt_path = None;
+        for _ in 0..100 {
+            cx.run_until_parked();
+            excerpt_path = workspace.update(cx, |workspace: &mut Workspace, cx| {
+                workspace
+                    .test_preview()
+                    .read(cx)
                     .deferred_preview()
                     .and_then(|state| state.excerpt_path.clone())
-            })
-            .expect("excerpt preview path");
+            });
+            if excerpt_path.is_some() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let excerpt_path = excerpt_path.expect("excerpt preview path");
         for _ in 0..100 {
             cx.run_until_parked();
             if workspace.update(cx, |workspace, cx| {
@@ -2189,6 +2450,442 @@ mod tests {
         let _ = fs::remove_file(lib_path);
     }
 
+    #[gpui::test]
+    fn input_cache_is_not_rebuilt_during_repeated_draws_without_revision_changes(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        let files = (0..10_000)
+            .map(|ix| FileEntry {
+                path: PathBuf::from(format!("src/file-{ix}.rs")),
+                name: format!("src/file-{ix}.rs"),
+                size: ix,
+            })
+            .collect();
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let _ = workspace.dispatch(
+                WorkspaceAction::Draft(crate::application::store::DraftAction::AddSelectedFiles(
+                    files,
+                )),
+                cx,
+            );
+            let first = workspace.cached_input_snapshots(cx);
+            let second = workspace.cached_input_snapshots(cx);
+
+            assert!(Rc::ptr_eq(&first.0, &second.0));
+            assert!(Rc::ptr_eq(&first.1, &second.1));
+            assert!(Rc::ptr_eq(&first.2, &second.2));
+        });
+    }
+
+    #[gpui::test]
+    fn rapid_tree_filter_changes_rebuild_only_the_last_projection(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            workspace.set_result(sample_result(), cx);
+            for value in ["s", "sr", "src"] {
+                workspace
+                    .tree_panel
+                    .filter_input
+                    .update(cx, |input, input_cx| {
+                        input.set_value(value, window, input_cx);
+                    });
+                workspace.schedule_tree_filter_sync(cx);
+            }
+        });
+
+        workspace.update(cx, |workspace: &mut Workspace, cx| {
+            let current = workspace.tree_filter_revision;
+            assert!(!workspace.apply_scheduled_tree_filter(current - 2, cx));
+            assert!(!workspace.apply_scheduled_tree_filter(current - 1, cx));
+            assert!(workspace.apply_scheduled_tree_filter(current, cx));
+            assert_eq!(workspace.tree_panel.last_filter, "src");
+        });
+    }
+
+    #[gpui::test]
+    fn desktop_three_column_layout_stays_reachable_at_supported_sizes(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, window) = cx.add_window_view(Workspace::new);
+        workspace.update(window, |workspace, cx| {
+            let config = AppConfigV1 {
+                language: Language::En,
+                ..AppConfigV1::default()
+            };
+            let _ =
+                workspace.dispatch(WorkspaceAction::Draft(DraftAction::ApplyConfig(config)), cx);
+        });
+
+        for (width, height) in [(1440., 900.), (1366., 768.), (1280., 720.), (1180., 720.)] {
+            window.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+            window.update(|window, app| window.draw(app).clear());
+            let root = window.debug_bounds("codemerge-root").expect("root bounds");
+            let input = window
+                .debug_bounds("input-workspace-column")
+                .expect("input panel bounds");
+            let status = window
+                .debug_bounds("status-workspace-column")
+                .expect("status panel bounds");
+            let results = window
+                .debug_bounds("results-workspace-column")
+                .expect("results panel bounds");
+            let primary = window
+                .debug_bounds("primary-process-action-slot")
+                .expect("primary action bounds");
+            let activity_filters = window
+                .debug_bounds("activity-filter-tabs")
+                .expect("activity filters bounds");
+            let activity_copy = window
+                .debug_bounds("copy-all-failures-slot")
+                .expect("activity copy bounds");
+            let result_tabs = window
+                .debug_bounds("result-tabs-slot")
+                .expect("result tabs bounds");
+            let result_actions = window
+                .debug_bounds("result-actions-slot")
+                .expect("result actions bounds");
+            let tree_search = window
+                .debug_bounds("tree-search-slot")
+                .expect("tree search bounds");
+
+            for bounds in [
+                input,
+                status,
+                results,
+                primary,
+                activity_filters,
+                activity_copy,
+                result_tabs,
+                result_actions,
+                tree_search,
+            ] {
+                assert!(
+                    root.contains(&bounds.origin),
+                    "{width}x{height}: {bounds:?} starts outside {root:?}"
+                );
+                assert!(
+                    bounds.bottom() <= root.bottom(),
+                    "{width}x{height}: {bounds:?} extends below {root:?}"
+                );
+                assert!(
+                    bounds.right() <= root.right(),
+                    "{width}x{height}: {bounds:?} extends right of {root:?}"
+                );
+            }
+            assert!(input.right() <= status.origin.x);
+            assert!(status.right() <= results.origin.x);
+            assert!(status.contains(&primary.origin));
+            assert!(primary.right() <= status.right());
+            assert!(primary.bottom() <= status.bottom());
+            assert!(status.contains(&activity_filters.origin));
+            assert!(activity_filters.right() <= status.right());
+            assert!(status.contains(&activity_copy.origin));
+            assert!(activity_copy.right() <= status.right());
+            assert!(results.contains(&result_tabs.origin));
+            assert!(result_tabs.right() <= results.right());
+            assert!(results.contains(&result_actions.origin));
+            assert!(result_actions.right() <= results.right());
+            assert!(results.contains(&tree_search.origin));
+            assert!(tree_search.right() <= results.right());
+            assert!(results.size.width >= gpui::px(560.));
+        }
+    }
+
+    #[gpui::test]
+    fn primary_action_switches_between_start_and_cancel_in_place(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        cx.update(|window, app| window.draw(app).clear());
+        let start_slot = cx
+            .debug_bounds("primary-process-action-slot")
+            .expect("start slot bounds");
+        assert!(cx.debug_bounds("start-process-action").is_some());
+
+        workspace.update(cx, |workspace, cx| start_test_process(workspace, 77, cx));
+        cx.update(|window, app| window.draw(app).clear());
+        let cancel_slot = cx
+            .debug_bounds("primary-process-action-slot")
+            .expect("cancel slot bounds");
+        assert_eq!(start_slot, cancel_slot);
+        assert!(cx.debug_bounds("cancel-process-action").is_some());
+
+        workspace.update(cx, |workspace, cx| {
+            workspace.handle_process_event(ProcessEvent::cancelled(77), cx);
+        });
+        cx.update(|window, app| window.draw(app).clear());
+        assert_eq!(
+            cx.debug_bounds("primary-process-action-slot")
+                .expect("restored start slot bounds"),
+            start_slot
+        );
+        assert!(cx.debug_bounds("start-process-action").is_some());
+    }
+
+    #[gpui::test]
+    fn desktop_ui_runs_a_real_merge_from_primary_action(cx: &mut TestAppContext) {
+        cx.update(gpui_component::init);
+        let source = tempfile::tempdir().expect("create source fixture");
+        let first_path = source.path().join("alpha.rs");
+        let nested = source.path().join("src");
+        fs::create_dir_all(&nested).expect("create nested source directory");
+        let second_path = nested.join("beta.rs");
+        fs::write(&first_path, "pub fn alpha() -> u8 { 1 }\n").expect("write alpha fixture");
+        fs::write(&second_path, "pub fn beta() -> u8 { 2 }\n").expect("write beta fixture");
+
+        let workspace_slot = Rc::new(std::cell::RefCell::new(None));
+        let workspace_output = Rc::clone(&workspace_slot);
+        let window_handle = cx.add_window(move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            workspace_output.replace(Some(workspace.clone()));
+            gpui_component::Root::new(workspace, window, cx)
+        });
+        let workspace = workspace_slot
+            .borrow_mut()
+            .take()
+            .expect("workspace entity");
+        let mut visual_context = gpui::VisualTestContext::from_window(window_handle.into(), cx);
+        let cx = &mut visual_context;
+
+        workspace.update(cx, |workspace, cx| {
+            let _ = workspace.dispatch(
+                WorkspaceAction::Draft(DraftAction::ApplyConfig(AppConfigV1::default())),
+                cx,
+            );
+            let _ = workspace.dispatch(
+                WorkspaceAction::Draft(DraftAction::AddTemporaryBlacklist {
+                    tokens: vec!["never-match".to_string()],
+                    as_ext: false,
+                }),
+                cx,
+            );
+            let files = [&first_path, &second_path]
+                .into_iter()
+                .map(|path| FileEntry {
+                    path: path.clone(),
+                    name: path
+                        .file_name()
+                        .and_then(|name| name.to_str())
+                        .unwrap_or_default()
+                        .to_string(),
+                    size: fs::metadata(path).expect("fixture metadata").len(),
+                })
+                .collect();
+            let _ = workspace.dispatch(
+                WorkspaceAction::Draft(DraftAction::AddSelectedFiles(files)),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| window.draw(app).clear());
+
+        let primary = cx
+            .debug_bounds("primary-process-action-slot")
+            .expect("primary action bounds");
+        cx.simulate_click(primary.center(), gpui::Modifiers::default());
+        assert!(workspace.update(cx, |workspace, cx| {
+            workspace.store.read(cx).draft_locked()
+        }));
+
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            cx.run_until_parked();
+            let completed = workspace.update(cx, |workspace, cx| {
+                let store = workspace.store.read(cx);
+                store.process().ui_status == ProcessUiStatus::Completed
+                    && store.result().result.is_some()
+            });
+            if completed {
+                break;
+            }
+            assert!(Instant::now() < deadline, "real UI merge timed out");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let (merged_path, process_dir) = workspace.update(cx, |workspace, cx| {
+            let store = workspace.store.read(cx);
+            let result = store.result().result.as_ref().expect("merged result");
+            assert_eq!(result.stats.processed_files, 2);
+            assert!(result.merged_content_bytes > 0);
+            assert!(store.selection().temp_folder_blacklist.is_empty());
+            assert!(!store.draft_locked());
+            (
+                result
+                    .merged_content_path
+                    .clone()
+                    .expect("merged content path"),
+                result.process_dir.clone().expect("process directory"),
+            )
+        });
+        let merged = fs::read_to_string(&merged_path).expect("read merged content");
+        assert!(merged.contains("pub fn alpha"));
+        assert!(merged.contains("pub fn beta"));
+        cx.update(|window, app| window.draw(app).clear());
+        assert!(cx.debug_bounds("start-process-action").is_some());
+        assert!(cx.debug_bounds("results-panel-content").is_some());
+        assert!(cx.debug_bounds("right-workspace-tabs").is_some());
+
+        workspace.update(cx, |workspace, cx| {
+            let _ = workspace.dispatch(
+                WorkspaceAction::ClearInputs {
+                    ready_label: "ready".to_string(),
+                },
+                cx,
+            );
+        });
+        assert!(!process_dir.exists());
+    }
+
+    #[gpui::test]
+    fn activity_virtual_list_scrolls_through_one_thousand_rows_responsively(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        cx.simulate_resize(gpui::size(gpui::px(1440.), gpui::px(900.)));
+        workspace.update(cx, |workspace, cx| {
+            start_test_process(workspace, 901, cx);
+            workspace.handle_process_events(
+                (0..1_000)
+                    .map(|ix| {
+                        ProcessEvent::record(
+                            901,
+                            ProcessRecord {
+                                file_name: format!("src/file-{ix:04}.rs"),
+                                status: if ix % 20 == 0 {
+                                    ProcessStatus::Failed
+                                } else {
+                                    ProcessStatus::Success
+                                },
+                                chars: Some(ix),
+                                tokens: Some(ix / 3),
+                                error: (ix % 20 == 0).then(|| format!("diagnostic for file {ix}")),
+                            },
+                        )
+                    })
+                    .collect(),
+                cx,
+            );
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| window.draw(app).clear());
+        let viewport = cx
+            .debug_bounds("activity-list-viewport")
+            .expect("activity viewport bounds");
+        assert!(viewport.size.height > gpui::px(0.));
+        let cached_records = workspace.update(cx, |workspace, _| {
+            workspace.activity_panel_cache.records.clone()
+        });
+
+        let start = Instant::now();
+        for _ in 0..30 {
+            cx.simulate_event(ScrollWheelEvent {
+                position: viewport.center(),
+                delta: ScrollDelta::Pixels(point(gpui::px(0.), gpui::px(-1_700.))),
+                ..Default::default()
+            });
+            cx.update(|window, app| window.draw(app).clear());
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "activity_scroll_perf rows=1000 frames=30 elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed < Duration::from_secs(6),
+            "30 virtual-list scroll frames took {:?}",
+            elapsed
+        );
+        workspace.update(cx, |workspace, _| {
+            assert!(Rc::ptr_eq(
+                &cached_records,
+                &workspace.activity_panel_cache.records
+            ));
+        });
+        workspace.update(cx, |workspace, cx| {
+            workspace.activity_panel_view.update(cx, |view, _| {
+                view.scroll_handle.scroll_to_bottom();
+            });
+        });
+        cx.update(|window, app| window.draw(app).clear());
+        assert!(
+            cx.debug_bounds("activity-record-999").is_some(),
+            "the final virtualized activity row should become reachable"
+        );
+    }
+
+    #[gpui::test]
+    fn repeated_desktop_resizes_keep_input_cache_and_tree_projection_stable(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(gpui_component::init);
+        let (workspace, cx) = cx.add_window_view(Workspace::new);
+        workspace.update(cx, |workspace, cx| {
+            let _ = workspace.dispatch(
+                WorkspaceAction::Draft(DraftAction::AddSelectedFiles(
+                    (0..10_000)
+                        .map(|ix| FileEntry {
+                            path: PathBuf::from(format!("src/file-{ix}.rs")),
+                            name: format!("file-{ix}.rs"),
+                            size: ix,
+                        })
+                        .collect(),
+                )),
+                cx,
+            );
+            workspace.set_result(sample_result(), cx);
+        });
+        cx.update(|window, app| window.draw(app).clear());
+        let (before_selection, before_settings, before_projection) =
+            workspace.update(cx, |workspace, cx| {
+                let snapshots = workspace.cached_input_snapshots(cx);
+                (
+                    snapshots.0,
+                    snapshots.2,
+                    (
+                        workspace.tree_panel.projection.roots.as_ptr(),
+                        workspace.tree_panel.projection.roots.len(),
+                        workspace.tree_panel.projection.total_summary,
+                    ),
+                )
+            });
+
+        let start = Instant::now();
+        for (width, height) in [(1180., 720.), (1280., 720.), (1366., 768.), (1440., 900.)]
+            .into_iter()
+            .cycle()
+            .take(20)
+        {
+            cx.simulate_resize(gpui::size(gpui::px(width), gpui::px(height)));
+            cx.update(|window, app| window.draw(app).clear());
+        }
+        let elapsed = start.elapsed();
+        println!(
+            "desktop_resize_perf files=10000 frames=20 elapsed_ms={}",
+            elapsed.as_millis()
+        );
+        assert!(
+            elapsed < Duration::from_secs(5),
+            "20 desktop resize frames took {:?}",
+            elapsed
+        );
+        workspace.update(cx, |workspace, cx| {
+            let after = workspace.cached_input_snapshots(cx);
+            assert!(Rc::ptr_eq(&before_selection, &after.0));
+            assert!(Rc::ptr_eq(&before_settings, &after.2));
+            assert_eq!(
+                (
+                    workspace.tree_panel.projection.roots.as_ptr(),
+                    workspace.tree_panel.projection.roots.len(),
+                    workspace.tree_panel.projection.total_summary,
+                ),
+                before_projection
+            );
+        });
+    }
+
     fn sample_result() -> ProcessResult {
         ProcessResult {
             stats: ProcessingStats::default(),
@@ -2226,6 +2923,7 @@ mod tests {
             ],
             process_dir: None,
             merged_content_path: None,
+            merged_content_bytes: 0,
             suggested_result_name: "workspace-20260321.txt".to_string(),
             file_details: Vec::new(),
             preview_files: vec![
@@ -2287,6 +2985,9 @@ mod tests {
     fn sample_result_with_merged_content_path(path: &std::path::Path) -> ProcessResult {
         let mut result = sample_result();
         result.merged_content_path = Some(path.to_path_buf());
+        result.merged_content_bytes = fs::metadata(path)
+            .map(|metadata| metadata.len())
+            .unwrap_or(0);
         result.preview_files.clear();
         result
     }
@@ -2316,6 +3017,74 @@ mod tests {
                     .collect(),
             });
         });
+    }
+
+    #[gpui::test]
+    fn rules_tab_is_mouse_and_keyboard_reachable(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            gpui_component::init(cx);
+            cx.bind_keys(crate::ui::workspace_key_bindings());
+        });
+        let workspace_slot = Rc::new(std::cell::RefCell::new(None));
+        let workspace_output = Rc::clone(&workspace_slot);
+        let window_handle = cx.add_window(move |window, cx| {
+            let workspace = cx.new(|cx| Workspace::new(window, cx));
+            workspace_output.replace(Some(workspace.clone()));
+            gpui_component::Root::new(workspace, window, cx)
+        });
+        let workspace = workspace_slot
+            .borrow_mut()
+            .take()
+            .expect("workspace entity");
+        let mut visual_context = gpui::VisualTestContext::from_window(window_handle.into(), cx);
+        let cx = &mut visual_context;
+        cx.run_until_parked();
+        cx.update_window_entity(&workspace, |workspace: &mut Workspace, window, cx| {
+            let _ = cx;
+            workspace.focus_handle.focus(window);
+        });
+        cx.update(|window, app| window.draw(app).clear());
+
+        let rules_tab = cx
+            .debug_bounds("rules-tab-target")
+            .expect("rules tab bounds");
+        cx.simulate_click(rules_tab.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.update(cx, |workspace, cx| workspace.ui_state(cx).right_tab),
+            crate::ui::state::WorkspaceRightTab::Rules
+        );
+        cx.update(|window, app| window.draw(app).clear());
+        assert!(cx.debug_bounds("rules-workspace-panel").is_some());
+
+        let results_tab = cx
+            .debug_bounds("results-tab-target")
+            .expect("results tab bounds");
+        cx.simulate_click(results_tab.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.update(cx, |workspace, cx| workspace.ui_state(cx).right_tab),
+            crate::ui::state::WorkspaceRightTab::Results
+        );
+
+        cx.simulate_keystrokes("ctrl-,");
+        cx.run_until_parked();
+        assert_eq!(
+            workspace.update(cx, |workspace, cx| workspace.ui_state(cx).right_tab),
+            crate::ui::state::WorkspaceRightTab::Rules
+        );
+
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        assert!(
+            cx.update_window_entity(&workspace, |workspace, window, cx| {
+                workspace
+                    .tree_panel
+                    .filter_input
+                    .focus_handle(cx)
+                    .is_focused(window)
+            })
+        );
     }
 
     fn write_preview_fixture(prefix: &str, line_count: usize) -> PathBuf {

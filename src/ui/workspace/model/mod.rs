@@ -7,18 +7,17 @@ pub(super) use self::blacklist::{
     BlacklistSectionViewModel, BlacklistTagViewModel, build_blacklist_sections,
 };
 pub(super) use self::content_preview::{
-    CompactContentBodyViewModel, CompactContentPanelViewModel, ContentBodyViewModel,
-    ContentFileListViewModel, ContentPanelBodyViewModel, ContentPanelViewModel,
-    EmptyStateViewModel, PreviewContentViewModel, PreviewDeferredViewModel,
+    ContentBodyViewModel, ContentFileListViewModel, ContentPanelBodyViewModel,
+    ContentPanelViewModel, EmptyStateViewModel, PreviewContentViewModel, PreviewDeferredViewModel,
     PreviewDocumentViewModel, PreviewExcerptBannerViewModel, PreviewPaneBodyViewModel,
     PreviewPaneViewModel, PreviewTableModel, PreviewTableSort, ResultsCopyAction,
-    ResultsPanelBodyViewModel, ResultsPanelViewModel, build_compact_content_panel_view_model,
-    build_content_panel_view_model, build_preview_pane_view_model, build_preview_table_model,
-    build_results_panel_view_model, preview_file_node_id, sort_preview_rows,
+    ResultsPanelBodyViewModel, ResultsPanelViewModel, build_content_panel_view_model,
+    build_preview_pane_view_model, build_preview_table_model, build_results_panel_view_model,
+    preview_file_node_id, sort_preview_rows,
 };
 pub(super) use self::status::{
     StatusMetricViewModel, StatusPanelViewModel, StatusProgressViewModel, WindowChromeMode,
-    WindowZoomAction, WorkspaceChromeTone, WorkspaceChromeViewModel, build_status_panel_view_model,
+    WindowZoomAction, WorkspaceChromeViewModel, build_status_panel_view_model,
     build_workspace_chrome_view_model, resolve_window_chrome_mode, resolve_window_zoom_action,
 };
 pub(super) use self::tree::{
@@ -26,7 +25,8 @@ pub(super) use self::tree::{
     TreePaneBodyViewModel, TreePaneViewModel, TreePanelData, TreePanelEffect, TreeProjectionState,
     TreeRenderState, TreeRowViewModel, ancestor_node_ids, apply_tree_interaction,
     build_preflight_tree_panel_data, build_tree_pane_view_model, build_tree_panel_data,
-    build_tree_projection, build_tree_projection_with_exclusions, build_tree_render_state,
+    build_tree_plain_text_body, build_tree_projection, build_tree_projection_with_exclusions,
+    build_tree_render_state,
 };
 
 #[cfg(test)]

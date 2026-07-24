@@ -21,6 +21,7 @@ pub struct PreviewRenderLine {
     pub line_number: SharedString,
     pub text: SharedString,
     pub missing: bool,
+    pub truncated: bool,
 }
 
 impl PreviewModel {
@@ -264,11 +265,15 @@ impl PreviewModel {
             Some(text) => PreviewRenderLine {
                 line_number: SharedString::from((ix + 1).to_string()),
                 missing: false,
+                truncated: text.len()
+                    >= crate::services::preview::MAX_PREVIEW_LINE_BYTES.saturating_sub(3)
+                    && text.ends_with("..."),
                 text,
             },
             None => PreviewRenderLine {
                 line_number: SharedString::from((ix + 1).to_string()),
                 missing: true,
+                truncated: false,
                 text: SharedString::from("\u{2026}"),
             },
         }

@@ -1,6 +1,7 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::hash::{Hash, Hasher};
 use std::ops::Range;
+use std::rc::Rc;
 
 use gpui::SharedString;
 use gpui_component::{Icon, IconName, tree::TreeItem};
@@ -126,7 +127,7 @@ pub(in crate::ui::workspace) struct TreeProjectionState {
 pub(in crate::ui::workspace) enum TreePaneBodyViewModel {
     Tree,
     PlainText {
-        lines: Vec<SharedString>,
+        lines: Rc<[SharedString]>,
     },
     Empty {
         title: SharedString,
@@ -198,6 +199,7 @@ pub(in crate::ui::workspace) fn build_tree_pane_view_model(
     total_summary: TreeCountSummary,
     tree_filter: &str,
     result: Option<&ProcessResult>,
+    plain_text_body: Option<TreePaneBodyViewModel>,
     language: Language,
     plain_text_mode: bool,
 ) -> TreePaneViewModel {
@@ -216,7 +218,8 @@ pub(in crate::ui::workspace) fn build_tree_pane_view_model(
         }),
         disable_structure_actions: !has_tree_data || filter_active || plain_text_mode,
         body: if plain_text_mode {
-            build_tree_plain_text_body(result, language)
+            plain_text_body
+                .unwrap_or_else(|| build_tree_plain_text_body(render_state, result, language))
         } else if !render_state.rows.is_empty() {
             TreePaneBodyViewModel::Tree
         } else {
@@ -485,10 +488,21 @@ impl TreeProjectionNode {
     }
 }
 
-fn build_tree_plain_text_body(
+pub(in crate::ui::workspace) fn build_tree_plain_text_body(
+    render_state: &TreeRenderState,
     result: Option<&ProcessResult>,
     language: Language,
 ) -> TreePaneBodyViewModel {
+    if !render_state.rows.is_empty() {
+        return TreePaneBodyViewModel::PlainText {
+            lines: render_state
+                .rows
+                .iter()
+                .map(|row| SharedString::from(format!("{}{}", "  ".repeat(row.depth), row.label)))
+                .collect::<Vec<_>>()
+                .into(),
+        };
+    }
     let tree_string = result
         .map(|result| result.tree_string.as_str())
         .unwrap_or_default();
@@ -503,7 +517,8 @@ fn build_tree_plain_text_body(
         lines: tree_string
             .split('\n')
             .map(|line| SharedString::from(line.trim_end_matches('\r').replace(' ', "\u{00A0}")))
-            .collect(),
+            .collect::<Vec<_>>()
+            .into(),
     }
 }
 

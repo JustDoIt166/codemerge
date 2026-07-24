@@ -24,7 +24,7 @@ impl Workspace {
         cx: &mut Context<Self>,
     ) -> bool {
         let Some(node_id) =
-            model::preview_file_node_id(self.store.read(cx).result().result.as_ref(), file_id)
+            model::preview_file_node_id(self.store.read(cx).result().result.as_deref(), file_id)
         else {
             return false;
         };
@@ -132,14 +132,19 @@ impl Workspace {
     }
 
     pub(super) fn load_merged_content_preview(&mut self, cx: &mut Context<Self>) {
-        let merged_content_path = self
+        let merged_content = self
             .store
             .read(cx)
             .result()
             .result
             .as_ref()
-            .and_then(|result| result.merged_content_path.clone());
-        let Some(merged_content_path) = merged_content_path else {
+            .and_then(|result| {
+                result
+                    .merged_content_path
+                    .clone()
+                    .map(|path| (path, result.merged_content_bytes))
+            });
+        let Some((merged_content_path, merged_content_bytes)) = merged_content else {
             return;
         };
 
@@ -155,39 +160,23 @@ impl Workspace {
             return;
         }
 
-        match std::fs::metadata(&merged_content_path) {
-            Ok(metadata) if metadata.len() > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES => {
-                let _ = self.dispatch(
-                    crate::application::store::WorkspaceAction::Preview(
-                        crate::application::store::PreviewAction::Defer {
-                            file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
-                            source_path: merged_content_path.clone(),
-                            source_byte_len: metadata.len(),
-                            excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
-                        },
-                    ),
-                    cx,
-                );
-                let preview_pane = self.preview_pane_view.clone();
-                cx.defer(move |cx| {
-                    preview_pane.update(cx, |view, _| view.scroll_to_top());
-                });
-                return;
-            }
-            Err(error) => {
-                let language = self.language(cx);
-                let _ = self.dispatch(
-                    crate::application::store::WorkspaceAction::Preview(
-                        crate::application::store::PreviewAction::SetError(format!(
-                            "{}: {error}",
-                            crate::utils::i18n::tr(language, "merged_content_unavailable")
-                        )),
-                    ),
-                    cx,
-                );
-                return;
-            }
-            Ok(_) => {}
+        if merged_content_bytes > super::MERGED_CONTENT_AUTO_PREVIEW_MAX_BYTES {
+            let _ = self.dispatch(
+                crate::application::store::WorkspaceAction::Preview(
+                    crate::application::store::PreviewAction::Defer {
+                        file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                        source_path: merged_content_path.clone(),
+                        source_byte_len: merged_content_bytes,
+                        excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
+                    },
+                ),
+                cx,
+            );
+            let preview_pane = self.preview_pane_view.clone();
+            cx.defer(move |cx| {
+                preview_pane.update(cx, |view, _| view.scroll_to_top());
+            });
+            return;
         }
 
         self.load_preview_path(
@@ -212,30 +201,53 @@ impl Workspace {
             return;
         };
 
-        match create_excerpt_preview(&source_path, EXCERPT_PREVIEW_BYTES) {
-            Ok(excerpt_path) => {
-                let _ = self.dispatch(
-                    crate::application::store::WorkspaceAction::Preview(
-                        crate::application::store::PreviewAction::OpenDeferredExcerpt {
-                            file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
-                            source_path: source_path.clone(),
-                            source_byte_len,
-                            excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
-                            excerpt_path,
-                        },
-                    ),
-                    cx,
-                );
-            }
-            Err(error) => {
-                let _ = self.dispatch(
-                    crate::application::store::WorkspaceAction::Preview(
-                        crate::application::store::PreviewAction::SetError(error.to_string()),
-                    ),
-                    cx,
-                );
-            }
-        }
+        cx.spawn(async move |this, cx| {
+            let excerpt = cx
+                .background_executor()
+                .spawn({
+                    let source_path = source_path.clone();
+                    async move { create_excerpt_preview(&source_path, EXCERPT_PREVIEW_BYTES) }
+                })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                let is_current = this
+                    .store
+                    .read(cx)
+                    .preview_model()
+                    .deferred_preview()
+                    .is_some_and(|state| state.source_path == source_path);
+                if !is_current {
+                    return;
+                }
+                match excerpt {
+                    Ok(excerpt_path) => {
+                        let _ = this.dispatch(
+                            crate::application::store::WorkspaceAction::Preview(
+                                crate::application::store::PreviewAction::OpenDeferredExcerpt {
+                                    file_id: super::MERGED_CONTENT_PREVIEW_FILE_ID,
+                                    source_path,
+                                    source_byte_len,
+                                    excerpt_byte_len: EXCERPT_PREVIEW_BYTES,
+                                    excerpt_path,
+                                },
+                            ),
+                            cx,
+                        );
+                    }
+                    Err(error) => {
+                        let _ = this.dispatch(
+                            crate::application::store::WorkspaceAction::Preview(
+                                crate::application::store::PreviewAction::SetError(
+                                    error.to_string(),
+                                ),
+                            ),
+                            cx,
+                        );
+                    }
+                }
+            });
+        })
+        .detach();
     }
 
     pub(super) fn load_deferred_merged_content_full(&mut self, cx: &mut Context<Self>) {
@@ -284,7 +296,7 @@ impl Workspace {
         if let Some(files) = completed_files {
             let data = model::build_preflight_tree_panel_data(
                 files.as_ref(),
-                self.store.read(cx).result().result.as_ref(),
+                self.store.read(cx).result().result.as_deref(),
             );
             let initialize_expansion = !self.tree_panel.input_exclusion_enabled;
             self.tree_panel.data = Some(data);
@@ -379,6 +391,35 @@ impl Workspace {
                         crate::utils::i18n::tr(language, "status_error_hint").to_string()
                     });
                 Self::notify_active_window(cx, NotificationType::Error, error);
+                let first_error = self
+                    .store
+                    .read(cx)
+                    .process()
+                    .processing_records
+                    .iter()
+                    .position(|record| record.status == crate::domain::ProcessStatus::Failed);
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Navigation(
+                        crate::application::store::NavigationAction::SetNarrowInputSheetOpen(false),
+                    ),
+                    cx,
+                );
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Navigation(
+                        crate::application::store::NavigationAction::SetExpandedActivityRecord(
+                            first_error,
+                        ),
+                    ),
+                    cx,
+                );
+                let _ = self.dispatch(
+                    crate::application::store::WorkspaceAction::Navigation(
+                        crate::application::store::NavigationAction::SetActivityFilter(
+                            crate::ui::state::ActivityFilter::Failed,
+                        ),
+                    ),
+                    cx,
+                );
                 (false, true)
             }
         }
@@ -423,7 +464,7 @@ impl Workspace {
         let view_result = result.clone();
         let _ = self.dispatch(
             crate::application::store::WorkspaceAction::Execution(
-                crate::application::store::ExecutionAction::SetResult(result),
+                crate::application::store::ExecutionAction::SetResult(result.into()),
             ),
             cx,
         );
@@ -483,6 +524,7 @@ impl Workspace {
             .to_ascii_lowercase();
         let filter_changed = self.tree_panel.last_filter != filter;
         if filter_changed || self.tree_panel.projection.roots.is_empty() {
+            perf::record_tree_filter_rebuild();
             self.tree_panel.projection = if self.tree_panel.input_exclusion_enabled {
                 let excluded_files = self.selection_snapshot(cx).excluded_folder_files;
                 model::build_tree_projection_with_exclusions(
@@ -552,7 +594,7 @@ impl Workspace {
         {
             self.preview_table_cache.model.clone().unwrap_or_else(|| {
                 model::build_preview_table_model(
-                    self.store.read(cx).result().result.as_ref(),
+                    self.store.read(cx).result().result.as_deref(),
                     filter.as_str(),
                     current_selected_id,
                     sort,
@@ -560,7 +602,7 @@ impl Workspace {
             })
         } else {
             let model = model::build_preview_table_model(
-                self.store.read(cx).result().result.as_ref(),
+                self.store.read(cx).result().result.as_deref(),
                 filter.as_str(),
                 current_selected_id,
                 sort,
@@ -635,7 +677,6 @@ impl Workspace {
         preserve_completed_status: bool,
         cx: &mut Context<Self>,
     ) {
-        self.refresh_selected_folder_gitignore_rules(cx);
         let settings = self.settings_snapshot(cx);
         let selection = self.selection_snapshot(cx);
         let effective_filters = self.effective_filters(cx);
