@@ -493,6 +493,21 @@ pub(in crate::ui::workspace) fn build_tree_plain_text_body(
     result: Option<&ProcessResult>,
     language: Language,
 ) -> TreePaneBodyViewModel {
+    let tree_string = result
+        .map(|result| result.tree_string.as_str())
+        .unwrap_or_default();
+    if !tree_string.is_empty() {
+        return TreePaneBodyViewModel::PlainText {
+            lines: tree_string
+                .split('\n')
+                .map(|line| {
+                    SharedString::from(line.trim_end_matches('\r').replace(' ', "\u{00A0}"))
+                })
+                .collect::<Vec<_>>()
+                .into(),
+        };
+    }
+
     if !render_state.rows.is_empty() {
         return TreePaneBodyViewModel::PlainText {
             lines: render_state
@@ -503,22 +518,10 @@ pub(in crate::ui::workspace) fn build_tree_plain_text_body(
                 .into(),
         };
     }
-    let tree_string = result
-        .map(|result| result.tree_string.as_str())
-        .unwrap_or_default();
-    if tree_string.is_empty() {
-        return TreePaneBodyViewModel::Empty {
-            title: SharedString::from(tr(language, "tree_empty")),
-            hint: SharedString::from(tr(language, "tree_empty_hint")),
-        };
-    }
 
-    TreePaneBodyViewModel::PlainText {
-        lines: tree_string
-            .split('\n')
-            .map(|line| SharedString::from(line.trim_end_matches('\r').replace(' ', "\u{00A0}")))
-            .collect::<Vec<_>>()
-            .into(),
+    TreePaneBodyViewModel::Empty {
+        title: SharedString::from(tr(language, "tree_empty")),
+        hint: SharedString::from(tr(language, "tree_empty_hint")),
     }
 }
 

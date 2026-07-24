@@ -513,14 +513,18 @@ fn tree_pane_view_model_uses_tree_body_when_rows_are_visible() {
 }
 
 #[test]
-fn tree_pane_view_model_uses_plain_text_lines_and_no_match_empty_state() {
+fn tree_pane_plain_text_prefers_the_tree_written_to_the_result_document() {
     let mut result = sample_result();
-    result.tree_string = "src/\n  lib.rs\r\n".to_string();
+    result.tree_string = "workspace/\n  ├── src/lib.rs\r\n".to_string();
+    let data = build_tree_panel_data(Some(&result)).expect("tree panel data");
+    let projection = build_tree_projection(Some(&data), "lib");
+    let render = build_tree_render_state(&projection, true, &data.index.default_expanded_ids, None);
+    assert!(!render.rows.is_empty());
 
     let vm = build_tree_pane_view_model(
-        &TreeRenderState::default(),
-        TreeCountSummary::default(),
-        "",
+        &render,
+        projection.total_summary,
+        "lib",
         Some(&result),
         None,
         Language::En,
@@ -535,8 +539,8 @@ fn tree_pane_view_model_uses_plain_text_lines_and_no_match_empty_state() {
     match &vm.body {
         TreePaneBodyViewModel::PlainText { lines } => {
             assert_eq!(lines.len(), 3);
-            assert_eq!(lines[0].as_ref(), "src/");
-            assert_eq!(lines[1].as_ref(), "\u{00A0}\u{00A0}lib.rs");
+            assert_eq!(lines[0].as_ref(), "workspace/");
+            assert_eq!(lines[1].as_ref(), "\u{00A0}\u{00A0}├──\u{00A0}src/lib.rs");
             assert_eq!(lines[2].as_ref(), "");
         }
         body => panic!("expected plain text body, got {body:?}"),
