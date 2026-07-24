@@ -22,9 +22,11 @@ use crate::domain::{
     ArchiveEntrySource, FileEntry, Language, PreflightStats, PreviewFileEntry, ProcessRecord,
     ProcessResult, ProcessStatus, TreeNode,
 };
-use crate::processor::stats::ProcessingStats;
+use crate::processor::stats::{FileStats, GroupStats, ProcessingBreakdown, ProcessingStats};
 use crate::services::preflight::PreflightEvent;
-use crate::ui::state::{DeferredPreviewState, ProcessState, ProcessUiStatus, TreePanelState};
+use crate::ui::state::{
+    DeferredPreviewState, ProcessState, ProcessUiStatus, StatisticsMetric, TreePanelState,
+};
 use crate::ui::view_model::ResultTab;
 use crate::utils::app_metadata;
 use crate::utils::i18n::tr;
@@ -430,7 +432,13 @@ fn status_panel_view_model_derives_metrics_progress_and_recent_activity() {
         ..ProcessingStats::default()
     };
 
-    let vm = build_status_panel_view_model(&process, Some(&result), Language::En, None);
+    let vm = build_status_panel_view_model(
+        &process,
+        Some(&result),
+        Language::En,
+        None,
+        StatisticsMetric::Chars,
+    );
 
     assert_eq!(vm.summary_metrics[0].value.as_ref(), "20");
     assert_eq!(vm.summary_metrics[1].value.as_ref(), "14");
@@ -465,7 +473,13 @@ fn status_panel_view_model_handles_missing_result_and_idle_progress() {
         ..ProcessState::default()
     };
 
-    let vm = build_status_panel_view_model(&process, None, Language::En, Some("1.2 MB".into()));
+    let vm = build_status_panel_view_model(
+        &process,
+        None,
+        Language::En,
+        Some("1.2 MB".into()),
+        StatisticsMetric::Chars,
+    );
 
     assert_eq!(vm.result_metrics[0].value.as_ref(), "--");
     assert_eq!(vm.result_metrics[1].value.as_ref(), "--");
@@ -478,6 +492,103 @@ fn status_panel_view_model_handles_missing_result_and_idle_progress() {
         vm.status_message.as_ref(),
         tr(Language::En, "status_idle_hint")
     );
+    assert!(vm.statistics.is_empty());
+}
+
+#[test]
+fn status_statistics_sort_selected_metric_and_aggregate_overflow_groups() {
+    let process = ProcessState::default();
+    let mut result = sample_archive_result();
+    *result.stats.breakdown = ProcessingBreakdown {
+        by_extension: (0..10)
+            .map(|index| GroupStats {
+                name: Some(format!(".ext{index}")),
+                file_count: index + 1,
+                total_chars: (index + 1) * 10,
+                total_tokens: index + 1,
+            })
+            .collect(),
+        by_folder: vec![
+            GroupStats {
+                name: None,
+                file_count: 1,
+                total_chars: 100,
+                total_tokens: 1,
+            },
+            GroupStats {
+                name: Some("src".into()),
+                file_count: 3,
+                total_chars: 50,
+                total_tokens: 20,
+            },
+        ],
+        largest_files: vec![FileStats {
+            path: "src/large.rs".into(),
+            chars: 100,
+            tokens: 20,
+        }],
+        smallest_files: vec![FileStats {
+            path: "README".into(),
+            chars: 1,
+            tokens: 1,
+        }],
+    };
+
+    let vm = build_status_panel_view_model(
+        &process,
+        Some(&result),
+        Language::En,
+        None,
+        StatisticsMetric::Tokens,
+    );
+
+    assert_eq!(vm.statistics.by_extension.rows.len(), 9);
+    assert_eq!(vm.statistics.by_extension.rows[0].label.as_ref(), ".ext9");
+    assert_eq!(vm.statistics.by_extension.rows[0].fill_ratio, 1.0);
+    let other = vm.statistics.by_extension.rows.last().expect("other row");
+    assert_eq!(other.label.as_ref(), tr(Language::En, "other"));
+    assert_eq!(other.file_count, 3);
+    assert_eq!(other.chars, 30);
+    assert_eq!(other.tokens, 3);
+    assert_eq!(vm.statistics.by_folder.rows[0].label.as_ref(), "src");
+    assert_eq!(vm.statistics.by_folder.rows[1].label.as_ref(), "Root");
+    assert_eq!(vm.statistics.largest_files[0].path.as_ref(), "src/large.rs");
+    assert_eq!(vm.statistics.smallest_files[0].path.as_ref(), "README");
+}
+
+#[test]
+fn status_statistics_localize_unnamed_extension_and_root_groups() {
+    let process = ProcessState::default();
+    let mut result = sample_archive_result();
+    *result.stats.breakdown = ProcessingBreakdown {
+        by_extension: vec![GroupStats {
+            name: None,
+            file_count: 1,
+            total_chars: 5,
+            total_tokens: 2,
+        }],
+        by_folder: vec![GroupStats {
+            name: None,
+            file_count: 1,
+            total_chars: 5,
+            total_tokens: 2,
+        }],
+        ..ProcessingBreakdown::default()
+    };
+
+    let vm = build_status_panel_view_model(
+        &process,
+        Some(&result),
+        Language::Zh,
+        None,
+        StatisticsMetric::FileCount,
+    );
+
+    assert_eq!(
+        vm.statistics.by_extension.rows[0].label.as_ref(),
+        "无扩展名"
+    );
+    assert_eq!(vm.statistics.by_folder.rows[0].label.as_ref(), "根目录");
 }
 
 #[test]

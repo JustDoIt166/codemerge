@@ -46,6 +46,21 @@ pub enum ActivityFilter {
     Skipped,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum StatusPanelTab {
+    #[default]
+    Overview,
+    Statistics,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum StatisticsMetric {
+    FileCount,
+    #[default]
+    Chars,
+    Tokens,
+}
+
 pub const DEFAULT_SELECTED_FILES_PANEL_HEIGHT: u16 = 180;
 pub const MIN_SELECTED_FILES_PANEL_HEIGHT: u16 = 120;
 pub const MAX_SELECTED_FILES_PANEL_HEIGHT: u16 = 560;
@@ -62,6 +77,8 @@ pub struct WorkspaceUiState {
     pub active_sheet: Option<WorkspaceSheet>,
     pub right_tab: WorkspaceRightTab,
     pub activity_filter: ActivityFilter,
+    pub status_panel_tab: StatusPanelTab,
+    pub statistics_metric: StatisticsMetric,
     pub narrow_input_sheet_open: bool,
     pub expanded_activity_record: Option<usize>,
     pub content_file_list_collapsed: bool,
@@ -74,6 +91,8 @@ impl Default for WorkspaceUiState {
             active_sheet: None,
             right_tab: WorkspaceRightTab::default(),
             activity_filter: ActivityFilter::default(),
+            status_panel_tab: StatusPanelTab::default(),
+            statistics_metric: StatisticsMetric::default(),
             narrow_input_sheet_open: false,
             expanded_activity_record: None,
             content_file_list_collapsed: false,

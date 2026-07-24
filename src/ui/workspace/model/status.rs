@@ -3,8 +3,9 @@ use std::collections::BTreeSet;
 use gpui::{Decorations, SharedString};
 
 use crate::domain::{Language, ProcessResult};
+use crate::processor::stats::{FileStats, GroupStats, ProcessingBreakdown};
 use crate::services::preflight::PreflightEvent;
-use crate::ui::state::{ProcessState, ProcessUiStatus};
+use crate::ui::state::{ProcessState, ProcessUiStatus, StatisticsMetric};
 use crate::utils::{app_metadata, i18n::tr};
 
 #[derive(Default, Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -66,6 +67,44 @@ pub(in crate::ui::workspace) struct StatusProgressViewModel {
 }
 
 #[derive(Clone, Debug)]
+pub(in crate::ui::workspace) struct StatusChartRowViewModel {
+    pub label: SharedString,
+    pub file_count: usize,
+    pub chars: usize,
+    pub tokens: usize,
+    pub fill_ratio: f32,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(in crate::ui::workspace) struct StatusChartViewModel {
+    pub rows: Vec<StatusChartRowViewModel>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(in crate::ui::workspace) struct StatusFileRankViewModel {
+    pub path: SharedString,
+    pub chars: usize,
+    pub tokens: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub(in crate::ui::workspace) struct StatusStatisticsViewModel {
+    pub by_extension: StatusChartViewModel,
+    pub by_folder: StatusChartViewModel,
+    pub largest_files: Vec<StatusFileRankViewModel>,
+    pub smallest_files: Vec<StatusFileRankViewModel>,
+}
+
+impl StatusStatisticsViewModel {
+    pub fn is_empty(&self) -> bool {
+        self.by_extension.rows.is_empty()
+            && self.by_folder.rows.is_empty()
+            && self.largest_files.is_empty()
+            && self.smallest_files.is_empty()
+    }
+}
+
+#[derive(Clone, Debug)]
 pub(in crate::ui::workspace) struct StatusPanelViewModel {
     pub summary_metrics: [StatusMetricViewModel; 3],
     pub result_metrics: [StatusMetricViewModel; 3],
@@ -74,6 +113,7 @@ pub(in crate::ui::workspace) struct StatusPanelViewModel {
     pub status_message: SharedString,
     pub archive_summary: Option<StatusInfoViewModel>,
     pub progress: StatusProgressViewModel,
+    pub statistics: StatusStatisticsViewModel,
 }
 
 pub(in crate::ui::workspace) fn resolve_window_chrome_mode(
@@ -136,6 +176,7 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
     result: Option<&ProcessResult>,
     language: Language,
     merged_file_size_hint: Option<String>,
+    statistics_metric: StatisticsMetric,
 ) -> StatusPanelViewModel {
     let archive_totals = summarize_archive_entries(result);
     let result_stats = result.map(|result| &result.stats);
@@ -206,7 +247,103 @@ pub(in crate::ui::workspace) fn build_status_panel_view_model(
             elapsed_value: SharedString::from(elapsed),
             current_file: SharedString::from(process.processing_current_file.clone()),
         },
+        statistics: build_status_statistics_view_model(
+            result.map(|result| result.stats.breakdown.as_ref()),
+            statistics_metric,
+            language,
+        ),
     }
+}
+
+fn build_status_statistics_view_model(
+    breakdown: Option<&ProcessingBreakdown>,
+    metric: StatisticsMetric,
+    language: Language,
+) -> StatusStatisticsViewModel {
+    let Some(breakdown) = breakdown else {
+        return StatusStatisticsViewModel::default();
+    };
+
+    StatusStatisticsViewModel {
+        by_extension: build_status_chart(&breakdown.by_extension, metric, language, "no_extension"),
+        by_folder: build_status_chart(&breakdown.by_folder, metric, language, "root_folder"),
+        largest_files: build_file_ranking(&breakdown.largest_files),
+        smallest_files: build_file_ranking(&breakdown.smallest_files),
+    }
+}
+
+fn build_status_chart(
+    groups: &[GroupStats],
+    metric: StatisticsMetric,
+    language: Language,
+    unnamed_key: &str,
+) -> StatusChartViewModel {
+    const GROUP_LIMIT: usize = 8;
+
+    let mut groups = groups.to_vec();
+    groups.sort_by(|left, right| {
+        group_metric_value(right, metric)
+            .cmp(&group_metric_value(left, metric))
+            .then_with(|| left.name.cmp(&right.name))
+    });
+
+    if groups.len() > GROUP_LIMIT {
+        let remainder = groups.split_off(GROUP_LIMIT);
+        groups.push(GroupStats {
+            name: Some(tr(language, "other").to_string()),
+            file_count: remainder.iter().map(|group| group.file_count).sum(),
+            total_chars: remainder.iter().map(|group| group.total_chars).sum(),
+            total_tokens: remainder.iter().map(|group| group.total_tokens).sum(),
+        });
+    }
+
+    let maximum = groups
+        .iter()
+        .map(|group| group_metric_value(group, metric))
+        .max()
+        .unwrap_or_default();
+    StatusChartViewModel {
+        rows: groups
+            .into_iter()
+            .map(|group| {
+                let value = group_metric_value(&group, metric);
+                StatusChartRowViewModel {
+                    label: SharedString::from(
+                        group
+                            .name
+                            .unwrap_or_else(|| tr(language, unnamed_key).to_string()),
+                    ),
+                    file_count: group.file_count,
+                    chars: group.total_chars,
+                    tokens: group.total_tokens,
+                    fill_ratio: if maximum == 0 {
+                        0.0
+                    } else {
+                        value as f32 / maximum as f32
+                    },
+                }
+            })
+            .collect(),
+    }
+}
+
+fn group_metric_value(group: &GroupStats, metric: StatisticsMetric) -> usize {
+    match metric {
+        StatisticsMetric::FileCount => group.file_count,
+        StatisticsMetric::Chars => group.total_chars,
+        StatisticsMetric::Tokens => group.total_tokens,
+    }
+}
+
+fn build_file_ranking(files: &[FileStats]) -> Vec<StatusFileRankViewModel> {
+    files
+        .iter()
+        .map(|file| StatusFileRankViewModel {
+            path: SharedString::from(file.path.clone()),
+            chars: file.chars,
+            tokens: file.tokens,
+        })
+        .collect()
 }
 
 pub(in crate::ui::workspace) fn resolve_window_zoom_action(

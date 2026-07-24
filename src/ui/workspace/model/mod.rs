@@ -16,9 +16,10 @@ pub(super) use self::content_preview::{
     preview_file_node_id, sort_preview_rows,
 };
 pub(super) use self::status::{
-    StatusMetricViewModel, StatusPanelViewModel, StatusProgressViewModel, WindowChromeMode,
-    WindowZoomAction, WorkspaceChromeViewModel, build_status_panel_view_model,
-    build_workspace_chrome_view_model, resolve_window_chrome_mode, resolve_window_zoom_action,
+    StatusChartViewModel, StatusFileRankViewModel, StatusMetricViewModel, StatusPanelViewModel,
+    StatusProgressViewModel, StatusStatisticsViewModel, WindowChromeMode, WindowZoomAction,
+    WorkspaceChromeViewModel, build_status_panel_view_model, build_workspace_chrome_view_model,
+    resolve_window_chrome_mode, resolve_window_zoom_action,
 };
 pub(super) use self::tree::{
     FilterMatchKind, TreeCountSummary, TreeIconKind, TreeInteractionSnapshot,

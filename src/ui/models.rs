@@ -234,6 +234,18 @@ impl WorkspaceUiModel {
         changed
     }
 
+    pub fn set_status_panel_tab(&mut self, tab: crate::ui::state::StatusPanelTab) -> bool {
+        let changed = self.state.status_panel_tab != tab;
+        self.state.status_panel_tab = tab;
+        changed
+    }
+
+    pub fn set_statistics_metric(&mut self, metric: crate::ui::state::StatisticsMetric) -> bool {
+        let changed = self.state.statistics_metric != metric;
+        self.state.statistics_metric = metric;
+        changed
+    }
+
     pub fn set_narrow_input_sheet_open(&mut self, open: bool) -> bool {
         let changed = self.state.narrow_input_sheet_open != open;
         self.state.narrow_input_sheet_open = open;

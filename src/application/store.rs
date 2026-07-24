@@ -18,8 +18,9 @@ use crate::ui::preview_model::{PreviewEventEffect, PreviewModel, PreviewScrollDi
 use crate::ui::result_model::{ResultModel, ResultState};
 use crate::ui::selection_model::SelectionModel;
 use crate::ui::state::{
-    ActivityFilter, PreviewPanelState, ProcessState, SelectionState, SettingsState, TreePanelState,
-    WorkspaceRightTab, WorkspaceSheet, WorkspaceUiState,
+    ActivityFilter, PreviewPanelState, ProcessState, SelectionState, SettingsState,
+    StatisticsMetric, StatusPanelTab, TreePanelState, WorkspaceRightTab, WorkspaceSheet,
+    WorkspaceUiState,
 };
 use crate::ui::view_model::ResultTab;
 
@@ -322,6 +323,8 @@ pub enum NavigationAction {
     SetActiveSheet(Option<WorkspaceSheet>),
     SetRightTab(WorkspaceRightTab),
     SetActivityFilter(ActivityFilter),
+    SetStatusPanelTab(StatusPanelTab),
+    SetStatisticsMetric(StatisticsMetric),
     SetNarrowInputSheetOpen(bool),
     SetExpandedActivityRecord(Option<usize>),
     SetContentFileListCollapsed(bool),
@@ -476,6 +479,9 @@ impl WorkspaceStore {
             WorkspaceAction::Navigation(action) => self.reduce_navigation(action),
             WorkspaceAction::PrepareProcess => {
                 let _ = self.navigation.set_active_sheet(None);
+                let _ = self
+                    .navigation
+                    .set_status_panel_tab(StatusPanelTab::Overview);
                 Transition::changed(ChangeSet::NAVIGATION)
             }
             WorkspaceAction::ClearInputs { ready_label } => {
@@ -1097,6 +1103,14 @@ impl WorkspaceStore {
                 self.navigation.set_activity_filter(value),
                 ChangeSet::NAVIGATION,
             ),
+            NavigationAction::SetStatusPanelTab(value) => (
+                self.navigation.set_status_panel_tab(value),
+                ChangeSet::NAVIGATION,
+            ),
+            NavigationAction::SetStatisticsMetric(value) => (
+                self.navigation.set_statistics_metric(value),
+                ChangeSet::NAVIGATION,
+            ),
             NavigationAction::SetNarrowInputSheetOpen(value) => (
                 self.navigation.set_narrow_input_sheet_open(value),
                 ChangeSet::NAVIGATION,
@@ -1218,7 +1232,7 @@ mod tests {
     use crate::domain::{AppConfigV1, ProcessResult};
     use crate::processor::stats::ProcessingStats;
     use crate::services::process::ProcessEvent;
-    use crate::ui::state::WorkspaceSheet;
+    use crate::ui::state::{StatisticsMetric, StatusPanelTab, WorkspaceSheet};
 
     #[test]
     fn output_metadata_actions_update_persisted_config() {
@@ -1252,6 +1266,48 @@ mod tests {
             NavigationAction::SetActiveSheet(Some(WorkspaceSheet::Rules)),
         ));
         assert!(transition.changes.intersects(ChangeSet::NAVIGATION));
+    }
+
+    #[test]
+    fn status_statistics_navigation_is_transient_and_new_run_returns_to_overview() {
+        let mut store = WorkspaceStore::new(AppConfigV1::default(), "ready".into());
+
+        let tab_transition = store.dispatch(WorkspaceAction::Navigation(
+            NavigationAction::SetStatusPanelTab(StatusPanelTab::Statistics),
+        ));
+        let metric_transition = store.dispatch(WorkspaceAction::Navigation(
+            NavigationAction::SetStatisticsMetric(StatisticsMetric::Tokens),
+        ));
+
+        assert!(tab_transition.changes.intersects(ChangeSet::NAVIGATION));
+        assert!(metric_transition.changes.intersects(ChangeSet::NAVIGATION));
+        assert_eq!(
+            store.navigation().status_panel_tab,
+            StatusPanelTab::Statistics
+        );
+        assert_eq!(
+            store.navigation().statistics_metric,
+            StatisticsMetric::Tokens
+        );
+
+        let _ = store.dispatch(WorkspaceAction::PrepareProcess);
+
+        assert_eq!(
+            store.navigation().status_panel_tab,
+            StatusPanelTab::Overview
+        );
+        assert_eq!(
+            store.navigation().statistics_metric,
+            StatisticsMetric::Tokens
+        );
+        assert!(
+            store
+                .dispatch(WorkspaceAction::Navigation(
+                    NavigationAction::SetStatusPanelTab(StatusPanelTab::Overview),
+                ))
+                .changes
+                .is_empty()
+        );
     }
 
     #[test]

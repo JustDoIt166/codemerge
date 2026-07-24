@@ -32,7 +32,7 @@ use super::{PreviewPaneView, TreePaneView, TreeViewMode, Workspace, preview_line
 use crate::domain::{OutputFormat, TemporaryWhitelistMode};
 use crate::ui::perf;
 use crate::ui::preview_model::PreviewScrollDirection;
-use crate::ui::state::{ProcessUiStatus, WorkspaceRightTab};
+use crate::ui::state::{ProcessUiStatus, StatisticsMetric, StatusPanelTab, WorkspaceRightTab};
 use crate::utils::i18n::tr;
 
 #[derive(Clone)]
@@ -912,6 +912,7 @@ impl Workspace {
             result_state.result.as_deref(),
             self.language(cx),
             merged_file_size_hint,
+            store.navigation().statistics_metric,
         )
     }
 
@@ -981,8 +982,232 @@ impl Workspace {
             .into_any_element()
     }
 
+    fn render_status_chart(
+        &self,
+        chart: &super::model::StatusChartViewModel,
+        language: crate::domain::Language,
+        cx: &App,
+    ) -> AnyElement {
+        v_flex()
+            .gap_2()
+            .children(chart.rows.iter().map(|row| {
+                v_flex()
+                    .gap_1()
+                    .child(
+                        div()
+                            .w_full()
+                            .text_sm()
+                            .font_semibold()
+                            .truncate()
+                            .child(row.label.clone()),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .text_xs()
+                            .truncate()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!(
+                                "{} {} · {} {} · {} {}",
+                                row.file_count,
+                                tr(language, "files_unit"),
+                                row.chars,
+                                tr(language, "chars"),
+                                row.tokens,
+                                tr(language, "tokens")
+                            )),
+                    )
+                    .child(
+                        div()
+                            .w_full()
+                            .h(px(7.))
+                            .rounded(px(999.))
+                            .bg(cx.theme().secondary)
+                            .child(
+                                div()
+                                    .h_full()
+                                    .w(relative(row.fill_ratio))
+                                    .rounded(px(999.))
+                                    .bg(cx.theme().primary),
+                            ),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    fn render_status_file_ranking(
+        &self,
+        files: &[super::model::StatusFileRankViewModel],
+        language: crate::domain::Language,
+        cx: &App,
+    ) -> AnyElement {
+        v_flex()
+            .gap_1()
+            .children(files.iter().enumerate().map(|(index, file)| {
+                h_flex()
+                    .gap_2()
+                    .p_2()
+                    .rounded(super::design_tokens::RADIUS_CONTROL)
+                    .bg(cx.theme().secondary.opacity(0.35))
+                    .child(
+                        div()
+                            .flex_none()
+                            .w(px(22.))
+                            .text_xs()
+                            .font_semibold()
+                            .text_color(cx.theme().muted_foreground)
+                            .child(format!("{}.", index + 1)),
+                    )
+                    .child(
+                        v_flex()
+                            .flex_1()
+                            .min_w(px(0.))
+                            .gap_1()
+                            .child(div().text_sm().truncate().child(file.path.clone()))
+                            .child(
+                                div()
+                                    .text_xs()
+                                    .text_color(cx.theme().muted_foreground)
+                                    .child(format!(
+                                        "{} {} · {} {}",
+                                        file.chars,
+                                        tr(language, "chars"),
+                                        file.tokens,
+                                        tr(language, "tokens")
+                                    )),
+                            ),
+                    )
+            }))
+            .into_any_element()
+    }
+
+    fn render_status_statistics(
+        &self,
+        statistics: &super::model::StatusStatisticsViewModel,
+        language: crate::domain::Language,
+        metric: StatisticsMetric,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        if statistics.is_empty() {
+            return empty_box(
+                tr(language, "statistics_empty"),
+                tr(language, "statistics_empty_hint"),
+                IconName::ChartPie,
+                cx,
+            )
+            .into_any_element();
+        }
+
+        div()
+            .id("statistics-panel-content")
+            .debug_selector(|| "statistics-panel-content".to_string())
+            .size_full()
+            .min_h(px(0.))
+            .overflow_x_hidden()
+            .overflow_y_scrollbar()
+            .child(
+                v_flex()
+                    .gap_4()
+                    .pr_1()
+                    .child(
+                        TabBar::new("statistics-metric-tabs")
+                            .selected_index(match metric {
+                                StatisticsMetric::FileCount => 0,
+                                StatisticsMetric::Chars => 1,
+                                StatisticsMetric::Tokens => 2,
+                            })
+                            .on_click(cx.listener(Self::set_statistics_metric))
+                            .child(Tab::new().label(tr(language, "files_count")))
+                            .child(Tab::new().label(tr(language, "chars")))
+                            .child(Tab::new().label(tr(language, "tokens"))),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(section_caption(
+                                tr(language, "statistics_by_extension"),
+                                IconName::ChartPie,
+                                cx,
+                            ))
+                            .child(self.render_status_chart(
+                                &statistics.by_extension,
+                                language,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(section_caption(
+                                tr(language, "statistics_by_folder"),
+                                IconName::Folder,
+                                cx,
+                            ))
+                            .child(self.render_status_chart(&statistics.by_folder, language, cx)),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(section_caption(
+                                tr(language, "largest_files"),
+                                IconName::ArrowUp,
+                                cx,
+                            ))
+                            .child(self.render_status_file_ranking(
+                                &statistics.largest_files,
+                                language,
+                                cx,
+                            )),
+                    )
+                    .child(
+                        v_flex()
+                            .gap_2()
+                            .child(section_caption(
+                                tr(language, "smallest_files"),
+                                IconName::ArrowDown,
+                                cx,
+                            ))
+                            .child(self.render_status_file_ranking(
+                                &statistics.smallest_files,
+                                language,
+                                cx,
+                            )),
+                    ),
+            )
+            .into_any_element()
+    }
+
+    fn set_status_panel_tab(&mut self, index: &usize, _: &mut Window, cx: &mut Context<Self>) {
+        let tab = if *index == 1 {
+            StatusPanelTab::Statistics
+        } else {
+            StatusPanelTab::Overview
+        };
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetStatusPanelTab(tab),
+            ),
+            cx,
+        );
+    }
+
+    fn set_statistics_metric(&mut self, index: &usize, _: &mut Window, cx: &mut Context<Self>) {
+        let metric = match index {
+            0 => StatisticsMetric::FileCount,
+            2 => StatisticsMetric::Tokens,
+            _ => StatisticsMetric::Chars,
+        };
+        let _ = self.dispatch(
+            crate::application::store::WorkspaceAction::Navigation(
+                crate::application::store::NavigationAction::SetStatisticsMetric(metric),
+            ),
+            cx,
+        );
+    }
+
     fn render_status_panel_body(&mut self, cx: &mut Context<Self>) -> impl IntoElement {
         let language = self.language(cx);
+        let ui_state = self.ui_state(cx);
         let process_actions = self.render_process_actions(cx).into_any_element();
         let vm = self.build_status_panel_view_model(cx);
 
@@ -1044,37 +1269,79 @@ impl Workspace {
             content
         };
 
-        let content = if let Some(archive_summary) = vm.archive_summary.as_ref() {
-            content.child(render_info_block(
-                archive_summary.label.as_ref(),
-                archive_summary.value.to_string(),
-                true,
-                IconName::File,
-                cx,
-            ))
+        let overview = if let Some(archive_summary) = vm.archive_summary.as_ref() {
+            v_flex()
+                .gap_3()
+                .size_full()
+                .min_h(px(0.))
+                .child(render_info_block(
+                    archive_summary.label.as_ref(),
+                    archive_summary.value.to_string(),
+                    true,
+                    IconName::File,
+                    cx,
+                ))
         } else {
-            content
+            v_flex().gap_3().size_full().min_h(px(0.))
         };
 
         content
-            .child(self.render_status_progress_section(language, &vm.progress, cx))
             .child(
-                v_flex()
-                    .gap_2()
-                    .flex_1()
-                    .min_h(px(0.))
-                    .child(section_caption(
-                        tr(language, "recent_activity"),
-                        IconName::SquareTerminal,
-                        cx,
-                    ))
+                TabBar::new("status-panel-tabs")
+                    .selected_index(match ui_state.status_panel_tab {
+                        StatusPanelTab::Overview => 0,
+                        StatusPanelTab::Statistics => 1,
+                    })
+                    .on_click(cx.listener(Self::set_status_panel_tab))
                     .child(
-                        div()
-                            .flex_1()
-                            .min_h(px(0.))
-                            .overflow_hidden()
-                            .child(self.activity_panel_view.clone()),
+                        Tab::new().child(
+                            div()
+                                .id("status-overview-tab-target")
+                                .debug_selector(|| "status-overview-tab-target".to_string())
+                                .child(tr(language, "status_overview")),
+                        ),
+                    )
+                    .child(
+                        Tab::new().child(
+                            div()
+                                .id("status-statistics-tab-target")
+                                .debug_selector(|| "status-statistics-tab-target".to_string())
+                                .child(tr(language, "statistics")),
+                        ),
                     ),
+            )
+            .child(
+                div().flex_1().min_h(px(0.)).overflow_hidden().child(
+                    match ui_state.status_panel_tab {
+                        StatusPanelTab::Overview => overview
+                            .child(self.render_status_progress_section(language, &vm.progress, cx))
+                            .child(
+                                v_flex()
+                                    .gap_2()
+                                    .flex_1()
+                                    .min_h(px(0.))
+                                    .child(section_caption(
+                                        tr(language, "recent_activity"),
+                                        IconName::SquareTerminal,
+                                        cx,
+                                    ))
+                                    .child(
+                                        div()
+                                            .flex_1()
+                                            .min_h(px(0.))
+                                            .overflow_hidden()
+                                            .child(self.activity_panel_view.clone()),
+                                    ),
+                            )
+                            .into_any_element(),
+                        StatusPanelTab::Statistics => self.render_status_statistics(
+                            &vm.statistics,
+                            language,
+                            ui_state.statistics_metric,
+                            cx,
+                        ),
+                    },
+                ),
             )
     }
 

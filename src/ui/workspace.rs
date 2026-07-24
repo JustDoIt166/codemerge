@@ -62,7 +62,8 @@ const INPUT_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_SELECTION
 const STATUS_DEPENDENCIES: ChangeSet = ChangeSet::EXECUTION
     .union(ChangeSet::EXECUTION_RESULT)
     .union(ChangeSet::DRAFT_SELECTION)
-    .union(ChangeSet::DRAFT_SETTINGS);
+    .union(ChangeSet::DRAFT_SETTINGS)
+    .union(ChangeSet::NAVIGATION);
 const RULES_DEPENDENCIES: ChangeSet = ChangeSet::DRAFT_RULES
     .union(ChangeSet::DRAFT_SETTINGS)
     .union(ChangeSet::NAVIGATION);
@@ -2709,6 +2710,16 @@ mod tests {
             let result = store.result().result.as_ref().expect("merged result");
             assert_eq!(result.stats.processed_files, 2);
             assert!(result.merged_content_bytes > 0);
+            assert_eq!(result.stats.breakdown.by_extension.len(), 1);
+            assert_eq!(
+                result.stats.breakdown.by_extension[0].name.as_deref(),
+                Some(".rs")
+            );
+            assert_eq!(result.stats.breakdown.by_extension[0].file_count, 2);
+            assert_eq!(result.stats.breakdown.by_folder.len(), 1);
+            assert!(result.stats.breakdown.by_folder[0].name.is_none());
+            assert_eq!(result.stats.breakdown.largest_files.len(), 2);
+            assert_eq!(result.stats.breakdown.smallest_files.len(), 2);
             assert!(store.selection().temp_folder_blacklist.is_empty());
             assert!(!store.draft_locked());
             (
@@ -2726,6 +2737,18 @@ mod tests {
         assert!(cx.debug_bounds("start-process-action").is_some());
         assert!(cx.debug_bounds("results-panel-content").is_some());
         assert!(cx.debug_bounds("right-workspace-tabs").is_some());
+
+        let statistics_tab = cx
+            .debug_bounds("status-statistics-tab-target")
+            .expect("statistics tab bounds");
+        cx.simulate_click(statistics_tab.center(), gpui::Modifiers::default());
+        cx.run_until_parked();
+        cx.update(|window, app| window.draw(app).clear());
+        assert_eq!(
+            workspace.update(cx, |workspace, cx| workspace.ui_state(cx).status_panel_tab),
+            crate::ui::state::StatusPanelTab::Statistics
+        );
+        assert!(cx.debug_bounds("statistics-panel-content").is_some());
 
         workspace.update(cx, |workspace, cx| {
             let _ = workspace.dispatch(

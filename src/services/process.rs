@@ -16,7 +16,7 @@ use crate::processor::merger::{
     render_suffix_with_metadata,
 };
 use crate::processor::reader::{compress_by_extension, count_chars_tokens, read_text_blocking};
-use crate::processor::stats::ProcessingStats;
+use crate::processor::stats::{ProcessingStats, build_processing_breakdown};
 use crate::processor::walker::{
     CandidateFile, WalkerFilterRules, WalkerOptions, WalkerOutput,
     collect_candidates_with_progress_and_cancel,
@@ -332,6 +332,11 @@ async fn run_process_with_walker(
     };
 
     let process_dir = process_dir.into_persisted_path();
+    *stats.breakdown = build_processing_breakdown(
+        file_details
+            .iter()
+            .map(|detail| (detail.path.as_str(), detail.chars, detail.tokens)),
+    );
 
     Ok(ProcessResult {
         stats,
@@ -637,6 +642,21 @@ mod tests {
 
         assert_eq!(result.file_details.len(), 1);
         assert_eq!(result.file_details[0].path, "src/lib.rs");
+        assert_eq!(result.stats.breakdown.by_extension.len(), 1);
+        assert_eq!(
+            result.stats.breakdown.by_extension[0].name.as_deref(),
+            Some(".rs")
+        );
+        assert_eq!(result.stats.breakdown.by_extension[0].file_count, 1);
+        assert_eq!(result.stats.breakdown.by_folder.len(), 1);
+        assert_eq!(
+            result.stats.breakdown.by_folder[0].name.as_deref(),
+            Some("src")
+        );
+        assert_eq!(
+            result.stats.breakdown.largest_files,
+            result.stats.breakdown.smallest_files
+        );
         let merged_path = result.merged_content_path.expect("merged path");
         let merged = fs::read_to_string(merged_path).expect("read merged");
         assert!(merged.contains("文件路径: src/lib.rs"));
